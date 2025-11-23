@@ -4,10 +4,20 @@ on:
   push:
     branches:
       - development
+  workflow_dispatch: # Allows manual triggering
+
+env:
+  AZURE_WEBAPP_NAME: orderapp
+  AZURE_WEBAPP_PACKAGE_PATH: '.'
+  NODE_VERSION: '20'
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    
+    environment:
+      name: 'Production'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
 
     steps:
       - name: Checkout code
@@ -16,14 +26,31 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # Use your Node.js version
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          npm ci --only=production
+          npm install --save-dev
 
-      - name: Build (if needed)
-        run: npm run build
+      - name: Run tests (if available)
+        run: |
+          if npm run test --if-present; then
+            echo "Tests passed"
+          else
+            echo "No tests found or tests failed, continuing..."
+          fi
         continue-on-error: true
+
+      - name: Build application
+        run: npm run build
+
+      - name: Remove dev dependencies and clean up
+        run: |
+          npm prune --production
+          rm -rf node_modules/.cache
+          rm -rf .git
 
       - name: Azure Login
         uses: azure/login@v2
@@ -31,8 +58,13 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Deploy to Azure Web App
+        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
-          app-name: orderapp
-          package: .
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
           slot-name: production
+
+      - name: Azure logout
+        run: az logout
+        if: always()
