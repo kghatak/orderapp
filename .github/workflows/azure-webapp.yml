@@ -1,0 +1,33 @@
+name: Build and deploy Node.js app to Azure Web App
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Use your Node.js version
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build (if needed)
+        run: npm run build
+        continue-on-error: true
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: bigmandev03
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
