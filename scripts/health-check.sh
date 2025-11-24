@@ -48,16 +48,16 @@ fi
 echo -e "${BLUE}3. Testing multiple API endpoints...${NC}"
 
 declare -A endpoints=(
-    ["/"]="Root endpoint"
-    ["/order"]="Order listing"
-    ["/product"]="Product listing" 
-    ["/outlet"]="Outlet listing"
-    ["/user"]="User listing"
-    ["/school"]="School listing"
+    ["root"]="Root endpoint|/"
+    ["order"]="Order listing|/order"
+    ["product"]="Product listing|/product" 
+    ["outlet"]="Outlet listing|/outlet"
+    ["user"]="User listing|/user"
+    ["school"]="School listing|/school"
 )
 
-for endpoint in "${!endpoints[@]}"; do
-    description="${endpoints[$endpoint]}"
+for key in "${!endpoints[@]}"; do
+    IFS='|' read -r description endpoint <<< "${endpoints[$key]}"
     full_url="$APP_URL$endpoint"
     
     echo -n "   Testing $description... "
