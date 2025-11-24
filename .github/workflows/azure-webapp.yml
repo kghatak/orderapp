@@ -65,6 +65,143 @@ jobs:
           package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
           slot-name: production
 
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "Waiting for application to start up..."
+          sleep 30
+
+      - name: Health Check - Basic connectivity
+        run: |
+          echo "🔍 Testing basic connectivity to the deployed application..."
+          APP_URL="https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net"
+          
+          # Test basic connectivity with retry logic
+          for i in {1..5}; do
+            echo "Attempt $i: Testing connectivity to $APP_URL"
+            if curl -f -s --connect-timeout 10 --max-time 30 "$APP_URL" > /dev/null; then
+              echo "✅ Basic connectivity successful"
+              break
+            else
+              echo "❌ Attempt $i failed, retrying in 10 seconds..."
+              sleep 10
+              if [ $i -eq 5 ]; then
+                echo "❌ Basic connectivity failed after 5 attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: API Health Check - Order endpoint
+        run: |
+          echo "🔍 Testing specific order API endpoint..."
+          APP_URL="https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net"
+          ORDER_ENDPOINT="/order/ORD-00000887"
+          FULL_URL="$APP_URL$ORDER_ENDPOINT"
+          
+          # Test the specific order endpoint
+          echo "Testing: $FULL_URL"
+          
+          RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" --connect-timeout 10 --max-time 30 "$FULL_URL")
+          BODY=$(echo $RESPONSE | sed -E 's/HTTPSTATUS\:[0-9]{3}$//')
+          HTTP_CODE=$(echo $RESPONSE | tr -d '\n' | sed -E 's/.*HTTPSTATUS:([0-9]{3})$/\1/')
+          
+          echo "HTTP Status Code: $HTTP_CODE"
+          echo "Response Body: $BODY"
+          
+          # Check if the response is successful (2xx status codes)
+          if [[ "$HTTP_CODE" -ge 200 && "$HTTP_CODE" -lt 300 ]]; then
+            echo "✅ Order API endpoint is responding successfully"
+            
+            # Additional validation - check if response contains expected data
+            if echo "$BODY" | grep -q "ORD-00000887"; then
+              echo "✅ Response contains expected order ID"
+            else
+              echo "⚠️  Warning: Response doesn't contain expected order ID, but HTTP status is OK"
+            fi
+          elif [[ "$HTTP_CODE" -eq 404 ]]; then
+            echo "⚠️  Order not found (404) - This might be expected if the order doesn't exist"
+            echo "✅ API is responding correctly with 404 for non-existent order"
+          else
+            echo "❌ Order API endpoint returned unexpected status: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
+
+      - name: API Health Check - Test multiple endpoints
+        run: |
+          echo "🔍 Testing multiple API endpoints for comprehensive health check..."
+          APP_URL="https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net"
+          
+          # Define endpoints to test
+          declare -A endpoints=(
+            ["/"]="Root endpoint"
+            ["/order"]="Order listing endpoint"
+            ["/product"]="Product listing endpoint"
+            ["/outlet"]="Outlet listing endpoint"
+          )
+          
+          failed_endpoints=0
+          
+          for endpoint in "${!endpoints[@]}"; do
+            description="${endpoints[$endpoint]}"
+            full_url="$APP_URL$endpoint"
+            
+            echo "Testing $description: $full_url"
+            
+            response=$(curl -s -w "HTTPSTATUS:%{http_code}" --connect-timeout 10 --max-time 30 "$full_url")
+            http_code=$(echo $response | tr -d '\n' | sed -E 's/.*HTTPSTATUS:([0-9]{3})$/\1/')
+            
+            if [[ "$http_code" -ge 200 && "$http_code" -lt 400 ]]; then
+              echo "✅ $description: OK ($http_code)"
+            else
+              echo "❌ $description: Failed ($http_code)"
+              ((failed_endpoints++))
+            fi
+          done
+          
+          if [ $failed_endpoints -eq 0 ]; then
+            echo "✅ All API endpoints are healthy"
+          else
+            echo "⚠️  $failed_endpoints endpoint(s) failed, but deployment may still be functional"
+            # Don't fail the build for endpoint failures - they might not all be implemented
+          fi
+
+      - name: Performance Check
+        run: |
+          echo "🔍 Testing application performance..."
+          APP_URL="https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net"
+          
+          # Measure response time
+          start_time=$(date +%s%N)
+          curl -s --connect-timeout 10 --max-time 30 "$APP_URL" > /dev/null
+          end_time=$(date +%s%N)
+          
+          response_time_ms=$(( (end_time - start_time) / 1000000 ))
+          
+          echo "Response time: ${response_time_ms}ms"
+          
+          if [ $response_time_ms -lt 5000 ]; then
+            echo "✅ Response time is good (< 5 seconds)"
+          elif [ $response_time_ms -lt 10000 ]; then
+            echo "⚠️  Response time is acceptable (< 10 seconds)"
+          else
+            echo "❌ Response time is slow (> 10 seconds)"
+          fi
+
+      - name: Deployment Summary
+        run: |
+          echo "📋 Deployment Summary"
+          echo "===================="
+          echo "✅ Application deployed successfully"
+          echo "✅ Health checks completed"
+          echo "🌐 Application URL: https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net"
+          echo "📊 Azure Portal: https://portal.azure.com/#@/resource/subscriptions/1aef6805-f5ca-4b31-8d14-19f5662bf15e/resourceGroups/orderapp-rg/providers/Microsoft.Web/sites/orderapp"
+          echo ""
+          echo "🧪 Manual Test Commands:"
+          echo "curl -X GET 'https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net/order/ORD-00000887'"
+          echo "curl -X GET 'https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net/order'"
+          echo "curl -X GET 'https://orderapp-hbhtdqbkaxeqebcj.eastasia-01.azurewebsites.net/product'"
+
       - name: Azure logout
         run: az logout
         if: always()

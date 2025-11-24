@@ -20,6 +20,10 @@ serviceAccountKey.json
 .env.test.local
 .env.production.local
 
+# Temporary credential files
+azure-credentials-temp.txt
+*-credentials*.txt
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
