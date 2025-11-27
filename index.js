@@ -3,28 +3,12 @@ import mongoose from 'mongoose';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { tenantMiddleware } from './util/tenantMiddleware.js';
 import { initQueueProcessor } from './pushnotifications/notificationqueueprovider.js'; 
 
 // Load environment variables
 dotenv.config();
 
 // Route Imports
-import { schoolRoutes, schoolNameRoutes, examCentersRoutes } from './routes/school.js';
-import userRoutes from './routes/user.js';
-import examRoutes from './routes/exam.js';
-import { studentRoutes, studentBySchoolRoutes } from './routes/student.js';
-import meritRoutes from './routes/merit.js';
-import { zoneRoutes, geoCodeRoutes } from './routes/zone.js';
-import {
-  resultRoutes,
-  resultRoutesJR,
-  resultRoutesMID,
-  resultRoutesSR,
-  examCenterExamCodeRoutes,
-  resultbyExamCenterRoutes
-} from './routes/result.js';
-import dashboardRoutes from './routes/dashboard.js';
 import { orderRoutes } from './routes/orderRoute.js';
 import { outletRoutes } from './routes/outletRoute.js';
 import productRoutes from './routes/productRoutes.js';
@@ -39,32 +23,32 @@ import chatRoutes from './routes/chatRoutes.js';
 import customInvoiceRoutes from './routes/customInvoiceRoutes.js';
 
 // --- Gemini Setup ---
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
+//import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 
 // Constants (replace these with your actual keys/URLs)
-const PORT = process.env.PORT || 5010;
+const PORT = process.env.PORT || 5020;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://creative:universe@cluster0.iv8mrbr.mongodb.net/cudev';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+//const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-if (!GEMINI_API_KEY) {
-  console.error("❌ GEMINI_API_KEY not provided.");
-  process.exit(1);
-}
+// if (!GEMINI_API_KEY) {
+//   console.error("❌ GEMINI_API_KEY not provided.");
+//   process.exit(1);
+// }
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-  model: "gemini-1.5-flash-latest",
-  safetySettings: [
-    {
-      category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-      threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    },
-    {
-      category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-      threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    },
-  ],
-});
+// const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+// const model = genAI.getGenerativeModel({
+//   model: "gemini-1.5-flash-latest",
+//   safetySettings: [
+//     {
+//       category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+//       threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+//     },
+//     {
+//       category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+//       threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+//     },
+//   ],
+// });
 
 const app = express();
 
@@ -75,9 +59,6 @@ app.use(bodyParser.urlencoded({ limit: '30mb', extended: true }));
 
 initQueueProcessor();
 
-// Tenant middleware to extract tenant ID from headers
-app.use(tenantMiddleware);
-
 
 // Mongo strict mode
 mongoose.set('strictQuery', true);
@@ -86,24 +67,6 @@ mongoose.set('strictQuery', true);
 await initializeFirestore();
 
 // Route bindings
-app.use('/school(s)?', schoolRoutes);
-app.use('/schoolNames', schoolNameRoutes);
-app.use('/student(s)?', studentRoutes);
-app.use('/studentBySchool(s)?', studentBySchoolRoutes);
-app.use('/user(s)?', userRoutes);
-app.use('/exam(s)?', examRoutes);
-app.use('/examCenters', examCentersRoutes);
-app.use('/registration(s)?', resultRoutes);
-app.use('/merit(s)?', meritRoutes);
-app.use('/result(s)?', resultRoutes);
-app.use('/resultjr(s)?', resultRoutesJR);
-app.use('/resultmid(s)?', resultRoutesMID);
-app.use('/resultsr(s)?', resultRoutesSR);
-app.use('/zone(s)?', zoneRoutes);
-app.use('/zoneName', geoCodeRoutes);
-app.use('/examCenterExamCode', examCenterExamCodeRoutes);
-app.use('/registrationBySchool', resultbyExamCenterRoutes);
-app.use('/dashboard', dashboardRoutes);
 app.use('/order(s)?', orderRoutes);
 app.use('/outlet(s)?', outletRoutes);
 app.use('/product(s)?', productRoutes);
