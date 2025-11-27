@@ -371,6 +371,159 @@ export const searchOutlets = async (req, res) => {
   }
 };
 
+// Clear all data for a specific outlet (Orders, Returns, Payments)
+export const clearOutletData = async (req, res) => {
+  try {
+    const { id: outletId } = req.params;
+    const { confirm } = req.body; // Require explicit confirmation
+
+    if (!outletId) {
+      return res.status(400).json({ error: 'Outlet ID is required' });
+    }
+
+    // Require explicit confirmation to prevent accidental deletions
+    if (confirm !== true && confirm !== 'true') {
+      return res.status(400).json({ 
+        error: 'This is a destructive operation. Please set "confirm": true in the request body to proceed.' 
+      });
+    }
+
+    const db = getFirestoreDB();
+
+    // Verify outlet exists
+    const outletDoc = await db.collection('outlets').doc(outletId).get();
+    if (!outletDoc.exists) {
+      return res.status(404).json({ error: 'Outlet not found' });
+    }
+
+    const outletData = outletDoc.data();
+    const outletName = outletData.name || outletId;
+
+    const deletionSummary = {
+      outletId,
+      outletName,
+      ordersDeleted: 0,
+      returnsDeleted: 0,
+      paymentsDeleted: 0,
+      paymentRequestsDeleted: 0,
+      outletPaymentsCleared: false,
+      errors: []
+    };
+
+    // Helper function to delete documents in batches (Firestore limit is 500 per batch)
+    const deleteInBatches = async (query, collectionName) => {
+      let deletedCount = 0;
+      let lastDoc = null;
+      const batchSize = 500;
+
+      while (true) {
+        let batchQuery = query.limit(batchSize);
+        if (lastDoc) {
+          batchQuery = batchQuery.startAfter(lastDoc);
+        }
+
+        const snapshot = await batchQuery.get();
+
+        if (snapshot.empty) {
+          break;
+        }
+
+        // Delete in batches
+        const batch = db.batch();
+        snapshot.docs.forEach(doc => {
+          batch.delete(doc.ref);
+          deletedCount++;
+        });
+
+        await batch.commit();
+
+        if (snapshot.docs.length < batchSize) {
+          break;
+        }
+
+        lastDoc = snapshot.docs[snapshot.docs.length - 1];
+      }
+
+      return deletedCount;
+    };
+
+    try {
+      // 1. Delete all orders for this outlet
+      const ordersQuery = db.collection('orders').where('outletId', '==', outletId);
+      deletionSummary.ordersDeleted = await deleteInBatches(ordersQuery, 'orders');
+    } catch (error) {
+      console.error('Error deleting orders:', error);
+      deletionSummary.errors.push({ type: 'orders', error: error.message });
+    }
+
+    try {
+      // 2. Delete all returns for this outlet
+      const returnsQuery = db.collection('returns').where('outletId', '==', outletId);
+      deletionSummary.returnsDeleted = await deleteInBatches(returnsQuery, 'returns');
+    } catch (error) {
+      console.error('Error deleting returns:', error);
+      deletionSummary.errors.push({ type: 'returns', error: error.message });
+    }
+
+    try {
+      // 3. Delete all payments for this outlet
+      const paymentsQuery = db.collection('payments').where('outletId', '==', outletId);
+      deletionSummary.paymentsDeleted = await deleteInBatches(paymentsQuery, 'payments');
+    } catch (error) {
+      console.error('Error deleting payments:', error);
+      deletionSummary.errors.push({ type: 'payments', error: error.message });
+    }
+
+    try {
+      // 4. Delete all payment requests for this outlet
+      const paymentRequestsQuery = db.collection('payment_requests').where('outletId', '==', outletId);
+      deletionSummary.paymentRequestsDeleted = await deleteInBatches(paymentRequestsQuery, 'payment_requests');
+    } catch (error) {
+      console.error('Error deleting payment requests:', error);
+      deletionSummary.errors.push({ type: 'payment_requests', error: error.message });
+    }
+
+    try {
+      // 5. Clear outlet_payments data (reset to zero)
+      const outletPaymentRef = db.collection('outlet_payments').doc(outletId);
+      const outletPaymentDoc = await outletPaymentRef.get();
+
+      if (outletPaymentDoc.exists) {
+        await outletPaymentRef.update({
+          paidAmount: 0,
+          pendingAmount: 0,
+          totalAmount: 0,
+          orderTotalAmount: 0,
+          orderPendingAmount: 0,
+          lastUpdated: new Date()
+        });
+        deletionSummary.outletPaymentsCleared = true;
+      }
+    } catch (error) {
+      console.error('Error clearing outlet payments:', error);
+      deletionSummary.errors.push({ type: 'outlet_payments', error: error.message });
+    }
+
+    const totalDeleted = deletionSummary.ordersDeleted + 
+                        deletionSummary.returnsDeleted + 
+                        deletionSummary.paymentsDeleted + 
+                        deletionSummary.paymentRequestsDeleted;
+
+    res.status(200).json({
+      message: `Outlet data cleared successfully for ${outletName}`,
+      summary: deletionSummary,
+      totalRecordsDeleted: totalDeleted
+    });
+
+  } catch (error) {
+    console.error('Error clearing outlet data:', error);
+    res.status(500).json({ 
+      error: 'Failed to clear outlet data',
+      details: error.message 
+    });
+  }
+};
+
 // Paginated outlet listing for Refine framework
 export const getPaginatedOutlets = async (req, res) => {
   try {
