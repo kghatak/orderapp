@@ -1,5 +1,4 @@
 import express from 'express';
-import mongoose from 'mongoose';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -21,13 +20,15 @@ import authRoutes from './routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
 import chatRoutes from './routes/chatRoutes.js';
 import customInvoiceRoutes from './routes/customInvoiceRoutes.js';
+import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
+import cron from 'node-cron';
+import { calculateDailyClosingBalance, backfillClosingBalances } from './controllers/dailyClosingBalanceController.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 
 // Constants (replace these with your actual keys/URLs)
 const PORT = process.env.PORT || 5020;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://creative:universe@cluster0.iv8mrbr.mongodb.net/cudev';
 //const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // if (!GEMINI_API_KEY) {
@@ -59,12 +60,50 @@ app.use(bodyParser.urlencoded({ limit: '30mb', extended: true }));
 
 initQueueProcessor();
 
-
-// Mongo strict mode
-mongoose.set('strictQuery', true);
-//mongoose.set('debug', true);
-
 await initializeFirestore();
+
+// Function to calculate daily closing balance (reusable for cron and immediate execution)
+const runClosingBalanceCalculation = async () => {
+  console.log('📊 Cron job triggered - Calculating daily closing balance...');
+  try {
+    // Calculate for yesterday (the day that just ended at midnight)
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+    
+    const result = await calculateDailyClosingBalance(yesterday);
+    if (result.success) {
+      console.log(`✅ Daily closing balance calculation completed successfully for ${result.date}`);
+      console.log(`   Processed: ${result.processed} outlets`);
+    } else {
+      console.error('❌ Daily closing balance calculation failed:', result.error || result.message);
+    }
+  } catch (error) {
+    console.error('❌ Error in daily closing balance cron job:', error);
+  }
+};
+
+// Run backfill on server start to calculate from starting date (21st November) to today
+console.log('🚀 Running backfill on server start to calculate from starting date to today...');
+backfillClosingBalances().then(result => {
+  if (result.success) {
+    console.log(`✅ Backfill completed: ${result.processed} dates processed`);
+    console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
+  } else {
+    console.error('❌ Backfill failed:', result.error);
+    console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
+  }
+}).catch(error => {
+  console.error('❌ Error during backfill:', error);
+  console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
+});
+
+// Setup cron job to run daily closing balance calculation at midnight
+// Cron expression: '0 0 * * *' means "at 00:00 (midnight) every day"
+cron.schedule('0 0 * * *', runClosingBalanceCalculation, {
+  scheduled: true,
+  timezone: "Asia/Kolkata"
+});
 
 // Route bindings
 app.use('/order(s)?', orderRoutes);
@@ -78,6 +117,7 @@ app.use('/nannu-user(s)?', nannuUserRoutes);
 app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
+app.use('/daily-closing-balance(s)?', dailyClosingBalanceRoutes);
 
 // Health check
 app.get('/', (req, res) => {
@@ -120,31 +160,11 @@ app.post('/summarize', async (req, res) => {
 // Start the server
 const startServer = async () => {
   try {
-    console.log(`🔌 Attempting to connect to MongoDB at: ${MONGO_URI.replace(/\/\/.*@/, '//***:***@')}`);
-    
-    await mongoose.connect(MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 10000, // 10 seconds timeout
-      socketTimeoutMS: 45000, // 45 seconds socket timeout
-      bufferCommands: false // Disable mongoose buffering
-    });
-    
-    console.log('✅ Successfully connected to MongoDB');
-    
     app.listen(PORT, () => {
       console.log(`✅ Server running at http://localhost:${PORT}`);
     });
   } catch (err) {
-    console.error("❌ Failed to connect to DB or start server:", err.message);
-    console.log('\n🔧 Troubleshooting tips:');
-    console.log('1. Check if MongoDB is running locally: mongod --version');
-    console.log('2. Verify your MongoDB Atlas cluster exists and is accessible');
-    console.log('3. Check your network connection and firewall settings');
-    console.log('4. Update the MONGO_URI in your .env file');
-    console.log('\n💡 For local development, you can start MongoDB locally:');
-    console.log('   brew services start mongodb-community (on macOS)');
-    console.log('   or download MongoDB Community Server');
+    console.error("❌ Failed to start server:", err.message);
     process.exit(1);
   }
 };
