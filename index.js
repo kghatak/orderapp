@@ -21,6 +21,7 @@ import { initializeFirestore } from './util/firebase.js';
 import chatRoutes from './routes/chatRoutes.js';
 import customInvoiceRoutes from './routes/customInvoiceRoutes.js';
 import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
+import outletOpeningClosingBalanceRoutes from './routes/outletOpeningClosingBalanceRoutes.js';
 import cron from 'node-cron';
 import { calculateDailyClosingBalance, backfillClosingBalances } from './controllers/dailyClosingBalanceController.js';
 
@@ -118,6 +119,7 @@ app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
 app.use('/daily-closing-balance(s)?', dailyClosingBalanceRoutes);
+app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
 
 // Health check
 app.get('/', (req, res) => {
