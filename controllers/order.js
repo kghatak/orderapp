@@ -1470,3 +1470,229 @@ export const getOrdersReport = async (req, res) => {
     });
   }
 };
+
+// Helper function to escape CSV values
+const escapeCSV = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const stringValue = String(value);
+  // If value contains comma, newline, or double quote, wrap in quotes and escape quotes
+  if (stringValue.includes(',') || stringValue.includes('\n') || stringValue.includes('"')) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+  return stringValue;
+};
+
+// Helper function to generate CSV from deleted orders data
+const generateOrdersCSV = (ordersData, selectedDate) => {
+  // CSV Headers
+  const headers = [
+    'Order ID',
+    'Parent Order ID',
+    'Outlet ID',
+    'Outlet Name',
+    'Delivery Address',
+    'Total Amount',
+    'Paid Amount',
+    'Pending Amount',
+    'Status',
+    'Payment Status',
+    'Item Count',
+    'Created At',
+    'Vehicle Number',
+    'Invoice Date',
+    'Payment ID',
+    'Items (Product Name, Quantity, Price)'
+  ];
+
+  // Create CSV rows
+  const rows = ordersData.map(order => {
+    // Format items as a readable string
+    const itemsString = order.items.map(item => 
+      `${item.name || ''} (Qty: ${item.quantity || 0}, Price: ${item.price || 0})`
+    ).join('; ');
+
+    return [
+      escapeCSV(order.orderId),
+      escapeCSV(order.parentOrderId),
+      escapeCSV(order.outletId),
+      escapeCSV(order.outletName),
+      escapeCSV(order.deliveryAddress),
+      escapeCSV(order.totalAmount),
+      escapeCSV(order.paidAmount),
+      escapeCSV(order.pendingAmount),
+      escapeCSV(order.status),
+      escapeCSV(order.paymentStatus),
+      escapeCSV(order.itemCount),
+      escapeCSV(order.createdAt),
+      escapeCSV(order.vehicleNumber),
+      escapeCSV(order.invoiceDate),
+      escapeCSV(order.paymentId),
+      escapeCSV(itemsString)
+    ];
+  });
+
+  // Combine headers and rows
+  const csvRows = [
+    headers.join(','),
+    ...rows.map(row => row.join(','))
+  ];
+
+  // Add metadata as comments at the top (some CSV readers support this)
+  const metadata = [
+    `# Deleted Orders Report`,
+    `# Selected Date: ${selectedDate.toISOString()}`,
+    `# Total Orders Deleted: ${ordersData.length}`,
+    `# Generated At: ${new Date().toISOString()}`,
+    `#`,
+    ''
+  ];
+
+  return metadata.join('\n') + csvRows.join('\n');
+};
+
+// Delete orders created before a selected date and archive them
+export const deleteOrdersByDate = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { date } = req.body; // Expected format: "2025-12-31" or ISO date string
+
+    // Validate date parameter
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        message: 'Date parameter is required. Please provide a date in format: "YYYY-MM-DD" or ISO date string'
+      });
+    }
+
+    // Parse and validate the date
+    let selectedDate;
+    try {
+      // Try parsing as ISO string or date string
+      selectedDate = new Date(date);
+      if (isNaN(selectedDate.getTime())) {
+        throw new Error('Invalid date format');
+      }
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date format. Please provide a valid date in format: "YYYY-MM-DD" or ISO date string'
+      });
+    }
+
+    // Convert to Firestore Timestamp (start of the selected date)
+    const selectedTimestamp = admin.firestore.Timestamp.fromDate(selectedDate);
+    
+    console.log(`Deleting orders created before: ${selectedDate.toISOString()}`);
+
+    // Query orders created before the selected date
+    const ordersQuery = db.collection('orders')
+      .where('Created at', '<', selectedTimestamp)
+      .orderBy('Created at', 'desc');
+
+    const ordersSnapshot = await ordersQuery.get();
+
+    if (ordersSnapshot.empty) {
+      // Return empty CSV file
+      const csvContent = generateOrdersCSV([], selectedDate);
+      const fileName = `deleted_orders_${selectedDate.toISOString().split('T')[0]}.csv`;
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      return res.status(200).send(csvContent);
+    }
+
+    const ordersToDelete = ordersSnapshot.docs;
+    const archivedOrders = [];
+    const deletedOrdersData = []; // Store full order data for CSV
+    let deletedCount = 0;
+    let archivedCount = 0;
+
+    // Process orders in batches (Firestore batch limit is 500 operations)
+    // Each order requires 2 operations: 1 set (archive) + 1 delete
+    const batchSize = 250;
+    for (let i = 0; i < ordersToDelete.length; i += batchSize) {
+      const batch = db.batch();
+      const currentBatch = ordersToDelete.slice(i, i + batchSize);
+
+      for (const orderDoc of currentBatch) {
+        const orderData = orderDoc.data();
+        const orderId = orderDoc.id;
+
+        // Store full order data for CSV generation
+        const createdAt = orderData['Created at'];
+        const createdAtDate = createdAt ? (createdAt.toDate ? createdAt.toDate() : new Date(createdAt._seconds * 1000)) : null;
+        
+        deletedOrdersData.push({
+          orderId: orderId,
+          parentOrderId: orderData['parent orderId'] || orderId,
+          outletId: orderData.outletId || '',
+          outletName: orderData.outlet || '',
+          deliveryAddress: orderData['delivery address'] || '',
+          totalAmount: orderData['total amount'] || 0,
+          paidAmount: orderData.paidAmount || 0,
+          pendingAmount: orderData.pendingAmount || 0,
+          status: orderData.status || '',
+          paymentStatus: orderData['payment status'] || '',
+          itemCount: orderData['item_count'] || 0,
+          createdAt: createdAtDate ? createdAtDate.toISOString() : '',
+          vehicleNumber: orderData.vehicleNumber || '',
+          invoiceDate: orderData.invoiceDate ? (orderData.invoiceDate.toDate ? orderData.invoiceDate.toDate().toISOString() : new Date(orderData.invoiceDate._seconds * 1000).toISOString()) : '',
+          paymentId: orderData.paymentId || '',
+          items: orderData.items || []
+        });
+
+        // Add metadata for archived order
+        const archivedOrderData = {
+          ...orderData,
+          originalOrderId: orderId,
+          deletedAt: admin.firestore.FieldValue.serverTimestamp(),
+          deletedDate: selectedDate.toISOString(),
+          archivedReason: 'Deleted before selected date'
+        };
+
+        // Add to deleted_orders collection
+        const archivedOrderRef = db.collection('deleted_orders').doc(orderId);
+        batch.set(archivedOrderRef, archivedOrderData);
+
+        // Delete from orders collection
+        const orderRef = db.collection('orders').doc(orderId);
+        batch.delete(orderRef);
+
+        archivedOrders.push({
+          id: orderId,
+          parentOrderId: orderData['parent orderId'] || orderId,
+          createdAt: createdAt
+        });
+
+        archivedCount++;
+      }
+
+      // Commit the batch
+      await batch.commit();
+      deletedCount += currentBatch.length;
+      console.log(`Processed batch: ${currentBatch.length} orders archived and deleted`);
+    }
+
+    console.log(`Successfully deleted ${deletedCount} orders created before ${selectedDate.toISOString()}`);
+
+    // Generate CSV content
+    const csvContent = generateOrdersCSV(deletedOrdersData, selectedDate);
+
+    // Set headers for CSV download
+    const fileName = `deleted_orders_${selectedDate.toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    // Send CSV file
+    res.status(200).send(csvContent);
+
+  } catch (error) {
+    console.error('Error deleting orders by date:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete orders by date',
+      error: error.message
+    });
+  }
+};

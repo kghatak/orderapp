@@ -1,11 +1,12 @@
 import express from 'express';
-import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport } from '../controllers/order.js'
+import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate } from '../controllers/order.js'
 
 const orderRoutes = express.Router();
 
 orderRoutes.post('/', createOrder);
 orderRoutes.get('/', getAllOrders); 
 orderRoutes.get('/report', getOrdersReport);
+orderRoutes.delete('/by-date', deleteOrdersByDate);
 orderRoutes.get('/:id', getOrder);
 orderRoutes.get('/:id/suborders', getSubOrders);
 orderRoutes.patch('/:id/utensils/:utensilId', updateOrderUtensilQuantity);

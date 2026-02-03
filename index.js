@@ -20,10 +20,8 @@ import authRoutes from './routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
 import chatRoutes from './routes/chatRoutes.js';
 import customInvoiceRoutes from './routes/customInvoiceRoutes.js';
-import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
+//import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
 import outletOpeningClosingBalanceRoutes from './routes/outletOpeningClosingBalanceRoutes.js';
-import cron from 'node-cron';
-import { calculateDailyClosingBalance, backfillClosingBalances } from './controllers/dailyClosingBalanceController.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -63,49 +61,6 @@ initQueueProcessor();
 
 await initializeFirestore();
 
-// Function to calculate daily closing balance (reusable for cron and immediate execution)
-const runClosingBalanceCalculation = async () => {
-  console.log('📊 Cron job triggered - Calculating daily closing balance...');
-  try {
-    // Calculate for yesterday (the day that just ended at midnight)
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    yesterday.setHours(0, 0, 0, 0);
-    
-    const result = await calculateDailyClosingBalance(yesterday);
-    if (result.success) {
-      console.log(`✅ Daily closing balance calculation completed successfully for ${result.date}`);
-      console.log(`   Processed: ${result.processed} outlets`);
-    } else {
-      console.error('❌ Daily closing balance calculation failed:', result.error || result.message);
-    }
-  } catch (error) {
-    console.error('❌ Error in daily closing balance cron job:', error);
-  }
-};
-
-// Run backfill on server start to calculate from starting date (21st November) to today
-console.log('🚀 Running backfill on server start to calculate from starting date to today...');
-backfillClosingBalances().then(result => {
-  if (result.success) {
-    console.log(`✅ Backfill completed: ${result.processed} dates processed`);
-    console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
-  } else {
-    console.error('❌ Backfill failed:', result.error);
-    console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
-  }
-}).catch(error => {
-  console.error('❌ Error during backfill:', error);
-  console.log('⏰ Daily closing balance cron job scheduled to run at midnight (00:00)');
-});
-
-// Setup cron job to run daily closing balance calculation at midnight
-// Cron expression: '0 0 * * *' means "at 00:00 (midnight) every day"
-cron.schedule('0 0 * * *', runClosingBalanceCalculation, {
-  scheduled: true,
-  timezone: "Asia/Kolkata"
-});
-
 // Route bindings
 app.use('/order(s)?', orderRoutes);
 app.use('/outlet(s)?', outletRoutes);
@@ -118,7 +73,6 @@ app.use('/nannu-user(s)?', nannuUserRoutes);
 app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
-app.use('/daily-closing-balance(s)?', dailyClosingBalanceRoutes);
 app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
 
 // Health check
