@@ -1415,8 +1415,9 @@ export const getOrdersReport = async (req, res) => {
     const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
     const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
 
-    // Build query
+    // Build query - only include delivered orders
     let query = db.collection('orders')
+      .where('status', '==', 'delivered')
       .where('Created at', '>=', startTimestamp)
       .where('Created at', '<=', endTimestamp)
       .orderBy('Created at', 'desc');
