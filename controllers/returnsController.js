@@ -328,8 +328,9 @@ export const getReturnsReport = async (req, res) => {
     const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
     const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
 
-    // Build query
+    // Build query - only include collected returns
     let query = db.collection('returns')
+      .where('status', '==', 'collected')
       .where('createdAt', '>=', startTimestamp)
       .where('createdAt', '<=', endTimestamp)
       .orderBy('createdAt', 'desc');

@@ -816,8 +816,9 @@ export const getPaymentsReport = async (req, res) => {
     const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
     const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
 
-    // Build query
+    // Build query - only include approved payments
     let query = db.collection('payments')
+      .where('status', '==', 'approved')
       .where('createdAt', '>=', startTimestamp)
       .where('createdAt', '<=', endTimestamp)
       .orderBy('createdAt', 'desc');
