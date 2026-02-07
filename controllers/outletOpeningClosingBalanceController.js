@@ -148,13 +148,16 @@ export const getOutletOpeningClosingBalanceById = async (req, res) => {
  * Calculate and update closing balances for an outlet
  * This endpoint:
  * 1. Gets outlet's openingBalance and openingBalanceDate
- * 2. Fetches existing OutletOpeningClosingBalance documents within date range
- * 3. Calculates closing balances for each date from openingBalanceDate to today
- * 4. Only includes:
+ * 2. Sets opening balance on the previous date (one day before openingBalanceDate)
+ *    - Creates/updates a document for previous date with totalClosingBalance = openingBalance
+ *    - This ensures ledger reports show the correct opening balance
+ * 3. Fetches existing OutletOpeningClosingBalance documents within date range
+ * 4. Calculates closing balances for each date from openingBalanceDate to today
+ * 5. Only includes:
  *    - Orders with status "delivered"
  *    - Returns with status "collected"
  *    - Payments with status "approved"
- * 5. Formula: openingBalance + orders - returns - payments = totalClosingBalance
+ * 6. Formula: openingBalance + orders - returns - payments = totalClosingBalance
  */
 export const calculateClosingBalances = async (req, res) => {
   try {
@@ -190,8 +193,17 @@ export const calculateClosingBalances = async (req, res) => {
     const today = new Date();
     today.setHours(23, 59, 59, 999);
 
+    // Calculate previous date (one day before openingBalanceDate)
+    const previousDate = new Date(startDate);
+    previousDate.setDate(previousDate.getDate() - 1);
+    previousDate.setHours(23, 59, 59, 999);
+    
+    const previousDateStr = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, '0')}-${String(previousDate.getDate()).padStart(2, '0')}`;
+    const previousDateTimestamp = admin.firestore.Timestamp.fromDate(previousDate);
+
     // Get existing OutletOpeningClosingBalance documents for this outlet within date range only
-    const startOfRange = new Date(startDate);
+    // Include previous date in the range to check if it exists
+    const startOfRange = new Date(previousDate);
     startOfRange.setHours(0, 0, 0, 0);
     const endOfRange = new Date(today);
     endOfRange.setHours(23, 59, 59, 999);
@@ -223,8 +235,43 @@ export const calculateClosingBalances = async (req, res) => {
     // This requires a composite index: (outletId, status, createdAt)
     // Firestore will provide a link to create it if needed
 
+    // Set opening balance on the previous date (one day before openingBalanceDate)
+    // This ensures the ledger report shows the correct opening balance
+    const previousDoc = existingDocsByDate.get(previousDateStr);
+    const previousCompletedAt = admin.firestore.Timestamp.now();
+
+    if (previousDoc) {
+      // Update existing document for previous date
+      await previousDoc.ref.update({
+        closingBalanceOrder: 0,
+        closingBalancePayment: 0,
+        closingBanlanceReturn: 0,
+        totalClosingBalance: openingBalance,
+        completedAt: previousCompletedAt,
+        status: 'success',
+        outletName,
+      });
+    } else {
+      // Create new document for previous date
+      const previousDocRef = db.collection('OutletOpeningClosingBalance').doc();
+      await previousDocRef.set({
+        OutletID: outletId,
+        outletName,
+        closingBalanceOrder: 0,
+        closingBalancePayment: 0,
+        closingBanlanceReturn: 0,
+        totalClosingBalance: openingBalance,
+        timestamp: previousDateTimestamp,
+        completedAt: previousCompletedAt,
+        status: 'success',
+      });
+      // Add to map for consistency
+      existingDocsByDate.set(previousDateStr, { ref: previousDocRef, id: previousDocRef.id });
+    }
+
     // Calculate balances for each date from openingBalanceDate to today
     const results = [];
+    // Start with opening balance (which is now set as previous date's closing balance)
     let currentOpeningBalance = openingBalance;
     const currentDate = new Date(startDate);
 

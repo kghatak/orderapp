@@ -53,18 +53,69 @@ export const createReturn = async (req, res) => {
   }
 };
 
-// Get All Return Orders
+// Get All Return Orders with Pagination
 export const getAllReturns = async (req, res) => {
   try {
     const db = getFirestoreDB();
+    const { _start = 0, _end = 10, _sort = 'createdAt', _order = 'desc' } = req.query;
+
+    // Parse pagination parameters
+    const start = parseInt(_start, 10);
+    const end = parseInt(_end, 10);
+    const sortField = _sort || 'createdAt';
+    const order = _order === 'asc' ? 'asc' : 'desc';
+
+    // Fetch all returns (we'll filter and sort in memory to avoid index issues)
     const snapshot = await db.collection('returns').get();
-    const returns = snapshot.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(returnOrder => !returnOrder.archived); // Filter out archived returns
-    res.status(200).json(returns);
+
+    // Process returns data
+    let returns = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    // Filter out archived returns
+    returns = returns.filter(returnOrder => !returnOrder.archived);
+
+    // Sort in memory
+    returns.sort((a, b) => {
+      let aVal = a[sortField];
+      let bVal = b[sortField];
+
+      // Handle different data types
+      if (aVal === undefined || aVal === null) aVal = '';
+      if (bVal === undefined || bVal === null) bVal = '';
+
+      // Handle dates (Firestore Timestamps)
+      if (aVal && typeof aVal.toDate === 'function') {
+        aVal = aVal.toDate().getTime();
+      }
+      if (bVal && typeof bVal.toDate === 'function') {
+        bVal = bVal.toDate().getTime();
+      }
+
+      // Compare values
+      if (order === 'asc') {
+        return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+      } else {
+        return aVal < bVal ? 1 : aVal > bVal ? -1 : 0;
+      }
+    });
+
+    // Get total count (after filtering)
+    const total = returns.length;
+
+    // Apply pagination
+    const paginatedReturns = returns.slice(start, end);
+
+    // Set headers for pagination (React Admin format)
+    res.setHeader('X-Total-Count', total);
+    res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count');
+
+    res.status(200).json(paginatedReturns);
   } catch (error) {
     console.error('Error fetching return orders:', error);
-    res.status(500).json({ error: 'Failed to fetch return orders' });
+    res.status(500).json({ error: 'Failed to fetch return orders', details: error.message });
   }
 };
 
