@@ -1440,12 +1440,44 @@ export const getOrdersReport = async (req, res) => {
     // Process orders data
     const orders = snapshot.docs.map(doc => {
       const data = doc.data();
+      
+      // Calculate actual order amount from items (after discounts)
+      // The "total amount" field is before discount, so we need to calculate from items
+      let orderAmount = 0;
+      
+      if (data.items && Array.isArray(data.items) && data.items.length > 0) {
+        data.items.forEach((item) => {
+          const price = parseFloat(item.price || 0);
+          const quantity = parseFloat(item.quantity || 0);
+          const discountPercentage = parseFloat(item.discountPercentage || 0);
+          
+          // Calculate item subtotal
+          const itemSubtotal = price * quantity;
+          
+          // Calculate discount amount (discountAmount might be 0, so calculate from percentage)
+          let discountAmount = parseFloat(item.discountAmount || 0);
+          if (discountAmount === 0 && discountPercentage > 0) {
+            discountAmount = itemSubtotal * (discountPercentage / 100);
+          }
+          
+          // Item total after discount
+          const itemTotal = itemSubtotal - discountAmount;
+          orderAmount += itemTotal;
+        });
+        
+        // Round to 2 decimal places to avoid floating point precision issues
+        orderAmount = Math.round(orderAmount * 100) / 100;
+      } else {
+        // Fallback: if items array is not available, use total amount
+        orderAmount = parseFloat(data["total amount"] || data.totalAmount || 0);
+      }
+      
       return {
         id: doc.id,
         "parent orderId": data["parent orderId"] || data.orderId,
         outlet: data.outletName || data.outlet,
         status: data.status,
-        "total amount": data["total amount"] || data.totalAmount,
+        "total amount": orderAmount, // Use calculated amount after discounts
         "Created at": data["Created at"],
         "payment status": data["payment status"] || data.paymentStatus
       };
