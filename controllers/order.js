@@ -281,10 +281,11 @@ export const patchOrder = async (req, res) => {
           throw new Error(`Invalid status transition from "${currentStatus}" to "${newStatus}". Allowed: ${validNextStatuses.join(', ')}`);
         }
 
+        const statusChangeTimestamp = admin.firestore.Timestamp.now();
         const historyEntry = {
           from: currentStatus,
           to: newStatus,
-          changedAt: admin.firestore.Timestamp.now(), // Use Firestore Timestamp
+          changedAt: statusChangeTimestamp, // Use Firestore Timestamp
         };
 
         const updatedHistory = Array.isArray(orderData.statusHistory)
@@ -293,6 +294,11 @@ export const patchOrder = async (req, res) => {
 
         updateData.status = newStatus;
         updateData.statusHistory = updatedHistory;
+        
+        // If status is changing to 'delivered', set deliveredDate
+        if (newStatus === 'delivered') {
+          updateData.deliveredDate = statusChangeTimestamp;
+        }
       }
 
       // Handle vehicleNumber update if provided
@@ -1029,25 +1035,24 @@ export const deliverOrder = async (req, res) => {
         });
       }
 
-      // Update order status to delivered
-      transaction.update(orderRef, {
-        status: 'delivered',
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
       // Add to status history
+      const deliveredTimestamp = admin.firestore.Timestamp.now();
       const historyEntry = {
         from: 'dispatched',
         to: 'delivered',
-        changedAt: admin.firestore.Timestamp.now(),
+        changedAt: deliveredTimestamp,
       };
 
       const updatedHistory = Array.isArray(orderData.statusHistory)
         ? [...orderData.statusHistory, historyEntry]
         : [historyEntry];
 
+      // Update order status to delivered and set deliveredDate
       transaction.update(orderRef, {
+        status: 'delivered',
+        deliveredDate: deliveredTimestamp,
         statusHistory: updatedHistory,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
 
@@ -1479,6 +1484,7 @@ export const getOrdersReport = async (req, res) => {
         status: data.status,
         "total amount": orderAmount, // Use calculated amount after discounts
         "Created at": data["Created at"],
+        "deliveredDate": data.deliveredDate || null, // Delivery date when status is 'delivered'
         "payment status": data["payment status"] || data.paymentStatus
       };
     });
