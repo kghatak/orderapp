@@ -1735,3 +1735,108 @@ export const deleteOrdersByDate = async (req, res) => {
     });
   }
 };
+
+// Migration: Backfill deliveredDate for existing delivered orders
+export const backfillDeliveredDate = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    
+    // Find all orders with status "delivered" that don't have deliveredDate
+    const deliveredOrdersSnapshot = await db.collection('orders')
+      .where('status', '==', 'delivered')
+      .get();
+
+    const ordersToUpdate = [];
+    
+    deliveredOrdersSnapshot.forEach((doc) => {
+      const orderData = doc.data();
+      
+      // Skip if deliveredDate already exists
+      if (orderData.deliveredDate) {
+        return;
+      }
+      
+      // Extract delivery date from statusHistory
+      let deliveredTimestamp = null;
+      
+      if (orderData.statusHistory && Array.isArray(orderData.statusHistory)) {
+        // Find the status history entry where status changed to "delivered"
+        const deliveredEntry = orderData.statusHistory.find(
+          entry => entry.to === 'delivered'
+        );
+        
+        if (deliveredEntry && deliveredEntry.changedAt) {
+          // Use the timestamp from statusHistory
+          deliveredTimestamp = deliveredEntry.changedAt;
+        } else if (orderData.updatedAt) {
+          // Fallback: use updatedAt if statusHistory doesn't have the entry
+          deliveredTimestamp = orderData.updatedAt;
+        }
+      } else if (orderData.updatedAt) {
+        // Fallback: use updatedAt if statusHistory doesn't exist
+        deliveredTimestamp = orderData.updatedAt;
+      }
+      
+      if (deliveredTimestamp) {
+        ordersToUpdate.push({
+          docRef: doc.ref,
+          orderId: doc.id,
+          deliveredDate: deliveredTimestamp
+        });
+      }
+    });
+
+    if (ordersToUpdate.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No orders need to be updated. All delivered orders already have deliveredDate.',
+        updatedCount: 0
+      });
+    }
+
+    // Update orders in batches (Firestore batch limit is 500)
+    const batchSize = 500;
+    let updatedCount = 0;
+    const errors = [];
+
+    for (let i = 0; i < ordersToUpdate.length; i += batchSize) {
+      const batch = db.batch();
+      const currentBatch = ordersToUpdate.slice(i, i + batchSize);
+
+      currentBatch.forEach(({ docRef, orderId, deliveredDate }) => {
+        try {
+          batch.update(docRef, {
+            deliveredDate: deliveredDate
+          });
+        } catch (error) {
+          errors.push({ orderId, error: error.message });
+        }
+      });
+
+      try {
+        await batch.commit();
+        updatedCount += currentBatch.length;
+        console.log(`Updated batch ${Math.floor(i / batchSize) + 1}: ${currentBatch.length} orders`);
+      } catch (error) {
+        console.error(`Error updating batch ${Math.floor(i / batchSize) + 1}:`, error);
+        errors.push({ batch: Math.floor(i / batchSize) + 1, error: error.message });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Migration completed. Updated ${updatedCount} orders with deliveredDate.`,
+      updatedCount: updatedCount,
+      totalFound: deliveredOrdersSnapshot.size,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (error) {
+    console.error('Error backfilling deliveredDate:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to backfill deliveredDate',
+      error: error.message
+    });
+  }
+};
