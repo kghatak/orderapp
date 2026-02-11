@@ -436,13 +436,15 @@ export const approvePaymentRequest = async (req, res) => {
   }
 };
 
-// Record manual cash payment and update outlet pending amount
+// Record manual payment and update outlet pending amount
+// Supports payment modes: 'Cash', 'Transfer by Bank', 'Cheque'
 export const recordCashPayment = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const {
       outletId,
       amount,
+      paymentMode = 'Cash', // Default to 'Cash' for backward compatibility
       remarks = '',
       approvedBy = 'admin',
       paymentDate,
@@ -460,6 +462,14 @@ export const recordCashPayment = async (req, res) => {
 
     if (paymentAmount <= 0) {
       return res.status(400).json({ error: 'Amount must be greater than 0' });
+    }
+
+    // Validate payment mode
+    const validPaymentModes = ['Cash', 'Transfer by Bank', 'Cheque'];
+    if (!validPaymentModes.includes(paymentMode)) {
+      return res.status(400).json({ 
+        error: `Invalid paymentMode. Must be one of: ${validPaymentModes.join(', ')}` 
+      });
     }
 
     const outletPaymentRef = db.collection('outlet_payments').doc(outletId);
@@ -495,7 +505,7 @@ export const recordCashPayment = async (req, res) => {
     const paymentData = {
       paymentId,
       amount: paymentAmount,
-      paymentMode: 'cash',
+      paymentMode: paymentMode,
       outletId,
       outletName,
       status: 'approved',
@@ -557,14 +567,20 @@ export const recordCashPayment = async (req, res) => {
         ? approvedAtTimestamp.toDate().toISOString()
         : createdAt;
 
+    const paymentModeMessages = {
+      'Cash': 'Cash payment recorded successfully',
+      'Transfer by Bank': 'Bank transfer payment recorded successfully',
+      'Cheque': 'Cheque payment recorded successfully'
+    };
+
     res.status(201).json({
-      message: 'Cash payment recorded successfully',
+      message: paymentModeMessages[paymentMode] || 'Payment recorded successfully',
       paymentId: savedPayment?.paymentId || paymentId,
       paymentDocId: paymentDocRef.id,
       outletId,
       outletName,
       amount: savedPayment?.amount ?? paymentAmount,
-      paymentMode: savedPayment?.paymentMode ?? 'cash',
+      paymentMode: savedPayment?.paymentMode ?? paymentMode,
       approvedBy: savedPayment?.approvedBy ?? approvedBy,
       approvedAt,
       createdAt,
@@ -574,13 +590,14 @@ export const recordCashPayment = async (req, res) => {
       paidAmount: updatedPaidAmount,
     });
   } catch (error) {
-    console.error('Error recording cash payment:', error);
-    if (error.message.includes('not found') || error.message.includes('Amount')) {
+    console.error('Error recording payment:', error);
+    if (error.message.includes('not found') || error.message.includes('Amount') || error.message.includes('paymentMode')) {
       return res.status(400).json({ error: error.message });
     }
-    res.status(500).json({ error: 'Failed to record cash payment' });
+    res.status(500).json({ error: 'Failed to record payment' });
   }
 };
+
 
 // Reject Payment Request
 export const rejectPaymentRequest = async (req, res) => {
