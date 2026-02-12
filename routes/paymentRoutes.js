@@ -25,7 +25,7 @@ const router = express.Router();
 router.get('/', getAllPayments); // GET /payments
 router.get('/report', getPaymentsReport); // GET /payments/report
 router.post('/', createPayment); // POST /payments
-router.post('/cash', recordCashPayment); // POST /payments/cash
+router.post('/cash', recordCashPayment); // POST /payments/cash (supports paymentMode: 'cash', 'Transfer by Bank', 'Cheque')
 
 // Outlet Payments
 router.post('/outlet-payment', createOutletPayment);

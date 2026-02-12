@@ -11,18 +11,27 @@ export const formatTimestamp = (timestamp) => {
   });
 };
 
-// Generate custom outlet ID in format OUTID###
+// Generate custom outlet ID in format OUTID### using atomic counter
 const generateOutletId = async () => {
     const db = getFirestoreDB();
-    const snapshot = await db.collection('outlets').orderBy('createdAt', 'desc').limit(1).get();
-    let lastId = 0;
-    if (!snapshot.empty) {
-        const lastDoc = snapshot.docs[0];
-        const id = lastDoc.data().id;
-        lastId = parseInt(id.replace('OUTID', ''));
-    }
-    const newId = lastId + 1;
-    return `OUTID${newId.toString().padStart(3, '0')}`;
+    const counterRef = db.collection('counters').doc('outlets');
+    
+    // Use Firestore transaction to ensure atomic increment
+    const outletId = await db.runTransaction(async (transaction) => {
+        const counterDoc = await transaction.get(counterRef);
+        
+        let currentCount = 1;
+        if (counterDoc.exists) {
+            currentCount = counterDoc.data().count + 1;
+        }
+        
+        // Update the counter atomically
+        transaction.set(counterRef, { count: currentCount });
+        
+        return `OUTID${currentCount.toString().padStart(3, '0')}`;
+    });
+    
+    return outletId;
 };
 
 // Create outlet
