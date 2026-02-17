@@ -861,10 +861,13 @@ export const getPaymentsReport = async (req, res) => {
       return {
         id: doc.id,
         paymentId: data.paymentId,
+        outletId: data.outletId,
         outletName: data.outletName,
         status: data.status,
         paymentMode: data.paymentMode,
         amount: data.amount,
+        paymentDate: data.paymentDate,
+        remarks: data.remarks,
         createdAt: data.createdAt
       };
     });
