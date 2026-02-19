@@ -4,6 +4,177 @@ import { OutletOpeningClosingBalance } from '../models/outletOpeningClosingBalan
 import admin from 'firebase-admin';
 
 /**
+ * POST /api/balance/calculate-opening-closing
+ * 
+ * Daily Opening/Closing Balance calculation for all active outlets.
+ * Called by Firebase Cloud Function scheduler every day at 6:00 AM IST.
+ *
+ * Steps:
+ *   1. Cleanup old records (older than 1 month)
+ *   2. Query all active outlets
+ *   3. Create balance calculation record for each outlet
+ *   4. Mark each record as success after creation
+ *   5. Return summary response
+ */
+export const calculateDailyOpeningClosingBalance = async (req, res) => {
+  const executionStart = new Date();
+  let oldRecordsDeleted = 0;
+
+  try {
+    const db = getFirestoreDB();
+    const { triggeredAt, timeZone, source } = req.body;
+
+    console.log(`📊 [Balance Calculation] Started at ${executionStart.toISOString()}`);
+    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
+
+    // ──────────────────────────────────────────────
+    // Step 1 — Cleanup old records (older than 1 month)
+    // ──────────────────────────────────────────────
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+    const oneMonthAgoTimestamp = admin.firestore.Timestamp.fromDate(oneMonthAgo);
+
+    console.log(`🧹 [Step 1] Cleaning up records older than ${oneMonthAgo.toISOString()}`);
+
+    const oldRecordsSnapshot = await db
+      .collection('OutletOpeningClosingBalance')
+      .where('timestamp', '<', oneMonthAgoTimestamp)
+      .get();
+
+    if (!oldRecordsSnapshot.empty) {
+      const oldDocs = oldRecordsSnapshot.docs;
+      // Delete in batches of 500 (Firestore batch limit)
+      for (let i = 0; i < oldDocs.length; i += 500) {
+        const batch = db.batch();
+        const chunk = oldDocs.slice(i, i + 500);
+        chunk.forEach((doc) => batch.delete(doc.ref));
+        await batch.commit();
+      }
+      oldRecordsDeleted = oldDocs.length;
+    }
+
+    console.log(`🧹 [Step 1] Deleted ${oldRecordsDeleted} old records`);
+
+    // ──────────────────────────────────────────────
+    // Step 2 — Query all active outlets
+    // ──────────────────────────────────────────────
+    console.log('🏪 [Step 2] Querying all active outlets...');
+
+    const outletsSnapshot = await db
+      .collection('outlets')
+      .where('active', '==', true)
+      .get();
+
+    if (outletsSnapshot.empty) {
+      console.log('🏪 [Step 2] No active outlets found');
+      return res.status(200).json({
+        success: true,
+        message: 'No active outlets found. Nothing to process.',
+        summary: {
+          totalOutlets: 0,
+          successful: 0,
+          failed: 0,
+          oldRecordsDeleted,
+        },
+        executedAt: new Date().toISOString(),
+      });
+    }
+
+    const activeOutlets = [];
+    outletsSnapshot.forEach((doc) => {
+      const data = doc.data();
+      activeOutlets.push({
+        id: doc.id,
+        name: data.name || 'Unknown Outlet',
+      });
+    });
+
+    console.log(`🏪 [Step 2] Found ${activeOutlets.length} active outlets`);
+
+    // ──────────────────────────────────────────────
+    // Step 3 & 4 — Create balance records & mark as success
+    // Process all outlets in parallel using Promise.allSettled
+    // ──────────────────────────────────────────────
+    console.log('📝 [Step 3 & 4] Creating balance records for each outlet...');
+
+    const results = await Promise.allSettled(
+      activeOutlets.map(async (outlet) => {
+        try {
+          // Step 3 — Create the balance calculation record
+          const docRef = await db.collection('OutletOpeningClosingBalance').add({
+            OutletID: outlet.id,
+            outletName: outlet.name,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            status: 'in_progress',
+            closingBalanceOrder: 0,
+            closingBalancePayment: 0,
+            closingBanlanceReturn: 0,
+            totalClosingBalance: 0,
+            completedAt: null,
+          });
+
+          // Step 4 — Mark as success
+          await docRef.update({
+            status: 'success',
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          return { outletId: outlet.id, outletName: outlet.name, docId: docRef.id, status: 'success' };
+        } catch (error) {
+          console.error(`❌ Failed for outlet ${outlet.id} (${outlet.name}):`, error.message);
+          throw error;
+        }
+      })
+    );
+
+    // ──────────────────────────────────────────────
+    // Step 5 — Return summary response
+    // ──────────────────────────────────────────────
+    const successful = results.filter((r) => r.status === 'fulfilled').length;
+    const failed = results.filter((r) => r.status === 'rejected').length;
+
+    console.log(`✅ [Step 5] Completed — Success: ${successful}, Failed: ${failed}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Opening/Closing balance calculation completed',
+      summary: {
+        totalOutlets: activeOutlets.length,
+        successful,
+        failed,
+        oldRecordsDeleted,
+      },
+      executedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [Balance Calculation] Fatal error:', error);
+
+    // Create a notification in Firestore for admin
+    try {
+      const db = getFirestoreDB();
+      await db.collection('notifications').add({
+        userId: 'admin',
+        title: '❌ Balance Calculation Failed',
+        body: `Opening/Closing balance calculation failed: ${error.message}`,
+        type: 'system',
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        error: error.message,
+        executedAt: new Date().toISOString(),
+      });
+    } catch (notifError) {
+      console.error('❌ Failed to create error notification:', notifError.message);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      executedAt: new Date().toISOString(),
+    });
+  }
+};
+
+/**
  * Get all OutletOpeningClosingBalance records
  * Supports optional query parameters:
  * - outletId: Filter by OutletID

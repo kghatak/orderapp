@@ -74,6 +74,7 @@ app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
 app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
+app.use('/api/balance', outletOpeningClosingBalanceRoutes);
 
 // Health check
 app.get('/', (req, res) => {
