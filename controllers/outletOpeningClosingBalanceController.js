@@ -92,6 +92,24 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     console.log(`🏪 [Step 2] Found ${activeOutlets.length} active outlets`);
 
     // ──────────────────────────────────────────────
+    // Compute date boundaries for the triggered date (in IST)
+    // ──────────────────────────────────────────────
+    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
+    const targetYear = istDate.getUTCFullYear();
+    const targetMonth = istDate.getUTCMonth();
+    const targetDay = istDate.getUTCDate();
+
+    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
+    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
+
+    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
+    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
+
+    console.log(`📅 Target date (IST): ${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`);
+
+    // ──────────────────────────────────────────────
     // Step 3 & 4 — Create balance records & mark as success
     // Process all outlets in parallel using Promise.allSettled
     // ──────────────────────────────────────────────
@@ -100,16 +118,74 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     const results = await Promise.allSettled(
       activeOutlets.map(async (outlet) => {
         try {
+          // Fetch the previous day's totalClosingBalance for this outlet
+          const prevBalanceSnapshot = await db.collection('OutletOpeningClosingBalance')
+            .where('OutletID', '==', outlet.id)
+            .where('status', '==', 'success')
+            .where('timestamp', '<', dayStartTimestamp)
+            .orderBy('timestamp', 'desc')
+            .limit(1)
+            .get();
+
+          let previousDayClosingBalance = 0;
+          if (!prevBalanceSnapshot.empty) {
+            const prevData = prevBalanceSnapshot.docs[0].data();
+            previousDayClosingBalance = parseFloat(prevData.totalClosingBalance || 0);
+          }
+
+          // Query delivered orders for this outlet on the triggered date
+          const ordersSnapshot = await db.collection('orders')
+            .where('outletId', '==', outlet.id)
+            .where('status', '==', 'delivered')
+            .where('Created at', '>=', dayStartTimestamp)
+            .where('Created at', '<=', dayEndTimestamp)
+            .get();
+
+          let closingBalanceOrder = 0;
+          ordersSnapshot.forEach((doc) => {
+            const data = doc.data();
+            closingBalanceOrder += parseFloat(data['total amount'] || data.totalAmount || 0);
+          });
+
+          // Query approved payments for this outlet on the triggered date
+          const paymentsSnapshot = await db.collection('payments')
+            .where('outletId', '==', outlet.id)
+            .where('status', '==', 'approved')
+            .where('createdAt', '>=', dayStartTimestamp)
+            .where('createdAt', '<=', dayEndTimestamp)
+            .get();
+
+          let closingBalancePayment = 0;
+          paymentsSnapshot.forEach((doc) => {
+            closingBalancePayment += parseFloat(doc.data().amount || 0);
+          });
+
+          // Query collected returns for this outlet on the triggered date
+          const returnsSnapshot = await db.collection('returns')
+            .where('outletId', '==', outlet.id)
+            .where('status', '==', 'collected')
+            .where('createdAt', '>=', dayStartTimestamp)
+            .where('createdAt', '<=', dayEndTimestamp)
+            .get();
+
+          let closingBanlanceReturn = 0;
+          returnsSnapshot.forEach((doc) => {
+            closingBanlanceReturn += parseFloat(doc.data().totalAmount || 0);
+          });
+
+          // Formula: previousDay totalClosingBalance + orders - returns - payments
+          const totalClosingBalance = previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
+
           // Step 3 — Create the balance calculation record
           const docRef = await db.collection('OutletOpeningClosingBalance').add({
             OutletID: outlet.id,
             outletName: outlet.name,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             status: 'in_progress',
-            closingBalanceOrder: 0,
-            closingBalancePayment: 0,
-            closingBanlanceReturn: 0,
-            totalClosingBalance: 0,
+            closingBalanceOrder,
+            closingBalancePayment,
+            closingBanlanceReturn,
+            totalClosingBalance,
             completedAt: null,
           });
 
