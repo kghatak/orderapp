@@ -137,8 +137,8 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
           const ordersSnapshot = await db.collection('orders')
             .where('outletId', '==', outlet.id)
             .where('status', '==', 'delivered')
-            .where('Created at', '>=', dayStartTimestamp)
-            .where('Created at', '<=', dayEndTimestamp)
+            .where('deliveredDate', '>=', dayStartTimestamp)
+            .where('deliveredDate', '<=', dayEndTimestamp)
             .get();
 
           let closingBalanceOrder = 0;
@@ -151,8 +151,8 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
           const paymentsSnapshot = await db.collection('payments')
             .where('outletId', '==', outlet.id)
             .where('status', '==', 'approved')
-            .where('createdAt', '>=', dayStartTimestamp)
-            .where('createdAt', '<=', dayEndTimestamp)
+            .where('paymentDate', '>=', dayStartTimestamp)
+            .where('paymentDate', '<=', dayEndTimestamp)
             .get();
 
           let closingBalancePayment = 0;
