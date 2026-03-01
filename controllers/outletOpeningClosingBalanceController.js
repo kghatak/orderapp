@@ -251,6 +251,129 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
 };
 
 /**
+ * POST /api/balance/daily-product-delivery
+ *
+ * Aggregates all products delivered across all orders for the triggered date
+ * and stores them in the DailyProductDelivery collection with the date as document ID.
+ */
+export const calculateDailyProductDelivery = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { triggeredAt, timeZone, source } = req.body;
+    const executionStart = new Date();
+
+    console.log(`📦 [Daily Product Delivery] Started at ${executionStart.toISOString()}`);
+    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
+
+    // Compute date boundaries for the triggered date (in IST)
+    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
+    const targetYear = istDate.getUTCFullYear();
+    const targetMonth = istDate.getUTCMonth();
+    const targetDay = istDate.getUTCDate();
+
+    const dateStr = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+
+    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
+    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
+
+    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
+    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
+
+    console.log(`📅 Target date (IST): ${dateStr}`);
+
+    // Query all delivered orders for this date
+    const ordersSnapshot = await db.collection('orders')
+      .where('status', '==', 'delivered')
+      .where('deliveredDate', '>=', dayStartTimestamp)
+      .where('deliveredDate', '<=', dayEndTimestamp)
+      .get();
+
+    console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
+
+    // Aggregate products across all orders
+    const productMap = new Map();
+    let totalOrders = 0;
+
+    ordersSnapshot.forEach((doc) => {
+      const data = doc.data();
+      totalOrders++;
+      const items = data.items || [];
+
+      items.forEach((item) => {
+        const productId = item.productId || item.prodid || 'unknown';
+        const name = item.name || 'Unknown Product';
+        const quantity = parseFloat(item.quantity || 0);
+
+        if (productMap.has(productId)) {
+          const existing = productMap.get(productId);
+          existing.totalQuantity += quantity;
+        } else {
+          productMap.set(productId, {
+            productId,
+            name,
+            totalQuantity: quantity,
+          });
+        }
+      });
+    });
+
+    const products = Array.from(productMap.values())
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Store in DailyProductDelivery collection with date as document ID
+    const docRef = db.collection('DailyProductDelivery').doc(dateStr);
+    await docRef.set({
+      date: dateStr,
+      deliveredDate: dateStr,
+      products,
+      totalProducts: products.length,
+      totalOrders,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'success',
+    });
+
+    console.log(`✅ Stored ${products.length} products from ${totalOrders} orders for ${dateStr}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Daily product delivery recorded for ${dateStr}`,
+      summary: {
+        date: dateStr,
+        totalOrders,
+        totalProducts: products.length,
+      },
+      executedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [Daily Product Delivery] Fatal error:', error);
+
+    try {
+      const db = getFirestoreDB();
+      await db.collection('notifications').add({
+        userId: 'admin',
+        title: '❌ Daily Product Delivery Failed',
+        body: `Daily product delivery calculation failed: ${error.message}`,
+        type: 'system',
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        error: error.message,
+        executedAt: new Date().toISOString(),
+      });
+    } catch (notifError) {
+      console.error('❌ Failed to create error notification:', notifError.message);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      executedAt: new Date().toISOString(),
+    });
+  }
+};
+
+/**
  * Get all OutletOpeningClosingBalance records
  * Supports optional query parameters:
  * - outletId: Filter by OutletID

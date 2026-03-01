@@ -5,6 +5,7 @@ import {
   getOutletOpeningClosingBalanceById,
   calculateClosingBalances,
   calculateDailyOpeningClosingBalance,
+  calculateDailyProductDelivery,
 } from '../controllers/outletOpeningClosingBalanceController.js';
 
 const router = express.Router();
@@ -21,6 +22,9 @@ router.post('/calculate', calculateClosingBalances);
 // Daily Opening/Closing Balance calculation for all active outlets
 // Called by Firebase Cloud Function scheduler at 6:00 AM IST
 router.post('/calculate-opening-closing', calculateDailyOpeningClosingBalance);
+
+// Daily product delivery aggregation — stores products with qty by date
+router.post('/daily-product-delivery', calculateDailyProductDelivery);
 
 export default router;
 
