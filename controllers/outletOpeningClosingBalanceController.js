@@ -374,6 +374,80 @@ export const calculateDailyProductDelivery = async (req, res) => {
 };
 
 /**
+ * GET /api/balance/daily-product-delivery?date=2026-02-23&page=1&limit=20
+ *
+ * Returns the daily product delivery record for a specific date with pagination on products.
+ */
+export const getDailyProductDelivery = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { date, page = 1, limit = 20 } = req.query;
+
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        error: 'date query parameter is required (format: YYYY-MM-DD)',
+      });
+    }
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format. Use YYYY-MM-DD (e.g., 2026-02-23)',
+      });
+    }
+
+    const doc = await db.collection('DailyProductDelivery').doc(date).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: `No product delivery record found for ${date}`,
+      });
+    }
+
+    const data = doc.data();
+    const allProducts = data.products || [];
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+    const totalProducts = allProducts.length;
+    const totalPages = Math.ceil(totalProducts / limitNum);
+    const offset = (pageNum - 1) * limitNum;
+    const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+
+    return res.status(200).json({
+      success: true,
+      message: `Product delivery details for ${date}`,
+      data: {
+        date: data.date,
+        deliveredDate: data.deliveredDate,
+        totalOrders: data.totalOrders,
+        totalProducts,
+        products: paginatedProducts,
+        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+        status: data.status,
+      },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalProducts,
+        totalPages,
+        hasNextPage: pageNum < totalPages,
+        hasPrevPage: pageNum > 1,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [Get Daily Product Delivery] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
  * Get all OutletOpeningClosingBalance records
  * Supports optional query parameters:
  * - outletId: Filter by OutletID
