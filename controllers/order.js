@@ -619,24 +619,29 @@ export const removeProductsFromOrder = async (req, res) => {
 export const getAllOrders = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10 } = req.query;
+    let { _start = 0, _end = 10, outletId } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
     const limit = _end - _start;
 
+    let baseQuery = db.collection('orders');
+
+    if (outletId) {
+      baseQuery = baseQuery.where('outletId', '==', outletId);
+    }
+
     // Get total count for the X-Total-Count header
-    const totalSnapshot = await db.collection('orders').get();
+    const totalSnapshot = await baseQuery.get();
     const totalCount = totalSnapshot.size;
 
     // Query for the paginated data
-    const ordersRef = db.collection('orders')
+    const ordersRef = baseQuery
       .orderBy('Created at', 'desc')
       .offset(_start)
       .limit(limit);
-      
+
     const snapshot = await ordersRef.get();
-    
-    // UPDATED: Return plain data instead of a class instance
+
     const orders = snapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
@@ -647,7 +652,7 @@ export const getAllOrders = async (req, res) => {
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
 
     res.status(200).json(orders);
-    
+
   } catch (error) {
     console.error('Error fetching paginated orders:', error);
     res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
