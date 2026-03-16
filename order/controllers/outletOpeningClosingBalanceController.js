@@ -1,5 +1,5 @@
 // controllers/outletOpeningClosingBalanceController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import { OutletOpeningClosingBalance } from '../models/outletOpeningClosingBalance.js';
 import admin from 'firebase-admin';
 

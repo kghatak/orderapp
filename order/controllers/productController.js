@@ -1,6 +1,6 @@
 // controllers/productController.js
-import { getFirestoreDB } from '../util/firebase.js';
-import { categoryIconMap } from '../util/iconMapper.js';
+import { getFirestoreDB } from '../../util/firebase.js';
+import { categoryIconMap } from '../../util/iconMapper.js';
 
 // Generate Product ID in format PROD-00001 using counters collection
 const generateProductId = async (db) => {

@@ -11,6 +11,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.0.0",
     "@google/generative-ai": "^0.24.1",
     "@influxdata/influxdb-client": "^1.35.0",
     "axios": "^1.5.0",

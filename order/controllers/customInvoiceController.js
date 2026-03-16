@@ -1,4 +1,4 @@
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import admin from 'firebase-admin';
 
 // Generate custom invoice ID

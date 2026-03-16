@@ -1,4 +1,4 @@
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
 import admin from 'firebase-admin';
 

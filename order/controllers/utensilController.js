@@ -1,5 +1,5 @@
 // controllers/utensilController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import admin from 'firebase-admin';
 
 // Generate Utensil ID in format UTEN-00001

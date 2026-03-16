@@ -1,8 +1,8 @@
 // controllers/orderController.js
 import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
-import { getFirestoreDB } from '../util/firebase.js';
-import {getQueueProcessor} from '../pushnotifications/notificationqueueprovider.js';
+import { getFirestoreDB } from '../../util/firebase.js';
+import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {

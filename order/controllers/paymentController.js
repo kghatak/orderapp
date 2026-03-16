@@ -1,5 +1,5 @@
 // controllers/paymentController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import admin from 'firebase-admin';
 

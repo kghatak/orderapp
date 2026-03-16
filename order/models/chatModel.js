@@ -1,5 +1,5 @@
 import admin from 'firebase-admin';
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 
 class ChatModel {
   constructor() {

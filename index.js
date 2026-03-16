@@ -8,20 +8,26 @@ import { initQueueProcessor } from './pushnotifications/notificationqueueprovide
 dotenv.config();
 
 // Route Imports
-import { orderRoutes } from './routes/orderRoute.js';
-import { outletRoutes } from './routes/outletRoute.js';
-import productRoutes from './routes/productRoutes.js';
-import returnRoutes from './routes/returns.js';
-import storeKeeperRoutes from './routes/storeKeepers.js';
-import paymentRoutes from './routes/paymentRoutes.js';
-import utensilRoutes from './routes/utensilRoutes.js';
-import nannuUserRoutes from './routes/nannuUserRoutes.js';
-import authRoutes from './routes/authRoutes.js';
+import { orderRoutes } from './order/routes/orderRoute.js';
+import { outletRoutes } from './order/routes/outletRoute.js';
+import productRoutes from './order/routes/productRoutes.js';
+import returnRoutes from './order/routes/returns.js';
+import storeKeeperRoutes from './order/routes/storeKeepers.js';
+import paymentRoutes from './order/routes/paymentRoutes.js';
+import utensilRoutes from './order/routes/utensilRoutes.js';
+import nannuUserRoutes from './order/routes/nannuUserRoutes.js';
+import authRoutes from './order/routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
-import chatRoutes from './routes/chatRoutes.js';
-import customInvoiceRoutes from './routes/customInvoiceRoutes.js';
+import { connectMongoDB, isMongoConnected } from './config/db.js';
+import chatRoutes from './order/routes/chatRoutes.js';
+import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
+import supplierRoutes from './milk/routes/supplierRoutes.js';
+import procurementRoutes from './milk/routes/procurementRoutes.js';
+import milkPaymentRoutes from './milk/routes/milkPaymentRoutes.js';
+import milkReportRoutes from './milk/routes/milkReportRoutes.js';
+import customInvoiceRoutes from './order/routes/customInvoiceRoutes.js';
 //import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
-import outletOpeningClosingBalanceRoutes from './routes/outletOpeningClosingBalanceRoutes.js';
+import outletOpeningClosingBalanceRoutes from './order/routes/outletOpeningClosingBalanceRoutes.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -60,6 +66,7 @@ app.use(bodyParser.urlencoded({ limit: '30mb', extended: true }));
 initQueueProcessor();
 
 await initializeFirestore();
+await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module will fail on use
 
 // Route bindings
 app.use('/order(s)?', orderRoutes);
@@ -75,6 +82,19 @@ app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
 app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
 app.use('/api/balance', outletOpeningClosingBalanceRoutes);
+
+// Milk procurement module (MongoDB + tenantId)
+app.use('/milk', (req, res, next) => {
+  if (!isMongoConnected()) {
+    return res.status(503).json({ success: false, message: 'Milk module unavailable. MongoDB not connected.' });
+  }
+  next();
+});
+app.use('/milk/auth', milkAuthRoutes);
+app.use('/milk/suppliers', supplierRoutes);
+app.use('/milk/procurements', procurementRoutes);
+app.use('/milk/payments', milkPaymentRoutes);
+app.use('/milk/reports', milkReportRoutes);
 
 // Health check
 app.get('/', (req, res) => {

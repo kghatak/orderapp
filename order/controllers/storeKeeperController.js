@@ -1,4 +1,4 @@
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 
 // Create Store Keeper
 export const createStoreKeeper = async (req, res) => {
