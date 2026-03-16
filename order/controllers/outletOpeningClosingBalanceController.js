@@ -292,7 +292,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
 
     console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
 
-    // Aggregate products across all orders
+    // Aggregate products across all orders (with price, unit, totalAmount)
     const productMap = new Map();
     let totalOrders = 0;
 
@@ -305,22 +305,51 @@ export const calculateDailyProductDelivery = async (req, res) => {
         const productId = item.productId || item.prodid || 'unknown';
         const name = item.name || 'Unknown Product';
         const quantity = parseFloat(item.quantity || 0);
+        const price = parseFloat(item.price || 0);
+        const itemAmount = price * quantity;
 
         if (productMap.has(productId)) {
           const existing = productMap.get(productId);
           existing.totalQuantity += quantity;
+          existing.totalAmount += itemAmount;
         } else {
           productMap.set(productId, {
             productId,
             name,
             totalQuantity: quantity,
+            totalAmount: itemAmount,
           });
         }
       });
     });
 
-    const products = Array.from(productMap.values())
-      .sort((a, b) => a.name.localeCompare(b.name));
+    // Fetch unit from products collection for each productId
+    const productIds = Array.from(productMap.keys()).filter((id) => id !== 'unknown');
+    const unitMap = new Map();
+    if (productIds.length > 0) {
+      const productDocs = await Promise.all(
+        productIds.map((id) => db.collection('products').doc(id).get())
+      );
+      productDocs.forEach((doc, i) => {
+        const pid = productIds[i];
+        unitMap.set(pid, doc.exists ? (doc.data().unit || '') : '');
+      });
+    }
+
+    const products = Array.from(productMap.values()).map((p) => {
+      const unit = unitMap.get(p.productId) || '';
+      const price = p.totalQuantity > 0 ? p.totalAmount / p.totalQuantity : 0;
+      return {
+        productId: p.productId,
+        name: p.name,
+        totalQuantity: p.totalQuantity,
+        unit,
+        price: Math.round(price * 100) / 100,
+        totalAmount: Math.round(p.totalAmount * 100) / 100,
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    const grandTotalAmount = products.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
 
     // Store in DailyProductDelivery collection with date as document ID
     const docRef = db.collection('DailyProductDelivery').doc(dateStr);
@@ -330,6 +359,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
       products,
       totalProducts: products.length,
       totalOrders,
+      totalAmount: Math.round(grandTotalAmount * 100) / 100,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
       status: 'success',
     });
@@ -425,6 +455,7 @@ export const getDailyProductDelivery = async (req, res) => {
         deliveredDate: data.deliveredDate,
         totalOrders: data.totalOrders,
         totalProducts,
+        totalAmount: data.totalAmount,
         products: paginatedProducts,
         timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
         status: data.status,
