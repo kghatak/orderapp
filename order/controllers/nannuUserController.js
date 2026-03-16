@@ -1,5 +1,5 @@
 // controllers/nannuUserController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 
 // Create Nannu User

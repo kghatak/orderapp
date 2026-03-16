@@ -1,5 +1,5 @@
 // controllers/outletController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 
 // Format Firestore Timestamp to human-readable
 export const formatTimestamp = (timestamp) => {

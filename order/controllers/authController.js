@@ -1,6 +1,7 @@
 // controllers/authController.js
-import { getFirestoreDB } from '../util/firebase.js';
+import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
+import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -147,7 +148,7 @@ export const signup = async (req, res) => {
 // Login API
 export const login = async (req, res) => {
   try {
-    const { phoneNumber, password, fcmToken } = req.body;
+    const { phoneNumber, password, fcmToken, tenantId } = req.body;
     const db = getFirestoreDB();
 
     // Validation
@@ -200,25 +201,37 @@ export const login = async (req, res) => {
       }
     }
 
+    const responseData = {
+      userId: userData.userId || userDoc.id,
+      phoneNumber: userData.phoneNumber,
+      userProfile: userData.userProfile,
+      outletId: userData.outletId,
+      enableNotification: userData.enableNotification,
+      fcmToken: userData.fcmToken,
+      outlet: outletData ? {
+        outletId: outletData.outletId,
+        outletName: outletData.outletName,
+        address: outletData.address,
+        phoneNumber: outletData.phoneNumber
+      } : null,
+      createdAt: userData.createdAt,
+      updatedAt: userData.updatedAt
+    };
+
+    // If Admin and tenantId provided, include milk module token for unified frontend login
+    if (userData.userProfile === 'Admin' && tenantId) {
+      const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
+      if (milkAuth) {
+        responseData.milkToken = milkAuth.token;
+        responseData.milkTenantId = milkAuth.tenantId;
+        responseData.milkTokenExpiresIn = milkAuth.expiresIn;
+      }
+    }
+
     res.status(200).json({
       success: true,
       message: 'Login successful',
-      data: {
-        userId: userData.userId || userDoc.id,
-        phoneNumber: userData.phoneNumber,
-        userProfile: userData.userProfile,
-        outletId: userData.outletId,
-        enableNotification: userData.enableNotification,
-        fcmToken: userData.fcmToken,
-        outlet: outletData ? {
-          outletId: outletData.outletId,
-          outletName: outletData.outletName,
-          address: outletData.address,
-          phoneNumber: outletData.phoneNumber
-        } : null,
-        createdAt: userData.createdAt,
-        updatedAt: userData.updatedAt
-      }
+      data: responseData
     });
 
   } catch (err) {
