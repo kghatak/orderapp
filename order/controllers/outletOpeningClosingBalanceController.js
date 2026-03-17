@@ -265,7 +265,6 @@ export const calculateDailyProductDelivery = async (req, res) => {
     console.log(`📦 [Daily Product Delivery] Started at ${executionStart.toISOString()}`);
     console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
 
-    // Compute date boundaries for the triggered date (in IST)
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
     const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
@@ -283,23 +282,40 @@ export const calculateDailyProductDelivery = async (req, res) => {
 
     console.log(`📅 Target date (IST): ${dateStr}`);
 
-    // Query all delivered orders for this date
-    const ordersSnapshot = await db.collection('orders')
-      .where('status', '==', 'delivered')
-      .where('deliveredDate', '>=', dayStartTimestamp)
-      .where('deliveredDate', '<=', dayEndTimestamp)
-      .get();
+    // Query active outlets and delivered orders in parallel
+    const [outletsSnapshot, ordersSnapshot] = await Promise.all([
+      db.collection('outlets').where('active', '==', true).get(),
+      db.collection('orders')
+        .where('status', '==', 'delivered')
+        .where('deliveredDate', '>=', dayStartTimestamp)
+        .where('deliveredDate', '<=', dayEndTimestamp)
+        .get(),
+    ]);
 
+    const outletMap = new Map();
+    outletsSnapshot.forEach((doc) => {
+      outletMap.set(doc.id, doc.data().name || 'Unknown Outlet');
+    });
+
+    console.log(`🏪 Found ${outletMap.size} active outlets`);
     console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
 
-    // Aggregate products across all orders (with price, unit, totalAmount)
-    const productMap = new Map();
+    // Group orders by outlet and aggregate products per outlet
+    const outletDataMap = new Map(); // outletId -> { orders, productMap }
+    const globalProductMap = new Map();
     let totalOrders = 0;
 
     ordersSnapshot.forEach((doc) => {
       const data = doc.data();
       totalOrders++;
+      const outletId = data.outletId || 'unknown';
       const items = data.items || [];
+
+      if (!outletDataMap.has(outletId)) {
+        outletDataMap.set(outletId, { orderCount: 0, productMap: new Map() });
+      }
+      const outletEntry = outletDataMap.get(outletId);
+      outletEntry.orderCount++;
 
       items.forEach((item) => {
         const productId = item.productId || item.prodid || 'unknown';
@@ -311,76 +327,130 @@ export const calculateDailyProductDelivery = async (req, res) => {
         const discountAmount = parseFloat(item.discountAmount ?? (itemSubtotal * discountPercentage / 100));
         const itemAmount = itemSubtotal - discountAmount;
 
-        if (productMap.has(productId)) {
-          const existing = productMap.get(productId);
-          existing.totalQuantity += quantity;
-          existing.totalAmount += itemAmount;
-          existing.totalDiscount += discountAmount;
+        // Per-outlet aggregation
+        const oMap = outletEntry.productMap;
+        if (oMap.has(productId)) {
+          const ex = oMap.get(productId);
+          ex.totalQuantity += quantity;
+          ex.totalAmount += itemAmount;
+          ex.totalDiscount += discountAmount;
         } else {
-          productMap.set(productId, {
-            productId,
-            name,
-            totalQuantity: quantity,
-            totalAmount: itemAmount,
-            totalDiscount: discountAmount,
-          });
+          oMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+        }
+
+        // Global aggregation
+        if (globalProductMap.has(productId)) {
+          const ex = globalProductMap.get(productId);
+          ex.totalQuantity += quantity;
+          ex.totalAmount += itemAmount;
+          ex.totalDiscount += discountAmount;
+        } else {
+          globalProductMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
         }
       });
     });
 
-    // Fetch unit from products collection for each productId
-    const productIds = Array.from(productMap.keys()).filter((id) => id !== 'unknown');
+    // Fetch units for all unique productIds
+    const allProductIds = new Set([...globalProductMap.keys()]);
+    outletDataMap.forEach((entry) => {
+      entry.productMap.forEach((_, pid) => allProductIds.add(pid));
+    });
+    allProductIds.delete('unknown');
+
     const unitMap = new Map();
-    if (productIds.length > 0) {
+    const productIdArr = Array.from(allProductIds);
+    if (productIdArr.length > 0) {
       const productDocs = await Promise.all(
-        productIds.map((id) => db.collection('products').doc(id).get())
+        productIdArr.map((id) => db.collection('products').doc(id).get())
       );
       productDocs.forEach((doc, i) => {
-        const pid = productIds[i];
-        unitMap.set(pid, doc.exists ? (doc.data().unit || '') : '');
+        unitMap.set(productIdArr[i], doc.exists ? (doc.data().unit || '') : '');
       });
     }
 
-    const products = Array.from(productMap.values()).map((p) => {
-      const unit = unitMap.get(p.productId) || '';
-      const subtotalBeforeDiscount = p.totalAmount + (p.totalDiscount || 0);
-      const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
-      const discountPercentage = subtotalBeforeDiscount > 0
-        ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100
-        : 0;
+    const buildProductList = (pMap) => {
+      return Array.from(pMap.values()).map((p) => {
+        const unit = unitMap.get(p.productId) || '';
+        const subtotalBeforeDiscount = p.totalAmount + (p.totalDiscount || 0);
+        const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
+        const discPct = subtotalBeforeDiscount > 0
+          ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
+        return {
+          productId: p.productId,
+          name: p.name,
+          totalQuantity: p.totalQuantity,
+          unit,
+          price: Math.round(avgPrice * 100) / 100,
+          discountPercentage: Math.round(discPct * 100) / 100,
+          totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
+          totalAmount: Math.round(p.totalAmount * 100) / 100,
+        };
+      }).sort((a, b) => a.name.localeCompare(b.name));
+    };
+
+    const computeTotals = (products) => {
+      const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
+      const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
+      const subtotal = totalAmount + totalDiscount;
+      const discPct = subtotal > 0 ? (totalDiscount / subtotal) * 100 : 0;
       return {
-        productId: p.productId,
-        name: p.name,
-        totalQuantity: p.totalQuantity,
-        unit,
-        price: Math.round(avgPrice * 100) / 100,
-        discountPercentage: Math.round(discountPercentage * 100) / 100,
-        totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
-        totalAmount: Math.round(p.totalAmount * 100) / 100,
+        totalAmount: Math.round(totalAmount * 100) / 100,
+        totalDiscount: Math.round(totalDiscount * 100) / 100,
+        totalDiscountPercentage: Math.round(discPct * 100) / 100,
       };
-    }).sort((a, b) => a.name.localeCompare(b.name));
+    };
 
-    const grandTotalAmount = products.reduce((sum, p) => sum + (p.totalAmount || 0), 0);
-    const grandTotalDiscount = products.reduce((sum, p) => sum + (p.totalDiscount || 0), 0);
-    const grandSubtotal = grandTotalAmount + grandTotalDiscount;
-    const totalDiscountPercentage = grandSubtotal > 0 ? (grandTotalDiscount / grandSubtotal) * 100 : 0;
+    // Build global product list
+    const globalProducts = buildProductList(globalProductMap);
+    const globalTotals = computeTotals(globalProducts);
 
-    // Store in DailyProductDelivery collection with date as document ID
-    const docRef = db.collection('DailyProductDelivery').doc(dateStr);
-    await docRef.set({
+    // Build per-outlet results and write to subcollection
+    const outletSummaries = [];
+    const dateDocRef = db.collection('DailyProductDelivery').doc(dateStr);
+    const batch = db.batch();
+
+    batch.set(dateDocRef, {
       date: dateStr,
       deliveredDate: dateStr,
-      products,
-      totalProducts: products.length,
+      products: globalProducts,
+      totalProducts: globalProducts.length,
       totalOrders,
-      totalDiscountPercentage: Math.round(totalDiscountPercentage * 100) / 100,
-      totalDiscount: Math.round(grandTotalDiscount * 100) / 100,
-      totalAmount: Math.round(grandTotalAmount * 100) / 100,
+      totalOutlets: outletDataMap.size,
+      ...globalTotals,
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
       status: 'success',
     });
 
-    console.log(`✅ Stored ${products.length} products from ${totalOrders} orders for ${dateStr}`);
+    for (const [outletId, entry] of outletDataMap) {
+      const outletName = outletMap.get(outletId) || 'Unknown Outlet';
+      const products = buildProductList(entry.productMap);
+      const totals = computeTotals(products);
+
+      const outletDocRef = dateDocRef.collection('outlets').doc(outletId);
+      batch.set(outletDocRef, {
+        outletId,
+        outletName,
+        date: dateStr,
+        products,
+        totalProducts: products.length,
+        totalOrders: entry.orderCount,
+        ...totals,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      });
+
+      outletSummaries.push({
+        outletId,
+        outletName,
+        totalOrders: entry.orderCount,
+        totalProducts: products.length,
+        ...totals,
+      });
+    }
+
+    await batch.commit();
+
+    console.log(`✅ Stored ${globalProducts.length} products from ${totalOrders} orders across ${outletDataMap.size} outlets for ${dateStr}`);
 
     return res.status(200).json({
       success: true,
@@ -388,7 +458,10 @@ export const calculateDailyProductDelivery = async (req, res) => {
       summary: {
         date: dateStr,
         totalOrders,
-        totalProducts: products.length,
+        totalProducts: globalProducts.length,
+        totalOutlets: outletDataMap.size,
+        ...globalTotals,
+        outlets: outletSummaries,
       },
       executedAt: new Date().toISOString(),
     });
@@ -415,6 +488,106 @@ export const calculateDailyProductDelivery = async (req, res) => {
       success: false,
       error: error.message,
       executedAt: new Date().toISOString(),
+    });
+  }
+};
+
+/**
+ * GET /api/balance/daily-product-delivery/csv?date=2026-03-17
+ *
+ * Downloads a CSV of outlet-wise delivered product data for the given date.
+ */
+export const getDailyProductDeliveryCSV = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { date } = req.query;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'date query parameter is required (format: YYYY-MM-DD)',
+      });
+    }
+
+    const dateDocRef = db.collection('DailyProductDelivery').doc(date);
+    const dateDoc = await dateDocRef.get();
+
+    if (!dateDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: `No product delivery record found for ${date}`,
+      });
+    }
+
+    const outletsSnapshot = await dateDocRef.collection('outlets')
+      .orderBy('outletName')
+      .get();
+
+    if (outletsSnapshot.empty) {
+      return res.status(404).json({
+        success: false,
+        message: `No outlet-wise data found for ${date}`,
+      });
+    }
+
+    const [year, month, day] = date.split('-').map(Number);
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const voucherDate = `${day}-${months[month - 1]}`;
+
+    const headers = [
+      'Voucher Date', 'Voucher Number', 'Buyer/Supplier', 'State',
+      'Registration Type', 'Registration Number', 'Item Name',
+      'Billed Quantity', 'Item Rate', 'Unit', 'Discount %',
+      'Rounding Off', 'Total',
+    ];
+
+    const escapeCSV = (val) => {
+      const str = val == null ? '' : String(val);
+      return str.includes(',') || str.includes('"') || str.includes('\n')
+        ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+
+    const rows = [headers.map(escapeCSV).join(',')];
+    let voucherNumber = 0;
+
+    outletsSnapshot.forEach((doc) => {
+      const outlet = doc.data();
+      voucherNumber++;
+      const products = outlet.products || [];
+
+      products.forEach((product, idx) => {
+        const total = Math.round(product.totalQuantity * product.price * (1 - (product.discountPercentage || 0) / 100) * 100) / 100;
+
+        const row = [
+          idx === 0 ? voucherDate : '',
+          idx === 0 ? voucherNumber : '',
+          idx === 0 ? escapeCSV(outlet.outletName) : '',
+          '',
+          '',
+          '',
+          escapeCSV(product.name),
+          product.totalQuantity,
+          product.price,
+          product.unit || 'kg',
+          product.discountPercentage || 0,
+          '',
+          total,
+        ];
+        rows.push(row.join(','));
+      });
+    });
+
+    const csvContent = rows.join('\n');
+    const filename = `DailyProductDelivery_${date}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csvContent);
+  } catch (error) {
+    console.error('❌ [Daily Product Delivery CSV] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
     });
   }
 };

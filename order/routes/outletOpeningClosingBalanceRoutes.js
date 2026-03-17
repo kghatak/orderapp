@@ -7,6 +7,7 @@ import {
   calculateDailyOpeningClosingBalance,
   calculateDailyProductDelivery,
   getDailyProductDelivery,
+  getDailyProductDeliveryCSV,
 } from '../controllers/outletOpeningClosingBalanceController.js';
 
 const router = express.Router();
@@ -15,6 +16,7 @@ const router = express.Router();
 router.get('/', getOutletOpeningClosingBalances);
 
 // Daily product delivery aggregation — stores products with qty by date
+router.get('/daily-product-delivery/csv', getDailyProductDeliveryCSV);
 router.get('/daily-product-delivery', getDailyProductDelivery);
 router.post('/daily-product-delivery', calculateDailyProductDelivery);
 
