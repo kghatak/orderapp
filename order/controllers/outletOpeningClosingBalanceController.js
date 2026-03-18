@@ -329,7 +329,10 @@ export const calculateDailyProductDelivery = async (req, res) => {
         const price = parseFloat(item.price || 0);
         const itemSubtotal = price * quantity;
         const discountPercentage = parseFloat(item.discountPercentage || 0);
-        const discountAmount = parseFloat(item.discountAmount ?? (itemSubtotal * discountPercentage / 100));
+        const explicitDiscount = parseFloat(item.discountAmount || 0);
+        const discountAmount = explicitDiscount > 0
+          ? explicitDiscount
+          : (itemSubtotal * discountPercentage / 100);
         const itemAmount = itemSubtotal - discountAmount;
 
         // Per-outlet aggregation
