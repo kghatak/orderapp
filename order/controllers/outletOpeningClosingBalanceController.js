@@ -584,7 +584,7 @@ export const getDailyProductDeliveryCSV = async (req, res) => {
       const products = outlet.products || [];
       const gstNo = outlet.gstNo || '';
       const registrationType = gstNo ? 'Registered' : 'Unregistered';
-      const registrationNumber = gstNo || 'NA';
+      const registrationNumber = gstNo || '';
       const state = outlet.address || '';
 
       products.forEach((product) => {
