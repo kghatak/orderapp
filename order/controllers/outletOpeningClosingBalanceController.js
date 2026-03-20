@@ -779,9 +779,11 @@ export const getOutletOpeningClosingBalances = async (req, res) => {
     const records = [];
     snapshot.forEach((doc) => {
       const data = doc.data();
+      const outletId = data.OutletID || data.outletId || '';
       records.push({
         id: doc.id,
         ...data,
+        outletId,
         // Convert Firestore timestamps to ISO strings for JSON response
         timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
         completedAt: data.completedAt?.toDate ? data.completedAt.toDate().toISOString() : data.completedAt,
@@ -821,9 +823,11 @@ export const getOutletOpeningClosingBalanceById = async (req, res) => {
     }
 
     const data = doc.data();
+    const outletId = data.OutletID || data.outletId || '';
     const record = {
       id: doc.id,
       ...data,
+      outletId,
       // Convert Firestore timestamps to ISO strings for JSON response
       timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
       completedAt: data.completedAt?.toDate ? data.completedAt.toDate().toISOString() : data.completedAt,
@@ -998,12 +1002,20 @@ export const calculateClosingBalances = async (req, res) => {
         .get();
 
       let closingBalanceOrder = 0;
+      const ordersList = [];
       ordersSnapshot.forEach((doc) => {
         const orderData = doc.data();
+        const oid = orderData.outletId || outletId;
         // Double check status in case query didn't filter properly
         if (orderData.status === 'delivered') {
           const orderAmount = parseFloat(orderData['total amount'] || orderData.totalAmount || 0);
           closingBalanceOrder += orderAmount;
+          ordersList.push({
+            id: doc.id,
+            outletId: oid,
+            amount: orderAmount,
+            status: orderData.status,
+          });
         }
       });
 
@@ -1016,12 +1028,21 @@ export const calculateClosingBalances = async (req, res) => {
         .get();
 
       let closingBanlanceReturn = 0;
+      const returnsList = [];
       returnsSnapshot.forEach((doc) => {
         const returnData = doc.data();
+        const rid = returnData.outletId || outletId;
         // Double check status in case query didn't filter properly
         if (returnData.status === 'collected') {
           const returnAmount = parseFloat(returnData.totalAmount || 0);
           closingBanlanceReturn += returnAmount;
+          returnsList.push({
+            id: doc.id,
+            outletId: rid,
+            amount: returnAmount,
+            totalAmount: returnAmount,
+            status: returnData.status,
+          });
         }
       });
 
@@ -1034,10 +1055,18 @@ export const calculateClosingBalances = async (req, res) => {
         .get();
 
       let closingBalancePayment = 0;
+      const paymentsList = [];
       paymentsSnapshot.forEach((doc) => {
         const paymentData = doc.data();
         const paymentAmount = parseFloat(paymentData.amount || 0);
+        const pid = paymentData.outletId || outletId;
         closingBalancePayment += paymentAmount;
+        paymentsList.push({
+          id: doc.id,
+          outletId: pid,
+          amount: paymentAmount,
+          status: paymentData.status,
+        });
       });
 
       // Calculate total closing balance
@@ -1068,6 +1097,10 @@ export const calculateClosingBalances = async (req, res) => {
           closingBanlanceReturn,
           closingBalancePayment,
           totalClosingBalance,
+          outletId,
+          orders: ordersList,
+          returns: returnsList,
+          payments: paymentsList,
         });
       } else {
         // Create new document
@@ -1091,6 +1124,10 @@ export const calculateClosingBalances = async (req, res) => {
           closingBanlanceReturn,
           closingBalancePayment,
           totalClosingBalance,
+          outletId,
+          orders: ordersList,
+          returns: returnsList,
+          payments: paymentsList,
         });
       }
 
