@@ -76,9 +76,9 @@ export const createOutlet = async (req, res) => {
       return res.status(400).json({ error: 'Secondary phone number must be exactly 10 digits starting with 6, 7, 8, or 9' });
     }
 
-    // Validate opening balance - must be a valid number
-    if (openingBalance !== undefined && (isNaN(openingBalance) || openingBalance < 0)) {
-      return res.status(400).json({ error: 'Opening balance must be a valid positive number' });
+    // Validate opening balance - must be a valid number (negative allowed, e.g. credit balance)
+    if (openingBalance !== undefined && Number.isNaN(parseFloat(openingBalance))) {
+      return res.status(400).json({ error: 'Opening balance must be a valid number' });
     }
 
     const db = getFirestoreDB();
@@ -263,12 +263,13 @@ export const updateOutlet = async (req, res) => {
             delete updateData.outletName; // Remove the original field
         }
         
-        // Validate opening balance if provided
+        // Validate opening balance if provided (negative allowed, e.g. credit balance)
         if (updateData.openingBalance !== undefined) {
-            if (isNaN(updateData.openingBalance) || updateData.openingBalance < 0) {
-                return res.status(400).json({ error: 'Opening balance must be a valid positive number' });
+            const ob = parseFloat(updateData.openingBalance);
+            if (Number.isNaN(ob)) {
+                return res.status(400).json({ error: 'Opening balance must be a valid number' });
             }
-            updateData.openingBalance = parseFloat(updateData.openingBalance);
+            updateData.openingBalance = ob;
         }
         
         updateData.updatedAt = new Date();
