@@ -5,7 +5,7 @@ import { NannuUser } from '../models/NannuUser.js';
 // Create Nannu User
 export const createNannuUser = async (req, res) => {
   try {
-    const { phoneNumber, password, outletId, userProfile, enableNotification, fcmToken } = req.body;
+    const { phoneNumber, password, outletId, userProfile, tenantId, enableNotification, fcmToken } = req.body;
     const db = getFirestoreDB();
     
     // Validation
@@ -50,6 +50,7 @@ export const createNannuUser = async (req, res) => {
       password,
       outletId: outletId || '',
       userProfile: userProfile || 'Outlet',
+      tenantId: tenantId || '',
       enableNotification: enableNotification !== undefined ? enableNotification : true,
       fcmToken: fcmToken || ''
     });
@@ -65,6 +66,7 @@ export const createNannuUser = async (req, res) => {
         phoneNumber: user.phoneNumber,
         outletId: user.outletId,
         userProfile: user.userProfile,
+        tenantId: user.tenantId || '',
         enableNotification: user.enableNotification,
         createdAt: user.createdAt
       }
@@ -119,6 +121,7 @@ export const getAllNannuUsers = async (req, res) => {
         password: data.password ? '****' : '',
         outletId: data.outletId || null,
         userProfile: data.userProfile || '',
+        tenantId: data.tenantId ?? '',
         enableNotification: data.enableNotification !== undefined ? data.enableNotification : true,
         fcmToken: data.fcmToken || '',
         createdAt: data.createdAt || null,
@@ -195,6 +198,7 @@ export const getNannuUserById = async (req, res) => {
         password: userData.password || '',
         outletId: userData.outletId || null,
         userProfile: userData.userProfile || '',
+        tenantId: userData.tenantId ?? '',
         enableNotification: userData.enableNotification !== undefined ? userData.enableNotification : true,
         fcmToken: userData.fcmToken || '',
         createdAt: userData.createdAt || null,
@@ -214,7 +218,7 @@ export const getNannuUserById = async (req, res) => {
 export const updateNannuUser = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { phoneNumber, password, outletId, userProfile, enableNotification, fcmToken } = req.body;
+    const { phoneNumber, password, outletId, userProfile, tenantId, enableNotification, fcmToken } = req.body;
     const db = getFirestoreDB();
     
     // Check if user exists
@@ -251,6 +255,7 @@ export const updateNannuUser = async (req, res) => {
     if (password !== undefined) updateData.password = password;
     if (outletId !== undefined) updateData.outletId = outletId;
     if (userProfile !== undefined) updateData.userProfile = userProfile;
+    if (tenantId !== undefined) updateData.tenantId = tenantId;
     if (enableNotification !== undefined) updateData.enableNotification = enableNotification;
     if (fcmToken !== undefined) updateData.fcmToken = fcmToken;
     
@@ -383,6 +388,7 @@ export const getNannuUsersByOutletId = async (req, res) => {
         password: data.password || '',
         outletId: data.outletId || null,
         userProfile: data.userProfile || '',
+        tenantId: data.tenantId ?? '',
         enableNotification: data.enableNotification !== undefined ? data.enableNotification : true,
         fcmToken: data.fcmToken || '',
         createdAt: data.createdAt || null,

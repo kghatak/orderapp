@@ -2,11 +2,12 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
+import { isMongoConnected } from '../../config/db.js';
 
 // Signup API
 export const signup = async (req, res) => {
   try {
-    const { phoneNumber, password, confirmPassword, userProfile, adminCode, fcmToken } = req.body;
+    const { phoneNumber, password, confirmPassword, userProfile, adminCode, fcmToken, tenantId } = req.body;
     const db = getFirestoreDB();
 
     // Validation
@@ -116,6 +117,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
+      tenantId: tenantId || '',
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
@@ -130,6 +132,7 @@ export const signup = async (req, res) => {
         phoneNumber: user.phoneNumber,
         userProfile: user.userProfile,
         outletId: user.outletId,
+        tenantId: user.tenantId || '',
         enableNotification: user.enableNotification,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
@@ -206,6 +209,7 @@ export const login = async (req, res) => {
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
+      tenantId: userData.tenantId ?? '',
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {
@@ -218,13 +222,21 @@ export const login = async (req, res) => {
       updatedAt: userData.updatedAt
     };
 
-    // If Admin and tenantId provided, include milk module token for unified frontend login
+    // If Admin and tenantId provided, include milk JWT (requires MongoDB + MilkUser)
     if (userData.userProfile === 'Admin' && tenantId) {
-      const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
-      if (milkAuth) {
-        responseData.milkToken = milkAuth.token;
-        responseData.milkTenantId = milkAuth.tenantId;
-        responseData.milkTokenExpiresIn = milkAuth.expiresIn;
+      if (!isMongoConnected()) {
+        console.warn('Admin login: milkToken skipped — MongoDB not connected (set MONGODB_URI).');
+      } else {
+        try {
+          const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
+          if (milkAuth) {
+            responseData.milkToken = milkAuth.token;
+            responseData.milkTenantId = milkAuth.tenantId;
+            responseData.milkTokenExpiresIn = milkAuth.expiresIn;
+          }
+        } catch (err) {
+          console.error('Admin login: milk token failed (login still OK):', err.message);
+        }
       }
     }
 

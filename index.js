@@ -19,6 +19,10 @@ import nannuUserRoutes from './order/routes/nannuUserRoutes.js';
 import authRoutes from './order/routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
 import { connectMongoDB, isMongoConnected } from './config/db.js';
+import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet-portal/config/portalDb.js';
+import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
+import salesRoutes from './outlet-portal/routes/salesRoutes.js';
+import expensesRoutes from './outlet-portal/routes/expensesRoutes.js';
 import chatRoutes from './order/routes/chatRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
@@ -58,8 +62,18 @@ const PORT = process.env.PORT || 5020;
 
 const app = express();
 
+// CORS: credentials: 'include' from the browser requires a specific Allow-Origin (not *).
+// Set CORS_ORIGINS=http://localhost:5174,https://your-prod-domain.com for an explicit list;
+// if unset, origin: true reflects the requesting Origin (fine for local dev).
+const corsOriginOption = (() => {
+  const raw = process.env.CORS_ORIGINS;
+  if (!raw?.trim()) return true;
+  const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : true;
+})();
+
 // Middleware
-app.use(cors());
+app.use(cors({ origin: corsOriginOption, credentials: true }));
 app.use(bodyParser.json({ limit: '30mb', extended: true }));
 app.use(bodyParser.urlencoded({ limit: '30mb', extended: true }));
 
@@ -67,6 +81,7 @@ initQueueProcessor();
 
 await initializeFirestore();
 await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module will fail on use
+await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
 
 // Route bindings
 app.use('/order(s)?', orderRoutes);
@@ -82,6 +97,42 @@ app.use('/chat(s)?', chatRoutes);
 app.use('/invoice(s)?', customInvoiceRoutes);
 app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
 app.use('/api/balance', outletOpeningClosingBalanceRoutes);
+
+// Outlet portal (Firestore outlet users + separate MongoDB)
+app.use('/outlet-portal', (req, res, next) => {
+  if (!isOutletPortalMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Outlet portal unavailable. Set OUTLET_PORTAL_MONGODB_URI and ensure MongoDB is reachable.'
+    });
+  }
+  next();
+});
+app.use('/outlet-portal/auth', portalAuthRoutes);
+
+// Outlet portal sales (MongoDB `sales` collection; requires portal JWT)
+app.use('/sales', (req, res, next) => {
+  if (!isOutletPortalMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Outlet portal unavailable. Set OUTLET_PORTAL_MONGODB_URI and ensure MongoDB is reachable.'
+    });
+  }
+  next();
+});
+app.use('/sales', salesRoutes);
+
+// Outlet portal expenses (MongoDB; collection name `Expenses`; requires portal JWT)
+app.use('/expenses', (req, res, next) => {
+  if (!isOutletPortalMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Outlet portal unavailable. Set OUTLET_PORTAL_MONGODB_URI and ensure MongoDB is reachable.'
+    });
+  }
+  next();
+});
+app.use('/expenses', expensesRoutes);
 
 // Milk procurement module (MongoDB + tenantId)
 app.use('/milk', (req, res, next) => {
@@ -135,15 +186,19 @@ app.post('/summarize', async (req, res) => {
 });
 
 // Start the server
-const startServer = async () => {
-  try {
-    app.listen(PORT, () => {
-      console.log(`✅ Server running at http://localhost:${PORT}`);
-    });
-  } catch (err) {
-    console.error("❌ Failed to start server:", err.message);
+const startServer = () => {
+  const server = app.listen(PORT, () => {
+    console.log(`✅ Server running at http://localhost:${PORT}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use (another Node/nodemon still running on this port).`);
+      console.error('   Stop that process, or set PORT in .env to a free port, then restart.');
+    } else {
+      console.error('❌ Server failed to start:', err);
+    }
     process.exit(1);
-  }
+  });
 };
 
 startServer();
