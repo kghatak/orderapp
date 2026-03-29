@@ -172,16 +172,17 @@ export const login = async (req, res) => {
 async function validateOrderAdmin(phone, password) {
   try {
     const db = getFirestoreDB();
+    // Single-field query (same as /auth/login) — avoids Firestore composite index on phoneNumber + userProfile
     const snapshot = await db.collection('users')
       .where('phoneNumber', '==', phone)
-      .where('userProfile', '==', 'Admin')
       .limit(1)
       .get();
     if (snapshot.empty) return null;
     const doc = snapshot.docs[0];
     const data = doc.data();
+    if (data.userProfile !== 'Admin') return null;
     if (data.password !== password) return null;
-    return { userId: doc.id, name: data.userId || 'Admin', phone: data.phoneNumber };
+    return { userId: doc.id, name: data.userId || data.name || 'Admin', phone: data.phoneNumber };
   } catch (err) {
     console.error('Order admin validation error:', err);
     return null;
@@ -210,13 +211,18 @@ async function getOrCreateMilkAdmin(tenantId, orderAdmin) {
  * Returns { token, tenantId, expiresIn } or null.
  */
 export async function getMilkTokenForOrderAdmin(tenantId, phone, password) {
-  const orderAdmin = await validateOrderAdmin(phone, password);
-  if (!orderAdmin) return null;
-  const user = await getOrCreateMilkAdmin(tenantId, orderAdmin);
-  const token = jwt.sign(
-    { userId: user._id, tenantId: user.tenantId, role: user.role },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES }
-  );
-  return { token, tenantId: user.tenantId, expiresIn: JWT_EXPIRES };
+  try {
+    const orderAdmin = await validateOrderAdmin(phone, password);
+    if (!orderAdmin) return null;
+    const user = await getOrCreateMilkAdmin(tenantId, orderAdmin);
+    const token = jwt.sign(
+      { userId: user._id, tenantId: user.tenantId, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES }
+    );
+    return { token, tenantId: user.tenantId, expiresIn: JWT_EXPIRES };
+  } catch (err) {
+    console.error('getMilkTokenForOrderAdmin:', err);
+    return null;
+  }
 }

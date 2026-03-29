@@ -7,6 +7,7 @@ export class NannuUser {
     password,
     outletId = '',
     userProfile = 'Outlet',
+    tenantId = '',
     enableNotification = true,
     fcmToken = '',
     createdAt = null,
@@ -17,9 +18,10 @@ export class NannuUser {
     this.password = password;
     this.outletId = outletId;
     this.userProfile = userProfile;
+    this.tenantId = tenantId;
     this.enableNotification = enableNotification;
     this.fcmToken = fcmToken;
     this.createdAt = createdAt || new Date();
     this.updatedAt = updatedAt || new Date();
   }
-} 
+}
