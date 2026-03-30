@@ -522,6 +522,269 @@ export const calculateDailyProductDelivery = async (req, res) => {
 };
 
 /**
+ * POST /api/balance/daily-product-return
+ *
+ * Aggregates all line items from collected return orders for the triggered date
+ * and stores them in the DailyProductReturn collection with the date as document ID.
+ * Uses the same IST day window and outlet/product aggregation shape as daily product delivery.
+ */
+export const calculateDailyProductReturn = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { triggeredAt, timeZone, source } = req.body;
+    const executionStart = new Date();
+
+    console.log(`📦 [Daily Product Return] Started at ${executionStart.toISOString()}`);
+    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
+
+    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
+    const targetYear = istDate.getUTCFullYear();
+    const targetMonth = istDate.getUTCMonth();
+    const targetDay = istDate.getUTCDate();
+
+    const dateStr = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+
+    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
+    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
+
+    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
+    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
+
+    console.log(`📅 Target date (IST): ${dateStr}`);
+
+    const [outletsSnapshot, returnsSnapshot] = await Promise.all([
+      db.collection('outlets').where('active', '==', true).get(),
+      db.collection('returns')
+        .where('status', '==', 'collected')
+        .where('createdAt', '>=', dayStartTimestamp)
+        .where('createdAt', '<=', dayEndTimestamp)
+        .get(),
+    ]);
+
+    const outletMap = new Map();
+    outletsSnapshot.forEach((doc) => {
+      const d = doc.data();
+      outletMap.set(doc.id, {
+        name: d.name || d.outletName || 'Unknown Outlet',
+        gstNo: d.gstNo || d.gst || d.gstin || '',
+        address: d.address || '',
+      });
+    });
+
+    const outletDataMap = new Map();
+    const globalProductMap = new Map();
+    let totalReturns = 0;
+
+    returnsSnapshot.forEach((doc) => {
+      const data = doc.data();
+      if (data.archived) return;
+
+      totalReturns++;
+      const outletId = data.outletId || 'unknown';
+      const items = data.items || [];
+
+      if (!outletDataMap.has(outletId)) {
+        outletDataMap.set(outletId, { returnCount: 0, productMap: new Map() });
+      }
+      const outletEntry = outletDataMap.get(outletId);
+      outletEntry.returnCount++;
+
+      items.forEach((item) => {
+        const productId = item.productId || item.prodid || 'unknown';
+        const name = item.name || 'Unknown Product';
+        const quantity = parseFloat(item.quantity || 0);
+        const price = parseFloat(item.price || 0);
+        const itemSubtotal = price * quantity;
+        const discountPercentage = parseFloat(item.discountPercentage || 0);
+        const explicitDiscount = parseFloat(item.discountAmount || 0);
+        const discountAmount = explicitDiscount > 0
+          ? explicitDiscount
+          : (itemSubtotal * discountPercentage / 100);
+        const itemAmount = itemSubtotal - discountAmount;
+
+        const oMap = outletEntry.productMap;
+        if (oMap.has(productId)) {
+          const ex = oMap.get(productId);
+          ex.totalQuantity += quantity;
+          ex.totalAmount += itemAmount;
+          ex.totalDiscount += discountAmount;
+        } else {
+          oMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+        }
+
+        if (globalProductMap.has(productId)) {
+          const ex = globalProductMap.get(productId);
+          ex.totalQuantity += quantity;
+          ex.totalAmount += itemAmount;
+          ex.totalDiscount += discountAmount;
+        } else {
+          globalProductMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+        }
+      });
+    });
+
+    const allProductIds = new Set([...globalProductMap.keys()]);
+    outletDataMap.forEach((entry) => {
+      entry.productMap.forEach((_, pid) => allProductIds.add(pid));
+    });
+    allProductIds.delete('unknown');
+
+    const unitMap = new Map();
+    const productIdArr = Array.from(allProductIds);
+    if (productIdArr.length > 0) {
+      const productDocs = await Promise.all(
+        productIdArr.map((id) => db.collection('products').doc(id).get())
+      );
+      productDocs.forEach((doc, i) => {
+        unitMap.set(productIdArr[i], doc.exists ? (doc.data().unit || '') : '');
+      });
+    }
+
+    const buildProductList = (pMap) => {
+      return Array.from(pMap.values()).map((p) => {
+        const unit = unitMap.get(p.productId) || '';
+        const subtotalBeforeDiscount = p.totalAmount + (p.totalDiscount || 0);
+        const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
+        const discPct = subtotalBeforeDiscount > 0
+          ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
+        return {
+          productId: p.productId,
+          name: p.name,
+          totalQuantity: p.totalQuantity,
+          unit,
+          price: Math.round(avgPrice * 100) / 100,
+          discountPercentage: Math.round(discPct * 100) / 100,
+          totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
+          totalAmount: Math.round(p.totalAmount * 100) / 100,
+        };
+      }).sort((a, b) => a.name.localeCompare(b.name));
+    };
+
+    const computeTotals = (products) => {
+      const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
+      const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
+      const subtotal = totalAmount + totalDiscount;
+      const discPct = subtotal > 0 ? (totalDiscount / subtotal) * 100 : 0;
+      return {
+        totalAmount: Math.round(totalAmount * 100) / 100,
+        totalDiscount: Math.round(totalDiscount * 100) / 100,
+        totalDiscountPercentage: Math.round(discPct * 100) / 100,
+      };
+    };
+
+    const missingOutletIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
+    if (missingOutletIds.length > 0) {
+      const missingDocs = await Promise.all(
+        missingOutletIds.map((id) => db.collection('outlets').doc(id).get())
+      );
+      missingDocs.forEach((doc, i) => {
+        const d = doc.exists ? doc.data() : {};
+        outletMap.set(missingOutletIds[i], {
+          name: d.name || d.outletName || 'Unknown Outlet',
+          gstNo: d.gstNo || d.gst || d.gstin || '',
+          address: d.address || '',
+        });
+      });
+    }
+
+    const globalProducts = buildProductList(globalProductMap);
+    const globalTotals = computeTotals(globalProducts);
+
+    const outletSummaries = [];
+    const dateDocRef = db.collection('DailyProductReturn').doc(dateStr);
+    const batch = db.batch();
+
+    batch.set(dateDocRef, {
+      date: dateStr,
+      returnDate: dateStr,
+      products: globalProducts,
+      totalProducts: globalProducts.length,
+      totalReturns,
+      totalOutlets: outletDataMap.size,
+      ...globalTotals,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'success',
+    });
+
+    for (const [outletId, entry] of outletDataMap) {
+      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', address: '' };
+      const outletName = outletInfo.name;
+      const products = buildProductList(entry.productMap);
+      const totals = computeTotals(products);
+
+      const outletDocRef = dateDocRef.collection('outlets').doc(outletId);
+      batch.set(outletDocRef, {
+        outletId,
+        outletName,
+        gstNo: outletInfo.gstNo || '',
+        address: outletInfo.address || '',
+        date: dateStr,
+        products,
+        totalProducts: products.length,
+        totalReturns: entry.returnCount,
+        ...totals,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      });
+
+      outletSummaries.push({
+        outletId,
+        outletName,
+        gstNo: outletInfo.gstNo || '',
+        address: outletInfo.address || '',
+        totalReturns: entry.returnCount,
+        totalProducts: products.length,
+        ...totals,
+      });
+    }
+
+    await batch.commit();
+
+    console.log(`✅ Stored ${globalProducts.length} return line-aggregated products from ${totalReturns} returns across ${outletDataMap.size} outlets for ${dateStr}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Daily product return recorded for ${dateStr}`,
+      summary: {
+        date: dateStr,
+        totalReturns,
+        totalProducts: globalProducts.length,
+        totalOutlets: outletDataMap.size,
+        ...globalTotals,
+        outlets: outletSummaries,
+      },
+      executedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [Daily Product Return] Fatal error:', error);
+
+    try {
+      const db = getFirestoreDB();
+      await db.collection('notifications').add({
+        userId: 'admin',
+        title: '❌ Daily Product Return Failed',
+        body: `Daily product return calculation failed: ${error.message}`,
+        type: 'system',
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        error: error.message,
+        executedAt: new Date().toISOString(),
+      });
+    } catch (notifError) {
+      console.error('❌ Failed to create error notification:', notifError.message);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      executedAt: new Date().toISOString(),
+    });
+  }
+};
+
+/**
  * GET /api/balance/daily-product-delivery/csv?date=2026-03-17
  *
  * Downloads a CSV of outlet-wise delivered product data for the given date.
@@ -625,6 +888,109 @@ export const getDailyProductDeliveryCSV = async (req, res) => {
 };
 
 /**
+ * GET /api/balance/daily-product-return/csv?date=2026-03-17
+ *
+ * Downloads a CSV of outlet-wise returned product data for the given date.
+ */
+export const getDailyProductReturnCSV = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { date } = req.query;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'date query parameter is required (format: YYYY-MM-DD)',
+      });
+    }
+
+    const dateDocRef = db.collection('DailyProductReturn').doc(date);
+    const dateDoc = await dateDocRef.get();
+
+    if (!dateDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: `No product return record found for ${date}`,
+      });
+    }
+
+    const outletsSnapshot = await dateDocRef.collection('outlets')
+      .orderBy('outletName')
+      .get();
+
+    if (outletsSnapshot.empty) {
+      return res.status(404).json({
+        success: false,
+        message: `No outlet-wise return data found for ${date}`,
+      });
+    }
+
+    const [year, month, day] = date.split('-').map(Number);
+    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
+
+    const headers = [
+      'Voucher Date', 'Voucher Number', 'Buyer/Supplier', 'State',
+      'Registration Type', 'Registration Number', 'Item Name',
+      'Billed Quantity', 'Item Rate', 'Unit', 'Discount %',
+      'Rounding Off', 'Total',
+    ];
+
+    const escapeCSV = (val) => {
+      const str = val == null ? '' : String(val);
+      return str.includes(',') || str.includes('"') || str.includes('\n')
+        ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+
+    const rows = [headers.map(escapeCSV).join(',')];
+    let voucherNumber = 0;
+
+    outletsSnapshot.forEach((doc) => {
+      const outlet = doc.data();
+      voucherNumber++;
+      const products = outlet.products || [];
+      const gstNo = outlet.gstNo || '';
+      const registrationType = gstNo ? 'Registered' : 'Unregistered';
+      const registrationNumber = gstNo || '';
+      const state = outlet.address || '';
+
+      products.forEach((product) => {
+        const total = Math.round(product.totalQuantity * product.price * (1 - (product.discountPercentage || 0) / 100) * 100) / 100;
+
+        const row = [
+          voucherDate,
+          voucherNumber,
+          escapeCSV(outlet.outletName),
+          escapeCSV(state),
+          registrationType,
+          registrationNumber,
+          escapeCSV(product.name),
+          product.totalQuantity,
+          product.price,
+          product.unit || 'kg',
+          product.discountPercentage || 0,
+          '',
+          total,
+        ];
+        rows.push(row.join(','));
+      });
+    });
+
+    const csvContent = rows.join('\n');
+    const filename = `DailyProductReturn_${date}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csvContent);
+  } catch (error) {
+    console.error('❌ [Daily Product Return CSV] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
  * GET /api/balance/daily-product-delivery?date=2026-02-23&page=1&limit=20
  *
  * Returns the daily product delivery record for a specific date with pagination on products.
@@ -694,6 +1060,83 @@ export const getDailyProductDelivery = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ [Get Daily Product Delivery] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/balance/daily-product-return?date=2026-02-23&page=1&limit=20
+ *
+ * Returns the daily aggregated product return record for a specific date with pagination on products.
+ */
+export const getDailyProductReturn = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const { date, page = 1, limit = 20 } = req.query;
+
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        error: 'date query parameter is required (format: YYYY-MM-DD)',
+      });
+    }
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format. Use YYYY-MM-DD (e.g., 2026-02-23)',
+      });
+    }
+
+    const doc = await db.collection('DailyProductReturn').doc(date).get();
+
+    if (!doc.exists) {
+      return res.status(404).json({
+        success: false,
+        message: `No product return record found for ${date}`,
+      });
+    }
+
+    const data = doc.data();
+    const allProducts = data.products || [];
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+    const totalProducts = allProducts.length;
+    const totalPages = Math.ceil(totalProducts / limitNum);
+    const offset = (pageNum - 1) * limitNum;
+    const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+
+    return res.status(200).json({
+      success: true,
+      message: `Product return details for ${date}`,
+      data: {
+        date: data.date,
+        returnDate: data.returnDate,
+        totalReturns: data.totalReturns,
+        totalProducts,
+        totalDiscountPercentage: data.totalDiscountPercentage,
+        totalDiscount: data.totalDiscount,
+        totalAmount: data.totalAmount,
+        products: paginatedProducts,
+        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+        status: data.status,
+      },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalProducts,
+        totalPages,
+        hasNextPage: pageNum < totalPages,
+        hasPrevPage: pageNum > 1,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [Get Daily Product Return] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
