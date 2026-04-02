@@ -1,8 +1,73 @@
 import mongoose from 'mongoose';
+import { getPortalConnection } from '../config/portalDb.js';
+import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateSaleId } from '../util/businessIds.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+const isTransactionUnsupportedError = (e) => {
+  const m = e && e.message ? String(e.message) : '';
+  return (
+    m.includes('Transaction numbers are only allowed') ||
+    m.includes('replica set member') ||
+    m.includes('mongos')
+  );
+};
+
+/**
+ * Sums sold quantity per productId (handles duplicate lines).
+ * @param {{ productId: string, quantity: number }[]} normalizedItems
+ * @returns {Map<string, number>}
+ */
+const soldQtyByProductId = (normalizedItems) => {
+  const map = new Map();
+  for (const line of normalizedItems) {
+    const pid = line.productId;
+    const q = Number(line.quantity);
+    if (!Number.isFinite(q) || q <= 0) continue;
+    map.set(pid, (map.get(pid) || 0) + q);
+  }
+  return map;
+};
+
+/**
+ * Subtracts sold quantities from MongoDB `Products` for this outlet (keys must exist).
+ * Each quantity floors at 0. Runs inside optional Mongoose session (transaction).
+ */
+const decrementOutletProductsForSale = async (outletId, normalizedItems, session) => {
+  const totals = soldQtyByProductId(normalizedItems);
+  if (totals.size === 0) return;
+
+  const OutletProducts = getOutletProductsModel();
+  const q = OutletProducts.findOne({ outletId });
+  const doc = session ? await q.session(session) : await q;
+
+  if (!doc?.products || typeof doc.products !== 'object' || Array.isArray(doc.products)) {
+    return;
+  }
+
+  let touched = false;
+  for (const [pid, soldTotal] of totals) {
+    if (!Object.prototype.hasOwnProperty.call(doc.products, pid)) {
+      continue;
+    }
+    const entry = doc.products[pid];
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const current = Number(entry.quantity);
+    const safeCurrent = Number.isFinite(current) ? current : 0;
+    entry.quantity = Math.max(0, safeCurrent - soldTotal);
+    touched = true;
+  }
+
+  if (touched) {
+    doc.updatedAt = new Date();
+    doc.markModified('products');
+    await doc.save(session ? { session } : {});
+  }
+};
 
 const serializeSale = (doc) => {
   const s = doc.toObject ? doc.toObject() : { ...doc };
@@ -158,7 +223,7 @@ export const createSale = async (req, res) => {
 
     const saleId = generateSaleId(auth.outletId);
     const Sale = getSaleModel();
-    const sale = await Sale.create({
+    const salePayload = {
       saleId,
       tenantId: auth.tenantId,
       outletId: auth.outletId,
@@ -166,7 +231,29 @@ export const createSale = async (req, res) => {
       customer: customerDoc,
       items: normalizedItems,
       total: totalNum
-    });
+    };
+
+    const conn = getPortalConnection();
+    const session = await conn.startSession();
+    let sale;
+    try {
+      session.startTransaction();
+      const created = await Sale.create([salePayload], { session });
+      sale = created[0];
+      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session);
+      await session.commitTransaction();
+    } catch (txErr) {
+      await session.abortTransaction().catch(() => {});
+      if (isTransactionUnsupportedError(txErr)) {
+        sale = await Sale.create(salePayload);
+        await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+      } else {
+        console.error('Create sale transaction error:', txErr);
+        return res.status(500).json({ success: false, message: 'Failed to create sale' });
+      }
+    } finally {
+      session.endSession();
+    }
 
     res.status(201).json({
       success: true,
