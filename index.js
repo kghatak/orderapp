@@ -23,6 +23,7 @@ import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet
 import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
 import salesRoutes from './outlet-portal/routes/salesRoutes.js';
 import expensesRoutes from './outlet-portal/routes/expensesRoutes.js';
+import outletProductsRoutes from './outlet-portal/routes/outletProductsRoutes.js';
 import chatRoutes from './order/routes/chatRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
@@ -133,6 +134,18 @@ app.use('/expenses', (req, res, next) => {
   next();
 });
 app.use('/expenses', expensesRoutes);
+
+// Outlet catalog per outlet — MongoDB collection `Products` (requires outlet portal MongoDB)
+app.use('/outlet-products', (req, res, next) => {
+  if (!isOutletPortalMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Outlet portal unavailable. Set OUTLET_PORTAL_MONGODB_URI and ensure MongoDB is reachable.'
+    });
+  }
+  next();
+});
+app.use('/outlet-products', outletProductsRoutes);
 
 // Milk procurement module (MongoDB + tenantId)
 app.use('/milk', (req, res, next) => {
