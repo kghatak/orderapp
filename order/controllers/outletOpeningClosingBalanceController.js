@@ -1,7 +1,242 @@
 // controllers/outletOpeningClosingBalanceController.js
+import ExcelJS from 'exceljs';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { OutletOpeningClosingBalance } from '../models/outletOpeningClosingBalance.js';
 import admin from 'firebase-admin';
+
+const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+/**
+ * List price is GST-inclusive. Discount % off list; tax split backed out from discounted inclusive total.
+ * @param {boolean} interState — true: IGST only; false: CGST+SGST half each.
+ */
+const computeDeliveryCsvTaxLine = (itemRate, discountPct, qty, gstPct, interState) => {
+  const rate = Number(itemRate) || 0;
+  const disc = Number(discountPct) || 0;
+  const q = Number(qty) || 0;
+  const gst = Number(gstPct) || 0;
+
+  const rateAfterDiscountInclTax = roundMoney2(rate * (1 - disc / 100));
+  const billTotal = roundMoney2(rateAfterDiscountInclTax * q);
+  const gDec = gst / 100;
+  const taxableValue = gDec > 0 ? roundMoney2(billTotal / (1 + gDec)) : billTotal;
+
+  let igstRate = 0;
+  let igstAmt = 0;
+  let cgstRate = 0;
+  let cgstAmt = 0;
+  let sgstRate = 0;
+  let sgstAmt = 0;
+
+  if (gst > 0) {
+    if (interState) {
+      igstRate = gst;
+      igstAmt = roundMoney2(taxableValue * gDec);
+    } else {
+      cgstRate = roundMoney2(gst / 2);
+      sgstRate = roundMoney2(gst / 2);
+      const halfDec = gDec / 2;
+      cgstAmt = roundMoney2(taxableValue * halfDec);
+      sgstAmt = roundMoney2(taxableValue * halfDec);
+    }
+  }
+
+  const taxParts = igstAmt + cgstAmt + sgstAmt;
+  const rounding = roundMoney2(billTotal - taxableValue - taxParts);
+
+  return {
+    rateAfterDiscountInclTax,
+    taxableValueAfterDiscountPerUnit: q > 0 ? roundMoney2(taxableValue / q) : '',
+    totalTaxableLine: taxableValue,
+    igstRate,
+    igstAmt,
+    cgstRate,
+    cgstAmt,
+    sgstRate,
+    sgstAmt,
+    rounding,
+    billTotal,
+  };
+};
+
+const PRODUCT_VOUCHER_EXPORT_HEADERS = [
+  'Voucher Date',
+  'Voucher Number',
+  'Buyer/Supplier',
+  'State',
+  'Registration Type',
+  'Registration Number',
+  'Item Name',
+  'Billed Quantity',
+  'Item Rate',
+  'Unit',
+  'Discount %',
+  'Item Rate After Discount Including Tax',
+  'Taxable Value After Discount',
+  'Total',
+  'IGST Rate',
+  'IGST Amount',
+  'CGST Rate',
+  'CGST Amount',
+  'SGST Rate',
+  'SGST Amount',
+  'Rounding',
+  'Bill Total',
+];
+
+/**
+ * Shared data for delivery/return voucher exports (.xlsx).
+ * @param {'delivery' | 'return'} kind
+ */
+const buildDailyProductVoucherExportRows = async (req, kind) => {
+  const db = getFirestoreDB();
+  const { date, interState, defaultGst } = req.query;
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { success: false, error: 'date query parameter is required (format: YYYY-MM-DD)' },
+    };
+  }
+
+  const interStateBool = interState === '1' || interState === 'true' || interState === true;
+  const defaultGstNum = defaultGst !== undefined && defaultGst !== '' ? parseFloat(String(defaultGst)) : NaN;
+  const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
+
+  const isDelivery = kind === 'delivery';
+  const dateDocRef = db.collection(isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn').doc(date);
+  const dateDoc = await dateDocRef.get();
+
+  if (!dateDoc.exists) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        success: false,
+        message: isDelivery
+          ? `No product delivery record found for ${date}`
+          : `No product return record found for ${date}`,
+      },
+    };
+  }
+
+  const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
+
+  if (outletsSnapshot.empty) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        success: false,
+        message: isDelivery
+          ? `No outlet-wise data found for ${date}`
+          : `No outlet-wise return data found for ${date}`,
+      },
+    };
+  }
+
+  const productIds = new Set();
+  outletsSnapshot.forEach((d) => {
+    (d.data().products || []).forEach((p) => {
+      if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+    });
+  });
+
+  const gstFromCatalog = new Map();
+  await Promise.all(
+    [...productIds].map(async (id) => {
+      const pd = await db.collection('products').doc(id).get();
+      const g = pd.exists ? parseFloat(pd.data().gst ?? 0) : 0;
+      gstFromCatalog.set(id, Number.isFinite(g) ? g : 0);
+    })
+  );
+
+  const outletDocs = outletsSnapshot.docs;
+  const voucherOutletCount = outletDocs.length;
+  const voucherCounterRef = db
+    .collection('counters')
+    .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
+
+  const startVoucherNumber = await db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(voucherCounterRef);
+    const last = snap.exists ? Number(snap.data().count) : 0;
+    const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
+    const start = safeLast + 1;
+    const newCount = safeLast + voucherOutletCount;
+    transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
+    return start;
+  });
+
+  const [year, month, day] = date.split('-').map(Number);
+  const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
+
+  /** @type {Array<Array<string|number>>} */
+  const rows = [];
+
+  outletDocs.forEach((doc, outletIndex) => {
+    const outlet = doc.data();
+    const voucherNumber = startVoucherNumber + outletIndex;
+    const products = outlet.products || [];
+    const gstNo = outlet.gstNo || '';
+    const registrationType = gstNo ? 'Registered' : 'Unregistered';
+    const registrationNumber = gstNo || '';
+    const state = outlet.address != null ? String(outlet.address).trim() : '';
+
+    products.forEach((product) => {
+      const pid = product.productId;
+      let gstPct =
+        product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
+          ? Number(product.gst)
+          : undefined;
+      if (!Number.isFinite(gstPct)) {
+        gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
+      }
+
+      const tax = computeDeliveryCsvTaxLine(
+        product.price,
+        product.discountPercentage || 0,
+        product.totalQuantity,
+        gstPct,
+        interStateBool
+      );
+
+      const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+
+      rows.push([
+        voucherDate,
+        voucherNumber,
+        outlet.outletName ?? '',
+        state,
+        registrationType,
+        registrationNumber,
+        product.name ?? '',
+        Number(product.totalQuantity),
+        Number(product.price),
+        (product.unit || 'kg').toString().toUpperCase(),
+        Number(product.discountPercentage || 0),
+        tax.rateAfterDiscountInclTax,
+        perUnitTaxable === '' ? '' : perUnitTaxable,
+        tax.totalTaxableLine,
+        tax.igstRate,
+        tax.igstAmt,
+        tax.cgstRate,
+        tax.cgstAmt,
+        tax.sgstRate,
+        tax.sgstAmt,
+        tax.rounding,
+        tax.billTotal,
+      ]);
+    });
+  });
+
+  return {
+    ok: true,
+    headers: PRODUCT_VOUCHER_EXPORT_HEADERS,
+    rows,
+    filenameBase: isDelivery ? `DailyProductDelivery_${date}` : `DailyProductReturn_${date}`,
+  };
+};
 
 /**
  * POST /api/balance/calculate-opening-closing
@@ -334,6 +569,8 @@ export const calculateDailyProductDelivery = async (req, res) => {
           ? explicitDiscount
           : (itemSubtotal * discountPercentage / 100);
         const itemAmount = itemSubtotal - discountAmount;
+        const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
+        const gstWeighted = lineGst * quantity;
 
         // Per-outlet aggregation
         const oMap = outletEntry.productMap;
@@ -342,8 +579,16 @@ export const calculateDailyProductDelivery = async (req, res) => {
           ex.totalQuantity += quantity;
           ex.totalAmount += itemAmount;
           ex.totalDiscount += discountAmount;
+          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
         } else {
-          oMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+          oMap.set(productId, {
+            productId,
+            name,
+            totalQuantity: quantity,
+            totalAmount: itemAmount,
+            totalDiscount: discountAmount,
+            gstWeighted,
+          });
         }
 
         // Global aggregation
@@ -352,8 +597,16 @@ export const calculateDailyProductDelivery = async (req, res) => {
           ex.totalQuantity += quantity;
           ex.totalAmount += itemAmount;
           ex.totalDiscount += discountAmount;
+          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
         } else {
-          globalProductMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+          globalProductMap.set(productId, {
+            productId,
+            name,
+            totalQuantity: quantity,
+            totalAmount: itemAmount,
+            totalDiscount: discountAmount,
+            gstWeighted,
+          });
         }
       });
     });
@@ -383,6 +636,8 @@ export const calculateDailyProductDelivery = async (req, res) => {
         const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
         const discPct = subtotalBeforeDiscount > 0
           ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
+        const gw = p.gstWeighted != null ? p.gstWeighted : 0;
+        const gstAvg = p.totalQuantity > 0 ? gw / p.totalQuantity : 0;
         return {
           productId: p.productId,
           name: p.name,
@@ -392,6 +647,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
           discountPercentage: Math.round(discPct * 100) / 100,
           totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
           totalAmount: Math.round(p.totalAmount * 100) / 100,
+          gst: Math.round(gstAvg * 100) / 100,
         };
       }).sort((a, b) => a.name.localeCompare(b.name));
     };
@@ -603,6 +859,8 @@ export const calculateDailyProductReturn = async (req, res) => {
           ? explicitDiscount
           : (itemSubtotal * discountPercentage / 100);
         const itemAmount = itemSubtotal - discountAmount;
+        const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
+        const gstWeighted = lineGst * quantity;
 
         const oMap = outletEntry.productMap;
         if (oMap.has(productId)) {
@@ -610,8 +868,16 @@ export const calculateDailyProductReturn = async (req, res) => {
           ex.totalQuantity += quantity;
           ex.totalAmount += itemAmount;
           ex.totalDiscount += discountAmount;
+          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
         } else {
-          oMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+          oMap.set(productId, {
+            productId,
+            name,
+            totalQuantity: quantity,
+            totalAmount: itemAmount,
+            totalDiscount: discountAmount,
+            gstWeighted,
+          });
         }
 
         if (globalProductMap.has(productId)) {
@@ -619,8 +885,16 @@ export const calculateDailyProductReturn = async (req, res) => {
           ex.totalQuantity += quantity;
           ex.totalAmount += itemAmount;
           ex.totalDiscount += discountAmount;
+          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
         } else {
-          globalProductMap.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount });
+          globalProductMap.set(productId, {
+            productId,
+            name,
+            totalQuantity: quantity,
+            totalAmount: itemAmount,
+            totalDiscount: discountAmount,
+            gstWeighted,
+          });
         }
       });
     });
@@ -649,6 +923,8 @@ export const calculateDailyProductReturn = async (req, res) => {
         const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
         const discPct = subtotalBeforeDiscount > 0
           ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
+        const gw = p.gstWeighted != null ? p.gstWeighted : 0;
+        const gstAvg = p.totalQuantity > 0 ? gw / p.totalQuantity : 0;
         return {
           productId: p.productId,
           name: p.name,
@@ -658,6 +934,7 @@ export const calculateDailyProductReturn = async (req, res) => {
           discountPercentage: Math.round(discPct * 100) / 100,
           totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
           totalAmount: Math.round(p.totalAmount * 100) / 100,
+          gst: Math.round(gstAvg * 100) / 100,
         };
       }).sort((a, b) => a.name.localeCompare(b.name));
     };
@@ -785,101 +1062,29 @@ export const calculateDailyProductReturn = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery/csv?date=2026-03-17
+ * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5
  *
- * Downloads a CSV of outlet-wise delivered product data for the given date.
+ * Voucher-style Excel export (GST-inclusive list price, discount %, tax backed out).
+ * interState=true → IGST only; else CGST+SGST half each.
+ * Voucher numbers: `counters/deliveredvouchercounter` (`count`).
  */
-export const getDailyProductDeliveryCSV = async (req, res) => {
+export const getDailyProductDeliveryXLSX = async (req, res) => {
   try {
-    const db = getFirestoreDB();
-    const { date } = req.query;
-
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({
-        success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
-      });
-    }
-
-    const dateDocRef = db.collection('DailyProductDelivery').doc(date);
-    const dateDoc = await dateDocRef.get();
-
-    if (!dateDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: `No product delivery record found for ${date}`,
-      });
-    }
-
-    const outletsSnapshot = await dateDocRef.collection('outlets')
-      .orderBy('outletName')
-      .get();
-
-    if (outletsSnapshot.empty) {
-      return res.status(404).json({
-        success: false,
-        message: `No outlet-wise data found for ${date}`,
-      });
-    }
-
-    const [year, month, day] = date.split('-').map(Number);
-    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
-    const headers = [
-      'Voucher Date', 'Voucher Number', 'Buyer/Supplier', 'State',
-      'Registration Type', 'Registration Number', 'Item Name',
-      'Billed Quantity', 'Item Rate', 'Unit', 'Discount %',
-      'Rounding Off', 'Total',
-    ];
-
-    const escapeCSV = (val) => {
-      const str = val == null ? '' : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"` : str;
-    };
-
-    const rows = [headers.map(escapeCSV).join(',')];
-    let voucherNumber = 0;
-
-    outletsSnapshot.forEach((doc) => {
-      const outlet = doc.data();
-      voucherNumber++;
-      const products = outlet.products || [];
-      const gstNo = outlet.gstNo || '';
-      const registrationType = gstNo ? 'Registered' : 'Unregistered';
-      const registrationNumber = gstNo || '';
-      const state = outlet.address || '';
-
-      products.forEach((product) => {
-        const total = Math.round(product.totalQuantity * product.price * (1 - (product.discountPercentage || 0) / 100) * 100) / 100;
-
-        const row = [
-          voucherDate,
-          voucherNumber,
-          escapeCSV(outlet.outletName),
-          escapeCSV(state),
-          registrationType,
-          registrationNumber,
-          escapeCSV(product.name),
-          product.totalQuantity,
-          product.price,
-          product.unit || 'kg',
-          product.discountPercentage || 0,
-          '',
-          total,
-        ];
-        rows.push(row.join(','));
-      });
-    });
-
-    const csvContent = rows.join('\n');
-    const filename = `DailyProductDelivery_${date}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.status(200).send(csvContent);
+    const result = await buildDailyProductVoucherExportRows(req, 'delivery');
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Delivery', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sheet.addRow(result.headers);
+    result.rows.forEach((r) => sheet.addRow(r));
+    const buf = await workbook.xlsx.writeBuffer();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filenameBase}.xlsx"`);
+    return res.status(200).send(Buffer.from(buf));
   } catch (error) {
-    console.error('❌ [Daily Product Delivery CSV] Error:', error);
+    console.error('❌ [Daily Product Delivery XLSX] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
@@ -888,101 +1093,27 @@ export const getDailyProductDeliveryCSV = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return/csv?date=2026-03-17
+ * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5
  *
- * Downloads a CSV of outlet-wise returned product data for the given date.
+ * Same columns/GST logic as delivery xlsx. Voucher numbers: `counters/returnvouchercounter`.
  */
-export const getDailyProductReturnCSV = async (req, res) => {
+export const getDailyProductReturnXLSX = async (req, res) => {
   try {
-    const db = getFirestoreDB();
-    const { date } = req.query;
-
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({
-        success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
-      });
-    }
-
-    const dateDocRef = db.collection('DailyProductReturn').doc(date);
-    const dateDoc = await dateDocRef.get();
-
-    if (!dateDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: `No product return record found for ${date}`,
-      });
-    }
-
-    const outletsSnapshot = await dateDocRef.collection('outlets')
-      .orderBy('outletName')
-      .get();
-
-    if (outletsSnapshot.empty) {
-      return res.status(404).json({
-        success: false,
-        message: `No outlet-wise return data found for ${date}`,
-      });
-    }
-
-    const [year, month, day] = date.split('-').map(Number);
-    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
-    const headers = [
-      'Voucher Date', 'Voucher Number', 'Buyer/Supplier', 'State',
-      'Registration Type', 'Registration Number', 'Item Name',
-      'Billed Quantity', 'Item Rate', 'Unit', 'Discount %',
-      'Rounding Off', 'Total',
-    ];
-
-    const escapeCSV = (val) => {
-      const str = val == null ? '' : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"` : str;
-    };
-
-    const rows = [headers.map(escapeCSV).join(',')];
-    let voucherNumber = 0;
-
-    outletsSnapshot.forEach((doc) => {
-      const outlet = doc.data();
-      voucherNumber++;
-      const products = outlet.products || [];
-      const gstNo = outlet.gstNo || '';
-      const registrationType = gstNo ? 'Registered' : 'Unregistered';
-      const registrationNumber = gstNo || '';
-      const state = outlet.address || '';
-
-      products.forEach((product) => {
-        const total = Math.round(product.totalQuantity * product.price * (1 - (product.discountPercentage || 0) / 100) * 100) / 100;
-
-        const row = [
-          voucherDate,
-          voucherNumber,
-          escapeCSV(outlet.outletName),
-          escapeCSV(state),
-          registrationType,
-          registrationNumber,
-          escapeCSV(product.name),
-          product.totalQuantity,
-          product.price,
-          product.unit || 'kg',
-          product.discountPercentage || 0,
-          '',
-          total,
-        ];
-        rows.push(row.join(','));
-      });
-    });
-
-    const csvContent = rows.join('\n');
-    const filename = `DailyProductReturn_${date}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.status(200).send(csvContent);
+    const result = await buildDailyProductVoucherExportRows(req, 'return');
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Return', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sheet.addRow(result.headers);
+    result.rows.forEach((r) => sheet.addRow(r));
+    const buf = await workbook.xlsx.writeBuffer();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filenameBase}.xlsx"`);
+    return res.status(200).send(Buffer.from(buf));
   } catch (error) {
-    console.error('❌ [Daily Product Return CSV] Error:', error);
+    console.error('❌ [Daily Product Return XLSX] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
