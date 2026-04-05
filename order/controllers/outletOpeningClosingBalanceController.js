@@ -1,4 +1,5 @@
 // controllers/outletOpeningClosingBalanceController.js
+import ExcelJS from 'exceljs';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { OutletOpeningClosingBalance } from '../models/outletOpeningClosingBalance.js';
 import admin from 'firebase-admin';
@@ -55,6 +56,185 @@ const computeDeliveryCsvTaxLine = (itemRate, discountPct, qty, gstPct, interStat
     sgstAmt,
     rounding,
     billTotal,
+  };
+};
+
+const PRODUCT_VOUCHER_EXPORT_HEADERS = [
+  'Voucher Date',
+  'Voucher Number',
+  'Buyer/Supplier',
+  'State',
+  'Registration Type',
+  'Registration Number',
+  'Item Name',
+  'Billed Quantity',
+  'Item Rate',
+  'Unit',
+  'Discount %',
+  'Item Rate After Discount Including Tax',
+  'Taxable Value After Discount',
+  'Total',
+  'IGST Rate',
+  'IGST Amount',
+  'CGST Rate',
+  'CGST Amount',
+  'SGST Rate',
+  'SGST Amount',
+  'Rounding',
+  'Bill Total',
+];
+
+/**
+ * Shared data for delivery/return voucher exports (.xlsx).
+ * @param {'delivery' | 'return'} kind
+ */
+const buildDailyProductVoucherExportRows = async (req, kind) => {
+  const db = getFirestoreDB();
+  const { date, interState, defaultGst } = req.query;
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { success: false, error: 'date query parameter is required (format: YYYY-MM-DD)' },
+    };
+  }
+
+  const interStateBool = interState === '1' || interState === 'true' || interState === true;
+  const defaultGstNum = defaultGst !== undefined && defaultGst !== '' ? parseFloat(String(defaultGst)) : NaN;
+  const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
+
+  const isDelivery = kind === 'delivery';
+  const dateDocRef = db.collection(isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn').doc(date);
+  const dateDoc = await dateDocRef.get();
+
+  if (!dateDoc.exists) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        success: false,
+        message: isDelivery
+          ? `No product delivery record found for ${date}`
+          : `No product return record found for ${date}`,
+      },
+    };
+  }
+
+  const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
+
+  if (outletsSnapshot.empty) {
+    return {
+      ok: false,
+      status: 404,
+      body: {
+        success: false,
+        message: isDelivery
+          ? `No outlet-wise data found for ${date}`
+          : `No outlet-wise return data found for ${date}`,
+      },
+    };
+  }
+
+  const productIds = new Set();
+  outletsSnapshot.forEach((d) => {
+    (d.data().products || []).forEach((p) => {
+      if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+    });
+  });
+
+  const gstFromCatalog = new Map();
+  await Promise.all(
+    [...productIds].map(async (id) => {
+      const pd = await db.collection('products').doc(id).get();
+      const g = pd.exists ? parseFloat(pd.data().gst ?? 0) : 0;
+      gstFromCatalog.set(id, Number.isFinite(g) ? g : 0);
+    })
+  );
+
+  const outletDocs = outletsSnapshot.docs;
+  const voucherOutletCount = outletDocs.length;
+  const voucherCounterRef = db
+    .collection('counters')
+    .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
+
+  const startVoucherNumber = await db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(voucherCounterRef);
+    const last = snap.exists ? Number(snap.data().count) : 0;
+    const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
+    const start = safeLast + 1;
+    const newCount = safeLast + voucherOutletCount;
+    transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
+    return start;
+  });
+
+  const [year, month, day] = date.split('-').map(Number);
+  const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
+
+  /** @type {Array<Array<string|number>>} */
+  const rows = [];
+
+  outletDocs.forEach((doc, outletIndex) => {
+    const outlet = doc.data();
+    const voucherNumber = startVoucherNumber + outletIndex;
+    const products = outlet.products || [];
+    const gstNo = outlet.gstNo || '';
+    const registrationType = gstNo ? 'Registered' : 'Unregistered';
+    const registrationNumber = gstNo || '';
+    const state = outlet.address != null ? String(outlet.address).trim() : '';
+
+    products.forEach((product) => {
+      const pid = product.productId;
+      let gstPct =
+        product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
+          ? Number(product.gst)
+          : undefined;
+      if (!Number.isFinite(gstPct)) {
+        gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
+      }
+
+      const tax = computeDeliveryCsvTaxLine(
+        product.price,
+        product.discountPercentage || 0,
+        product.totalQuantity,
+        gstPct,
+        interStateBool
+      );
+
+      const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+
+      rows.push([
+        voucherDate,
+        voucherNumber,
+        outlet.outletName ?? '',
+        state,
+        registrationType,
+        registrationNumber,
+        product.name ?? '',
+        Number(product.totalQuantity),
+        Number(product.price),
+        (product.unit || 'kg').toString().toUpperCase(),
+        Number(product.discountPercentage || 0),
+        tax.rateAfterDiscountInclTax,
+        perUnitTaxable === '' ? '' : perUnitTaxable,
+        tax.totalTaxableLine,
+        tax.igstRate,
+        tax.igstAmt,
+        tax.cgstRate,
+        tax.cgstAmt,
+        tax.sgstRate,
+        tax.sgstAmt,
+        tax.rounding,
+        tax.billTotal,
+      ]);
+    });
+  });
+
+  return {
+    ok: true,
+    headers: PRODUCT_VOUCHER_EXPORT_HEADERS,
+    rows,
+    filenameBase: isDelivery ? `DailyProductDelivery_${date}` : `DailyProductReturn_${date}`,
   };
 };
 
@@ -882,188 +1062,29 @@ export const calculateDailyProductReturn = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery/csv?date=2026-03-17&interState=false&defaultGst=5
+ * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5
  *
- * Columns match voucher-style export (GST-inclusive list price, discount %, tax backed out).
+ * Voucher-style Excel export (GST-inclusive list price, discount %, tax backed out).
  * interState=true → IGST only; else CGST+SGST half each.
- * defaultGst: used when snapshot item has no gst% (falls back to `products` collection, then this).
- *
- * Voucher numbers are global and monotonic: one number per outlet (row group) in this export,
- * stored in Firestore `counters/deliveredvouchercounter` (`count` = last used voucher no.).
+ * Voucher numbers: `counters/deliveredvouchercounter` (`count`).
  */
-export const getDailyProductDeliveryCSV = async (req, res) => {
+export const getDailyProductDeliveryXLSX = async (req, res) => {
   try {
-    const db = getFirestoreDB();
-    const { date, interState, defaultGst } = req.query;
-
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({
-        success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
-      });
-    }
-
-    const interStateBool = interState === '1' || interState === 'true' || interState === true;
-    const defaultGstNum = defaultGst !== undefined && defaultGst !== '' ? parseFloat(String(defaultGst)) : NaN;
-    const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
-
-    const dateDocRef = db.collection('DailyProductDelivery').doc(date);
-    const dateDoc = await dateDocRef.get();
-
-    if (!dateDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: `No product delivery record found for ${date}`,
-      });
-    }
-
-    const outletsSnapshot = await dateDocRef.collection('outlets')
-      .orderBy('outletName')
-      .get();
-
-    if (outletsSnapshot.empty) {
-      return res.status(404).json({
-        success: false,
-        message: `No outlet-wise data found for ${date}`,
-      });
-    }
-
-    const productIds = new Set();
-    outletsSnapshot.forEach((d) => {
-      (d.data().products || []).forEach((p) => {
-        if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
-      });
-    });
-
-    const gstFromCatalog = new Map();
-    await Promise.all(
-      [...productIds].map(async (id) => {
-        const pd = await db.collection('products').doc(id).get();
-        const g = pd.exists ? parseFloat(pd.data().gst ?? 0) : 0;
-        gstFromCatalog.set(id, Number.isFinite(g) ? g : 0);
-      })
+    const result = await buildDailyProductVoucherExportRows(req, 'delivery');
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Delivery', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sheet.addRow(result.headers);
+    result.rows.forEach((r) => sheet.addRow(r));
+    const buf = await workbook.xlsx.writeBuffer();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-
-    const outletDocs = outletsSnapshot.docs;
-    const voucherOutletCount = outletDocs.length;
-    const voucherCounterRef = db.collection('counters').doc('deliveredvouchercounter');
-
-    const startVoucherNumber = await db.runTransaction(async (transaction) => {
-      const snap = await transaction.get(voucherCounterRef);
-      const last = snap.exists ? Number(snap.data().count) : 0;
-      const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-      const start = safeLast + 1;
-      const newCount = safeLast + voucherOutletCount;
-      transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
-      return start;
-    });
-
-    const [year, month, day] = date.split('-').map(Number);
-    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
-    const headers = [
-      'Voucher Date',
-      'Voucher Number',
-      'Buyer/Supplier',
-      'State',
-      'Registration Type',
-      'Registration Number',
-      'Item Name',
-      'Billed Quantity',
-      'Item Rate',
-      'Unit',
-      'Discount %',
-      'Item Rate After Discount Including Tax',
-      'Taxable Value After Discount',
-      'Total',
-      'IGST Rate',
-      'IGST Amount',
-      'CGST Rate',
-      'CGST Amount',
-      'SGST Rate',
-      'SGST Amount',
-      'Rounding',
-      'Bill Total',
-    ];
-
-    const escapeCSV = (val) => {
-      const str = val == null ? '' : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"`
-        : str;
-    };
-
-    const cell = (val) => {
-      if (val === '' || val === null || val === undefined) return '';
-      if (typeof val === 'string') return escapeCSV(val);
-      return String(val);
-    };
-
-    const rows = [headers.map((h) => escapeCSV(h)).join(',')];
-
-    outletDocs.forEach((doc, outletIndex) => {
-      const outlet = doc.data();
-      const voucherNumber = startVoucherNumber + outletIndex;
-      const products = outlet.products || [];
-      const gstNo = outlet.gstNo || '';
-      const registrationType = gstNo ? 'Registered' : 'Unregistered';
-      const registrationNumber = gstNo || '';
-      const state = outlet.address != null ? String(outlet.address).trim() : '';
-
-      products.forEach((product) => {
-        const pid = product.productId;
-        let gstPct =
-          product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
-            ? Number(product.gst)
-            : undefined;
-        if (!Number.isFinite(gstPct)) {
-          gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
-        }
-
-        const tax = computeDeliveryCsvTaxLine(
-          product.price,
-          product.discountPercentage || 0,
-          product.totalQuantity,
-          gstPct,
-          interStateBool
-        );
-
-        const row = [
-          cell(voucherDate),
-          cell(voucherNumber),
-          cell(outlet.outletName),
-          cell(state),
-          cell(registrationType),
-          cell(registrationNumber),
-          cell(product.name),
-          cell(product.totalQuantity),
-          cell(product.price),
-          cell((product.unit || 'kg').toString().toUpperCase()),
-          cell(product.discountPercentage || 0),
-          cell(tax.rateAfterDiscountInclTax),
-          cell(tax.taxableValueAfterDiscountPerUnit),
-          cell(tax.totalTaxableLine),
-          cell(tax.igstRate),
-          cell(tax.igstAmt),
-          cell(tax.cgstRate),
-          cell(tax.cgstAmt),
-          cell(tax.sgstRate),
-          cell(tax.sgstAmt),
-          cell(tax.rounding),
-          cell(tax.billTotal),
-        ];
-        rows.push(row.join(','));
-      });
-    });
-
-    const csvContent = rows.join('\n');
-    const filename = `DailyProductDelivery_${date}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.status(200).send(csvContent);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filenameBase}.xlsx"`);
+    return res.status(200).send(Buffer.from(buf));
   } catch (error) {
-    console.error('❌ [Daily Product Delivery CSV] Error:', error);
+    console.error('❌ [Daily Product Delivery XLSX] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
@@ -1072,184 +1093,27 @@ export const getDailyProductDeliveryCSV = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return/csv?date=2026-03-17&interState=false&defaultGst=5
+ * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5
  *
- * Same column layout and GST math as daily product delivery CSV.
- * Voucher numbers: `counters/returnvouchercounter` (`count`).
+ * Same columns/GST logic as delivery xlsx. Voucher numbers: `counters/returnvouchercounter`.
  */
-export const getDailyProductReturnCSV = async (req, res) => {
+export const getDailyProductReturnXLSX = async (req, res) => {
   try {
-    const db = getFirestoreDB();
-    const { date, interState, defaultGst } = req.query;
-
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({
-        success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
-      });
-    }
-
-    const interStateBool = interState === '1' || interState === 'true' || interState === true;
-    const defaultGstNum = defaultGst !== undefined && defaultGst !== '' ? parseFloat(String(defaultGst)) : NaN;
-    const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
-
-    const dateDocRef = db.collection('DailyProductReturn').doc(date);
-    const dateDoc = await dateDocRef.get();
-
-    if (!dateDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: `No product return record found for ${date}`,
-      });
-    }
-
-    const outletsSnapshot = await dateDocRef.collection('outlets')
-      .orderBy('outletName')
-      .get();
-
-    if (outletsSnapshot.empty) {
-      return res.status(404).json({
-        success: false,
-        message: `No outlet-wise return data found for ${date}`,
-      });
-    }
-
-    const productIds = new Set();
-    outletsSnapshot.forEach((d) => {
-      (d.data().products || []).forEach((p) => {
-        if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
-      });
-    });
-
-    const gstFromCatalog = new Map();
-    await Promise.all(
-      [...productIds].map(async (id) => {
-        const pd = await db.collection('products').doc(id).get();
-        const g = pd.exists ? parseFloat(pd.data().gst ?? 0) : 0;
-        gstFromCatalog.set(id, Number.isFinite(g) ? g : 0);
-      })
+    const result = await buildDailyProductVoucherExportRows(req, 'return');
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Return', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sheet.addRow(result.headers);
+    result.rows.forEach((r) => sheet.addRow(r));
+    const buf = await workbook.xlsx.writeBuffer();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-
-    const outletDocs = outletsSnapshot.docs;
-    const voucherOutletCount = outletDocs.length;
-    const voucherCounterRef = db.collection('counters').doc('returnvouchercounter');
-
-    const startVoucherNumber = await db.runTransaction(async (transaction) => {
-      const snap = await transaction.get(voucherCounterRef);
-      const last = snap.exists ? Number(snap.data().count) : 0;
-      const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-      const start = safeLast + 1;
-      const newCount = safeLast + voucherOutletCount;
-      transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
-      return start;
-    });
-
-    const [year, month, day] = date.split('-').map(Number);
-    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
-    const headers = [
-      'Voucher Date',
-      'Voucher Number',
-      'Buyer/Supplier',
-      'State',
-      'Registration Type',
-      'Registration Number',
-      'Item Name',
-      'Billed Quantity',
-      'Item Rate',
-      'Unit',
-      'Discount %',
-      'Item Rate After Discount Including Tax',
-      'Taxable Value After Discount',
-      'Total',
-      'IGST Rate',
-      'IGST Amount',
-      'CGST Rate',
-      'CGST Amount',
-      'SGST Rate',
-      'SGST Amount',
-      'Rounding',
-      'Bill Total',
-    ];
-
-    const escapeCSV = (val) => {
-      const str = val == null ? '' : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"`
-        : str;
-    };
-
-    const cell = (val) => {
-      if (val === '' || val === null || val === undefined) return '';
-      if (typeof val === 'string') return escapeCSV(val);
-      return String(val);
-    };
-
-    const rows = [headers.map((h) => escapeCSV(h)).join(',')];
-
-    outletDocs.forEach((doc, outletIndex) => {
-      const outlet = doc.data();
-      const voucherNumber = startVoucherNumber + outletIndex;
-      const products = outlet.products || [];
-      const gstNo = outlet.gstNo || '';
-      const registrationType = gstNo ? 'Registered' : 'Unregistered';
-      const registrationNumber = gstNo || '';
-      const state = outlet.address != null ? String(outlet.address).trim() : '';
-
-      products.forEach((product) => {
-        const pid = product.productId;
-        let gstPct =
-          product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
-            ? Number(product.gst)
-            : undefined;
-        if (!Number.isFinite(gstPct)) {
-          gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
-        }
-
-        const tax = computeDeliveryCsvTaxLine(
-          product.price,
-          product.discountPercentage || 0,
-          product.totalQuantity,
-          gstPct,
-          interStateBool
-        );
-
-        const row = [
-          cell(voucherDate),
-          cell(voucherNumber),
-          cell(outlet.outletName),
-          cell(state),
-          cell(registrationType),
-          cell(registrationNumber),
-          cell(product.name),
-          cell(product.totalQuantity),
-          cell(product.price),
-          cell((product.unit || 'kg').toString().toUpperCase()),
-          cell(product.discountPercentage || 0),
-          cell(tax.rateAfterDiscountInclTax),
-          cell(tax.taxableValueAfterDiscountPerUnit),
-          cell(tax.totalTaxableLine),
-          cell(tax.igstRate),
-          cell(tax.igstAmt),
-          cell(tax.cgstRate),
-          cell(tax.cgstAmt),
-          cell(tax.sgstRate),
-          cell(tax.sgstAmt),
-          cell(tax.rounding),
-          cell(tax.billTotal),
-        ];
-        rows.push(row.join(','));
-      });
-    });
-
-    const csvContent = rows.join('\n');
-    const filename = `DailyProductReturn_${date}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.status(200).send(csvContent);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filenameBase}.xlsx"`);
+    return res.status(200).send(Buffer.from(buf));
   } catch (error) {
-    console.error('❌ [Daily Product Return CSV] Error:', error);
+    console.error('❌ [Daily Product Return XLSX] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
