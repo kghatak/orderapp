@@ -6,12 +6,38 @@ import { generateSaleId } from '../util/businessIds.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
+/** Flatten driver/Mongoose error text (nested cause, errorResponse). */
+const mongoErrorText = (e) => {
+  if (!e) return '';
+  const bits = [];
+  let cur = e;
+  let depth = 0;
+  while (cur && depth < 6) {
+    if (typeof cur.message === 'string' && cur.message) bits.push(cur.message);
+    if (typeof cur.errmsg === 'string' && cur.errmsg) bits.push(cur.errmsg);
+    if (cur.errorResponse && typeof cur.errorResponse.errmsg === 'string') {
+      bits.push(cur.errorResponse.errmsg);
+    }
+    cur = cur.cause || cur.reason;
+    depth++;
+  }
+  return bits.join(' ');
+};
+
+/** Standalone MongoDB / non-RS clusters cannot run multi-doc transactions. */
 const isTransactionUnsupportedError = (e) => {
-  const m = e && e.message ? String(e.message) : '';
+  const m = mongoErrorText(e);
+  const lower = m.toLowerCase();
+  const code = e?.code ?? e?.errorResponse?.code;
+  if (code === 20 && /transaction|replica|mongos|session/i.test(m)) return true;
   return (
-    m.includes('Transaction numbers are only allowed') ||
-    m.includes('replica set member') ||
-    m.includes('mongos')
+    lower.includes('transaction numbers are only allowed') ||
+    lower.includes('replica set member') ||
+    lower.includes('mongos') ||
+    lower.includes('transactions are not supported') ||
+    lower.includes('does not support transactions') ||
+    lower.includes('multi-document transaction') ||
+    (lower.includes('transaction') && lower.includes('replica set'))
   );
 };
 
@@ -148,11 +174,17 @@ export const getSaleById = async (req, res) => {
 /**
  * POST /sales
  * Requires: Authorization: Bearer <portal login token>
- * Body: { outletId, customer?, items[], total }
+ * Body: {
+ *   outletId, customer?, items[],
+ *   subtotal (sum of line totals, pre-discount),
+ *   discount? { type: "%" | "₹", value, amount },
+ *   total (after discount),
+ *   paymentMode: "Cash" | "Card" | "UPI"
+ * }
  */
 export const createSale = async (req, res) => {
   try {
-    const { outletId, customer, items, total } = req.body;
+    const { outletId, customer, items, subtotal, discount, total, paymentMode } = req.body;
     const auth = req.portalAuth;
 
     if (!outletId || typeof outletId !== 'string') {
@@ -170,8 +202,21 @@ export const createSale = async (req, res) => {
       return res.status(400).json({ success: false, message: 'items must be a non-empty array' });
     }
 
+    if (subtotal === undefined || subtotal === null || Number.isNaN(Number(subtotal))) {
+      return res.status(400).json({ success: false, message: 'subtotal is required' });
+    }
+
     if (total === undefined || total === null || Number.isNaN(Number(total))) {
       return res.status(400).json({ success: false, message: 'total is required' });
+    }
+
+    const mode =
+      paymentMode != null && typeof paymentMode === 'string' ? paymentMode.trim() : '';
+    if (!['Cash', 'Card', 'UPI'].includes(mode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'paymentMode is required and must be "Cash", "Card", or "UPI"'
+      });
     }
 
     const normalizedItems = [];
@@ -203,12 +248,74 @@ export const createSale = async (req, res) => {
       });
     }
 
-    const totalNum = roundMoney(total);
+    const subtotalNum = roundMoney(subtotal);
     sumLines = roundMoney(sumLines);
-    if (Math.abs(totalNum - sumLines) > 0.02) {
+    if (Math.abs(subtotalNum - sumLines) > 0.02) {
       return res.status(400).json({
         success: false,
-        message: `total (${totalNum}) does not match sum of line totals (${sumLines})`
+        message: `subtotal (${subtotalNum}) does not match sum of line totals (${sumLines})`
+      });
+    }
+
+    let discountDoc;
+    if (discount != null && Object.keys(discount).length > 0) {
+      if (typeof discount !== 'object') {
+        return res.status(400).json({ success: false, message: 'discount must be an object when provided' });
+      }
+      const dType = discount.type;
+      if (dType !== '%' && dType !== '₹') {
+        return res.status(400).json({
+          success: false,
+          message: 'discount.type must be "%" or "₹"'
+        });
+      }
+      const dValue = Number(discount.value);
+      const dAmount = Number(discount.amount);
+      if (!Number.isFinite(dValue) || !Number.isFinite(dAmount) || dAmount < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'discount.value and discount.amount must be valid numbers; amount must be >= 0'
+        });
+      }
+      if (dAmount > subtotalNum + 0.02) {
+        return res.status(400).json({
+          success: false,
+          message: 'discount.amount cannot exceed subtotal'
+        });
+      }
+      if (dType === '%') {
+        const expected = roundMoney((subtotalNum * dValue) / 100);
+        if (Math.abs(expected - roundMoney(dAmount)) > 0.02) {
+          return res.status(400).json({
+            success: false,
+            message: `discount.amount (${dAmount}) does not match ${dValue}% of subtotal (expected ${expected})`
+          });
+        }
+      } else {
+        if (Math.abs(dValue - dAmount) > 0.02) {
+          return res.status(400).json({
+            success: false,
+            message: 'For fixed (₹) discount, discount.value and discount.amount should match'
+          });
+        }
+      }
+      discountDoc = {
+        type: dType,
+        value: roundMoney(dValue),
+        amount: roundMoney(dAmount)
+      };
+    }
+
+    const totalNum = roundMoney(total);
+    const expectedTotal = discountDoc
+      ? roundMoney(subtotalNum - discountDoc.amount)
+      : subtotalNum;
+    if (Math.abs(totalNum - expectedTotal) > 0.02) {
+      return res.status(400).json({
+        success: false,
+        message: discountDoc
+          ? `total (${totalNum}) must equal subtotal minus discount (${expectedTotal})`
+          : `total (${totalNum}) must equal subtotal (${subtotalNum}) when no discount`
       });
     }
 
@@ -230,7 +337,10 @@ export const createSale = async (req, res) => {
       firestoreUserId: auth.userId,
       customer: customerDoc,
       items: normalizedItems,
-      total: totalNum
+      subtotal: subtotalNum,
+      ...(discountDoc ? { discount: discountDoc } : {}),
+      total: totalNum,
+      paymentMode: mode
     };
 
     const conn = getPortalConnection();
@@ -244,12 +354,36 @@ export const createSale = async (req, res) => {
       await session.commitTransaction();
     } catch (txErr) {
       await session.abortTransaction().catch(() => {});
+      if (txErr?.name === 'ValidationError') {
+        return res.status(400).json({ success: false, message: txErr.message });
+      }
       if (isTransactionUnsupportedError(txErr)) {
-        sale = await Sale.create(salePayload);
-        await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+        try {
+          sale = await Sale.create(salePayload);
+          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+        } catch (fallbackErr) {
+          console.error('Create sale (no transaction) error:', fallbackErr);
+          if (fallbackErr?.name === 'ValidationError') {
+            return res.status(400).json({ success: false, message: fallbackErr.message });
+          }
+          if (fallbackErr?.code === 11000) {
+            return res.status(409).json({
+              success: false,
+              message: 'Duplicate sale id; retry the request.'
+            });
+          }
+          const detail = mongoErrorText(fallbackErr) || fallbackErr?.message || 'Failed to create sale';
+          return res.status(500).json({ success: false, message: detail });
+        }
+      } else if (txErr?.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          message: 'Duplicate sale id; retry the request.'
+        });
       } else {
         console.error('Create sale transaction error:', txErr);
-        return res.status(500).json({ success: false, message: 'Failed to create sale' });
+        const detail = mongoErrorText(txErr) || 'Failed to create sale';
+        return res.status(500).json({ success: false, message: detail });
       }
     } finally {
       session.endSession();

@@ -12,6 +12,15 @@ const saleLineSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const saleDiscountSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ['%', '₹'], required: true },
+    value: { type: Number, required: true },
+    amount: { type: Number, required: true }
+  },
+  { _id: false }
+);
+
 const saleSchema = new mongoose.Schema({
   saleId: { type: String, required: true },
   tenantId: { type: String, required: true, index: true },
@@ -23,7 +32,12 @@ const saleSchema = new mongoose.Schema({
     address: { type: String }
   },
   items: { type: [saleLineSchema], required: true },
+  /** Sum of line totals (cart) before invoice discount */
+  subtotal: { type: Number, required: true },
+  discount: { type: saleDiscountSchema, default: undefined },
+  /** Final payable amount after discount */
   total: { type: Number, required: true },
+  paymentMode: { type: String, enum: ['Cash', 'Card', 'UPI'], required: true },
   createdAt: { type: Date, default: Date.now }
 });
 
