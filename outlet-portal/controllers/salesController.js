@@ -95,6 +95,238 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
   }
 };
 
+/**
+ * Adds quantities back to MongoDB `Products` for this outlet (reverses a sale decrement).
+ */
+const incrementOutletProductsForSale = async (outletId, normalizedItems, session) => {
+  const totals = soldQtyByProductId(normalizedItems);
+  if (totals.size === 0) return;
+
+  const OutletProducts = getOutletProductsModel();
+  const q = OutletProducts.findOne({ outletId });
+  const doc = session ? await q.session(session) : await q;
+
+  if (!doc?.products || typeof doc.products !== 'object' || Array.isArray(doc.products)) {
+    return;
+  }
+
+  let touched = false;
+  for (const [pid, soldTotal] of totals) {
+    if (!Object.prototype.hasOwnProperty.call(doc.products, pid)) {
+      continue;
+    }
+    const entry = doc.products[pid];
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const current = Number(entry.quantity);
+    const safeCurrent = Number.isFinite(current) ? current : 0;
+    entry.quantity = safeCurrent + soldTotal;
+    touched = true;
+  }
+
+  if (touched) {
+    doc.updatedAt = new Date();
+    doc.markModified('products');
+    await doc.save(session ? { session } : {});
+  }
+};
+
+/**
+ * Validates POST/PATCH sale body. Returns normalized fields or an error object for res.status().json().
+ */
+const parseSaleBody = (body, authOutletId) => {
+  const { outletId, customer, items, subtotal, discount, total, paymentMode } = body;
+
+  if (!outletId || typeof outletId !== 'string') {
+    return { error: { status: 400, json: { success: false, message: 'outletId is required' } } };
+  }
+
+  if (outletId !== authOutletId) {
+    return {
+      error: {
+        status: 403,
+        json: { success: false, message: 'outletId does not match authenticated outlet user' }
+      }
+    };
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return { error: { status: 400, json: { success: false, message: 'items must be a non-empty array' } } };
+  }
+
+  if (subtotal === undefined || subtotal === null || Number.isNaN(Number(subtotal))) {
+    return { error: { status: 400, json: { success: false, message: 'subtotal is required' } } };
+  }
+
+  if (total === undefined || total === null || Number.isNaN(Number(total))) {
+    return { error: { status: 400, json: { success: false, message: 'total is required' } } };
+  }
+
+  const mode =
+    paymentMode != null && typeof paymentMode === 'string' ? paymentMode.trim() : '';
+  if (!['Cash', 'Card', 'UPI'].includes(mode)) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: 'paymentMode is required and must be "Cash", "Card", or "UPI"'
+        }
+      }
+    };
+  }
+
+  const normalizedItems = [];
+  let sumLines = 0;
+
+  for (const line of items) {
+    if (!line || line.productId === undefined || line.productId === null || line.productId === '') {
+      return {
+        error: {
+          status: 400,
+          json: { success: false, message: 'Each item must include productId' }
+        }
+      };
+    }
+    const qty = Number(line.quantity);
+    const unitPrice = Number(line.unitPrice);
+    const lineTotal = Number(line.lineTotal);
+    if (Number.isNaN(qty) || qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
+      return {
+        error: {
+          status: 400,
+          json: { success: false, message: 'Each item needs valid quantity, unitPrice, and lineTotal' }
+        }
+      };
+    }
+    sumLines += lineTotal;
+    normalizedItems.push({
+      productId: String(line.productId),
+      name: line.name != null ? String(line.name) : '',
+      unitPrice: roundMoney(unitPrice),
+      quantity: qty,
+      lineTotal: roundMoney(lineTotal)
+    });
+  }
+
+  const subtotalNum = roundMoney(subtotal);
+  sumLines = roundMoney(sumLines);
+  if (Math.abs(subtotalNum - sumLines) > 0.02) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: `subtotal (${subtotalNum}) does not match sum of line totals (${sumLines})`
+        }
+      }
+    };
+  }
+
+  let discountDoc;
+  if (discount != null && Object.keys(discount).length > 0) {
+    if (typeof discount !== 'object') {
+      return {
+        error: { status: 400, json: { success: false, message: 'discount must be an object when provided' } }
+      };
+    }
+    const dType = discount.type;
+    if (dType !== '%' && dType !== '₹') {
+      return {
+        error: { status: 400, json: { success: false, message: 'discount.type must be "%" or "₹"' } }
+      };
+    }
+    const dValue = Number(discount.value);
+    const dAmount = Number(discount.amount);
+    if (!Number.isFinite(dValue) || !Number.isFinite(dAmount) || dAmount < 0) {
+      return {
+        error: {
+          status: 400,
+          json: {
+            success: false,
+            message: 'discount.value and discount.amount must be valid numbers; amount must be >= 0'
+          }
+        }
+      };
+    }
+    if (dAmount > subtotalNum + 0.02) {
+      return {
+        error: { status: 400, json: { success: false, message: 'discount.amount cannot exceed subtotal' } }
+      };
+    }
+    if (dType === '%') {
+      const expected = roundMoney((subtotalNum * dValue) / 100);
+      if (Math.abs(expected - roundMoney(dAmount)) > 0.02) {
+        return {
+          error: {
+            status: 400,
+            json: {
+              success: false,
+              message: `discount.amount (${dAmount}) does not match ${dValue}% of subtotal (expected ${expected})`
+            }
+          }
+        };
+      }
+    } else {
+      if (Math.abs(dValue - dAmount) > 0.02) {
+        return {
+          error: {
+            status: 400,
+            json: {
+              success: false,
+              message: 'For fixed (₹) discount, discount.value and discount.amount should match'
+            }
+          }
+        };
+      }
+    }
+    discountDoc = {
+      type: dType,
+      value: roundMoney(dValue),
+      amount: roundMoney(dAmount)
+    };
+  }
+
+  const totalNum = roundMoney(total);
+  const expectedTotal = discountDoc
+    ? roundMoney(subtotalNum - discountDoc.amount)
+    : subtotalNum;
+  if (Math.abs(totalNum - expectedTotal) > 0.02) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: discountDoc
+            ? `total (${totalNum}) must equal subtotal minus discount (${expectedTotal})`
+            : `total (${totalNum}) must equal subtotal (${subtotalNum}) when no discount`
+        }
+      }
+    };
+  }
+
+  const customerDoc =
+    customer && typeof customer === 'object'
+      ? {
+          name: customer.name?.trim?.() || undefined,
+          phone: customer.phone?.trim?.() || undefined,
+          address: customer.address?.trim?.() || undefined
+        }
+      : {};
+
+  return {
+    value: {
+      normalizedItems,
+      subtotalNum,
+      discountDoc,
+      totalNum,
+      mode,
+      customerDoc
+    }
+  };
+};
+
 const serializeSale = (doc) => {
   const s = doc.toObject ? doc.toObject() : { ...doc };
   const id = s._id;
@@ -184,149 +416,12 @@ export const getSaleById = async (req, res) => {
  */
 export const createSale = async (req, res) => {
   try {
-    const { outletId, customer, items, subtotal, discount, total, paymentMode } = req.body;
     const auth = req.portalAuth;
-
-    if (!outletId || typeof outletId !== 'string') {
-      return res.status(400).json({ success: false, message: 'outletId is required' });
+    const parsed = parseSaleBody(req.body, auth.outletId);
+    if (parsed.error) {
+      return res.status(parsed.error.status).json(parsed.error.json);
     }
-
-    if (outletId !== auth.outletId) {
-      return res.status(403).json({
-        success: false,
-        message: 'outletId does not match authenticated outlet user'
-      });
-    }
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ success: false, message: 'items must be a non-empty array' });
-    }
-
-    if (subtotal === undefined || subtotal === null || Number.isNaN(Number(subtotal))) {
-      return res.status(400).json({ success: false, message: 'subtotal is required' });
-    }
-
-    if (total === undefined || total === null || Number.isNaN(Number(total))) {
-      return res.status(400).json({ success: false, message: 'total is required' });
-    }
-
-    const mode =
-      paymentMode != null && typeof paymentMode === 'string' ? paymentMode.trim() : '';
-    if (!['Cash', 'Card', 'UPI'].includes(mode)) {
-      return res.status(400).json({
-        success: false,
-        message: 'paymentMode is required and must be "Cash", "Card", or "UPI"'
-      });
-    }
-
-    const normalizedItems = [];
-    let sumLines = 0;
-
-    for (const line of items) {
-      if (!line || line.productId === undefined || line.productId === null || line.productId === '') {
-        return res.status(400).json({
-          success: false,
-          message: 'Each item must include productId'
-        });
-      }
-      const qty = Number(line.quantity);
-      const unitPrice = Number(line.unitPrice);
-      const lineTotal = Number(line.lineTotal);
-      if (Number.isNaN(qty) || qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Each item needs valid quantity, unitPrice, and lineTotal'
-        });
-      }
-      sumLines += lineTotal;
-      normalizedItems.push({
-        productId: String(line.productId),
-        name: line.name != null ? String(line.name) : '',
-        unitPrice: roundMoney(unitPrice),
-        quantity: qty,
-        lineTotal: roundMoney(lineTotal)
-      });
-    }
-
-    const subtotalNum = roundMoney(subtotal);
-    sumLines = roundMoney(sumLines);
-    if (Math.abs(subtotalNum - sumLines) > 0.02) {
-      return res.status(400).json({
-        success: false,
-        message: `subtotal (${subtotalNum}) does not match sum of line totals (${sumLines})`
-      });
-    }
-
-    let discountDoc;
-    if (discount != null && Object.keys(discount).length > 0) {
-      if (typeof discount !== 'object') {
-        return res.status(400).json({ success: false, message: 'discount must be an object when provided' });
-      }
-      const dType = discount.type;
-      if (dType !== '%' && dType !== '₹') {
-        return res.status(400).json({
-          success: false,
-          message: 'discount.type must be "%" or "₹"'
-        });
-      }
-      const dValue = Number(discount.value);
-      const dAmount = Number(discount.amount);
-      if (!Number.isFinite(dValue) || !Number.isFinite(dAmount) || dAmount < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'discount.value and discount.amount must be valid numbers; amount must be >= 0'
-        });
-      }
-      if (dAmount > subtotalNum + 0.02) {
-        return res.status(400).json({
-          success: false,
-          message: 'discount.amount cannot exceed subtotal'
-        });
-      }
-      if (dType === '%') {
-        const expected = roundMoney((subtotalNum * dValue) / 100);
-        if (Math.abs(expected - roundMoney(dAmount)) > 0.02) {
-          return res.status(400).json({
-            success: false,
-            message: `discount.amount (${dAmount}) does not match ${dValue}% of subtotal (expected ${expected})`
-          });
-        }
-      } else {
-        if (Math.abs(dValue - dAmount) > 0.02) {
-          return res.status(400).json({
-            success: false,
-            message: 'For fixed (₹) discount, discount.value and discount.amount should match'
-          });
-        }
-      }
-      discountDoc = {
-        type: dType,
-        value: roundMoney(dValue),
-        amount: roundMoney(dAmount)
-      };
-    }
-
-    const totalNum = roundMoney(total);
-    const expectedTotal = discountDoc
-      ? roundMoney(subtotalNum - discountDoc.amount)
-      : subtotalNum;
-    if (Math.abs(totalNum - expectedTotal) > 0.02) {
-      return res.status(400).json({
-        success: false,
-        message: discountDoc
-          ? `total (${totalNum}) must equal subtotal minus discount (${expectedTotal})`
-          : `total (${totalNum}) must equal subtotal (${subtotalNum}) when no discount`
-      });
-    }
-
-    const customerDoc =
-      customer && typeof customer === 'object'
-        ? {
-            name: customer.name?.trim?.() || undefined,
-            phone: customer.phone?.trim?.() || undefined,
-            address: customer.address?.trim?.() || undefined
-          }
-        : {};
+    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, customerDoc } = parsed.value;
 
     const saleId = generateSaleId(auth.outletId);
     const Sale = getSaleModel();
@@ -397,5 +492,116 @@ export const createSale = async (req, res) => {
   } catch (err) {
     console.error('Create sale error:', err);
     res.status(500).json({ success: false, message: 'Failed to create sale' });
+  }
+};
+
+/**
+ * PATCH /sales/:id
+ * id: MongoDB _id or business saleId (e.g. OUTID113-SALE-1775682117898).
+ * Body: same shape as POST /sales; optional saleId must match the existing document when sent.
+ * Restores outlet product quantities from the previous lines, updates the sale, then applies new lines.
+ */
+export const updateSale = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const auth = req.portalAuth;
+    const Sale = getSaleModel();
+    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+
+    let saleDoc = null;
+    if (mongoose.isValidObjectId(id)) {
+      saleDoc = await Sale.findOne({ _id: id, ...scope });
+    }
+    if (!saleDoc && typeof id === 'string' && id.trim()) {
+      saleDoc = await Sale.findOne({ saleId: id.trim(), ...scope });
+    }
+    if (!saleDoc) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    const bodySaleId = req.body?.saleId;
+    if (bodySaleId != null && String(bodySaleId).trim() !== '') {
+      if (String(bodySaleId).trim() !== String(saleDoc.saleId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'saleId in body does not match this sale document'
+        });
+      }
+    }
+
+    const parsed = parseSaleBody(req.body, auth.outletId);
+    if (parsed.error) {
+      return res.status(parsed.error.status).json(parsed.error.json);
+    }
+    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, customerDoc } = parsed.value;
+
+    const oldItems = saleDoc.items.map((line) => ({
+      productId: line.productId,
+      name: line.name,
+      unitPrice: line.unitPrice,
+      quantity: line.quantity,
+      lineTotal: line.lineTotal
+    }));
+
+    const setFields = {
+      customer: customerDoc,
+      items: normalizedItems,
+      subtotal: subtotalNum,
+      total: totalNum,
+      paymentMode: mode
+    };
+    if (discountDoc) {
+      setFields.discount = discountDoc;
+    }
+    const mongoUpdate = { $set: setFields };
+    if (!discountDoc) {
+      mongoUpdate.$unset = { discount: '' };
+    }
+
+    const conn = getPortalConnection();
+    const session = await conn.startSession();
+    try {
+      session.startTransaction();
+      await incrementOutletProductsForSale(auth.outletId, oldItems, session);
+      await Sale.updateOne({ _id: saleDoc._id }, mongoUpdate, { session });
+      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session);
+      await session.commitTransaction();
+    } catch (txErr) {
+      await session.abortTransaction().catch(() => {});
+      if (txErr?.name === 'ValidationError') {
+        return res.status(400).json({ success: false, message: txErr.message });
+      }
+      if (isTransactionUnsupportedError(txErr)) {
+        try {
+          await incrementOutletProductsForSale(auth.outletId, oldItems, null);
+          await Sale.updateOne({ _id: saleDoc._id }, mongoUpdate);
+          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+        } catch (fallbackErr) {
+          console.error('Update sale (no transaction) error:', fallbackErr);
+          if (fallbackErr?.name === 'ValidationError') {
+            return res.status(400).json({ success: false, message: fallbackErr.message });
+          }
+          const detail = mongoErrorText(fallbackErr) || fallbackErr?.message || 'Failed to update sale';
+          return res.status(500).json({ success: false, message: detail });
+        }
+      } else {
+        console.error('Update sale transaction error:', txErr);
+        const detail = mongoErrorText(txErr) || 'Failed to update sale';
+        return res.status(500).json({ success: false, message: detail });
+      }
+    } finally {
+      session.endSession();
+    }
+
+    const fresh = await Sale.findById(saleDoc._id).lean();
+    const { _id, __v, ...rest } = fresh;
+    res.status(200).json({
+      success: true,
+      message: 'Sale updated',
+      data: { id: _id, ...rest }
+    });
+  } catch (err) {
+    console.error('Update sale error:', err);
+    res.status(500).json({ success: false, message: 'Failed to update sale' });
   }
 };
