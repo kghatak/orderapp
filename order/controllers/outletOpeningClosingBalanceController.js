@@ -90,7 +90,7 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
  */
 const buildDailyProductVoucherExportRows = async (req, kind) => {
   const db = getFirestoreDB();
-  const { date, interState, defaultGst } = req.query;
+  const { date, interState, defaultGst, counter } = req.query;
 
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return {
@@ -158,15 +158,24 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     .collection('counters')
     .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
 
-  const startVoucherNumber = await db.runTransaction(async (transaction) => {
-    const snap = await transaction.get(voucherCounterRef);
-    const last = snap.exists ? Number(snap.data().count) : 0;
-    const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-    const start = safeLast + 1;
-    const newCount = safeLast + voucherOutletCount;
-    transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
-    return start;
-  });
+  const counterParsed =
+    counter !== undefined && counter !== '' ? parseInt(String(counter), 10) : NaN;
+  const usePayloadCounter = Number.isFinite(counterParsed) && counterParsed >= 1;
+
+  let startVoucherNumber;
+  if (usePayloadCounter) {
+    startVoucherNumber = counterParsed;
+  } else {
+    startVoucherNumber = await db.runTransaction(async (transaction) => {
+      const snap = await transaction.get(voucherCounterRef);
+      const last = snap.exists ? Number(snap.data().count) : 0;
+      const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
+      const start = safeLast + 1;
+      const newCount = safeLast + voucherOutletCount;
+      transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
+      return start;
+    });
+  }
 
   const [year, month, day] = date.split('-').map(Number);
   const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
@@ -1062,11 +1071,12 @@ export const calculateDailyProductReturn = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5
+ * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5&counter=1
  *
  * Voucher-style Excel export (GST-inclusive list price, discount %, tax backed out).
  * interState=true → IGST only; else CGST+SGST half each.
- * Voucher numbers: `counters/deliveredvouchercounter` (`count`).
+ * Optional `counter` (integer >= 1): first outlet voucher number; outlets get consecutive numbers (1,2,3…).
+ * If omitted, voucher numbers come from `counters/deliveredvouchercounter` and the counter is advanced.
  */
 export const getDailyProductDeliveryXLSX = async (req, res) => {
   try {
@@ -1093,9 +1103,9 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5
+ * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5&counter=1
  *
- * Same columns/GST logic as delivery xlsx. Voucher numbers: `counters/returnvouchercounter`.
+ * Same columns/GST logic as delivery xlsx. Optional `counter` as for delivery; else `counters/returnvouchercounter`.
  */
 export const getDailyProductReturnXLSX = async (req, res) => {
   try {
