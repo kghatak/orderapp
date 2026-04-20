@@ -45,10 +45,11 @@ export const login = async (req, res) => {
       });
     }
 
-    if (userData.userProfile !== 'Outlet') {
+    const allowedProfiles = ['Outlet', 'OutletStorekeeper'];
+    if (!allowedProfiles.includes(userData.userProfile)) {
       return res.status(403).json({
         success: false,
-        message: 'Only outlet users can use this login'
+        message: 'Only outlet and outlet storekeeper users can use this login'
       });
     }
 
@@ -121,6 +122,12 @@ export const login = async (req, res) => {
       { expiresIn: JWT_EXPIRES }
     );
 
+    const profileName = String(userData.name || '').trim();
+    const outletName = String(outletData.name || outletData.outletName || '').trim();
+    const responseName = userData.userProfile === 'OutletStorekeeper'
+      ? (profileName || outletName)
+      : outletName;
+
     res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -131,9 +138,10 @@ export const login = async (req, res) => {
         userId: firestoreUserId,
         outletId: outletDocId,
         phoneNumber: userData.phoneNumber,
+        name: responseName,
         outlet: {
           outletId: outletDocId,
-          name: outletData.name || outletData.outletName || '',
+          name: responseName,
           address: outletData.address || '',
           primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || ''
         }
