@@ -166,11 +166,21 @@ export const updateReturn = async (req, res) => {
       });
     }
 
-    // Update status
-    await db.collection('returns').doc(returnId).update({
+    const prevData = returnDoc.data();
+    const prevStatus = prevData.status;
+
+    const updatePayload = {
       status,
-      updatedAt: new Date()
-    });
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (status === 'collected' && prevStatus !== 'collected') {
+      updatePayload.collectedDate = admin.firestore.Timestamp.now();
+    } else if (prevStatus === 'collected' && status !== 'collected') {
+      updatePayload.collectedDate = admin.firestore.FieldValue.delete();
+    }
+
+    await db.collection('returns').doc(returnId).update(updatePayload);
 
     // Get updated document
     const updatedDoc = await db.collection('returns').doc(returnId).get();
@@ -379,17 +389,16 @@ export const getReturnsReport = async (req, res) => {
     const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
     const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
 
-    // Build query - only include collected returns
-    let query = db.collection('returns')
-      .where('status', '==', 'collected')
-      .where('createdAt', '>=', startTimestamp)
-      .where('createdAt', '<=', endTimestamp)
-      .orderBy('createdAt', 'desc');
-
-    // Add outlet filter if provided
+    // Build query - only include collected returns; date range = collectedDate (like deliveredDate on orders)
+    let query = db.collection('returns');
     if (outletId) {
       query = query.where('outletId', '==', outletId);
     }
+    query = query
+      .where('status', '==', 'collected')
+      .where('collectedDate', '>=', startTimestamp)
+      .where('collectedDate', '<=', endTimestamp)
+      .orderBy('collectedDate', 'desc');
 
     // Get total count for pagination
     const totalSnapshot = await query.get();
@@ -410,7 +419,8 @@ export const getReturnsReport = async (req, res) => {
         outlet: data.outlet,
         status: data.status,
         totalAmount: data.totalAmount,
-        createdAt: data.createdAt
+        createdAt: data.createdAt,
+        collectedDate: data.collectedDate ?? null,
       };
     });
 
@@ -434,3 +444,4 @@ export const getReturnsReport = async (req, res) => {
     });
   }
 };
+

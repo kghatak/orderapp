@@ -27,6 +27,7 @@ export class ReturnOrder {
     this.archived = archived;
     this.archivedAt = archivedAt;
     this.createdAt = new Date();
+    this.updatedAt = new Date();
   }
 }
 export const ReturnOrderStatus = {
