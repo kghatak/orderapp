@@ -404,12 +404,12 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             closingBalancePayment += parseFloat(doc.data().amount || 0);
           });
 
-          // Query collected returns for this outlet on the triggered date
+          // Query collected returns for this outlet on the triggered date (collectedDate, like orders' deliveredDate)
           const returnsSnapshot = await db.collection('returns')
             .where('outletId', '==', outlet.id)
             .where('status', '==', 'collected')
-            .where('createdAt', '>=', dayStartTimestamp)
-            .where('createdAt', '<=', dayEndTimestamp)
+            .where('collectedDate', '>=', dayStartTimestamp)
+            .where('collectedDate', '<=', dayEndTimestamp)
             .get();
 
           let closingBanlanceReturn = 0;
@@ -823,8 +823,8 @@ export const calculateDailyProductReturn = async (req, res) => {
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('returns')
         .where('status', '==', 'collected')
-        .where('createdAt', '>=', dayStartTimestamp)
-        .where('createdAt', '<=', dayEndTimestamp)
+        .where('collectedDate', '>=', dayStartTimestamp)
+        .where('collectedDate', '<=', dayEndTimestamp)
         .get(),
     ]);
 
@@ -1517,9 +1517,7 @@ export const calculateClosingBalances = async (req, res) => {
       }
     });
 
-    // Note: Payments will be queried per date (same as orders and returns)
-    // This requires a composite index: (outletId, status, createdAt)
-    // Firestore will provide a link to create it if needed
+    // Note: Payments use createdAt per day; collected returns use collectedDate (composite index on returns)
 
     // Set opening balance on the previous date (one day before openingBalanceDate)
     // This ensures the ledger report shows the correct opening balance
@@ -1603,12 +1601,12 @@ export const calculateClosingBalances = async (req, res) => {
         }
       });
 
-      // Query returns for this specific date (only collected returns)
+      // Query returns for this specific date (only collected returns; collectedDate like deliveredDate on orders)
       const returnsSnapshot = await db.collection('returns')
         .where('outletId', '==', outletId)
         .where('status', '==', 'collected')
-        .where('createdAt', '>=', startTimestamp)
-        .where('createdAt', '<=', endTimestamp)
+        .where('collectedDate', '>=', startTimestamp)
+        .where('collectedDate', '<=', endTimestamp)
         .get();
 
       let closingBanlanceReturn = 0;
@@ -1620,12 +1618,14 @@ export const calculateClosingBalances = async (req, res) => {
         if (returnData.status === 'collected') {
           const returnAmount = parseFloat(returnData.totalAmount || 0);
           closingBanlanceReturn += returnAmount;
+          const cd = returnData.collectedDate;
           returnsList.push({
             id: doc.id,
             outletId: rid,
             amount: returnAmount,
             totalAmount: returnAmount,
             status: returnData.status,
+            collectedDate: cd?.toDate ? cd.toDate().toISOString() : cd ?? null,
           });
         }
       });
