@@ -3,6 +3,122 @@ import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
 import { getFirestoreDB } from '../../util/firebase.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
+import { isOutletPortalMongoConnected } from '../../outlet-portal/config/portalDb.js';
+import { getOutletProductQuantityModel } from '../../outlet-portal/models/OutletProductQuantity.js';
+import { getOutletProductsModel } from '../../outlet-portal/models/OutletProducts.js';
+
+const toFiniteNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const syncDeliveredItemsToOutletProducts = async (outletId, increments) => {
+  if (!increments || increments.size === 0) {
+    return;
+  }
+
+  const OutletProducts = getOutletProductsModel();
+  const doc = await OutletProducts.findOne({ outletId });
+  const productsMap =
+    doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
+      ? doc.products
+      : {};
+
+  for (const [productId, quantityToAdd] of increments.entries()) {
+    const existing = productsMap[productId];
+    const currentQuantity = toFiniteNumber(existing?.quantity, 0);
+    productsMap[productId] = {
+      ...(existing && typeof existing === 'object' ? existing : { productId }),
+      productId,
+      quantity: currentQuantity + quantityToAdd
+    };
+  }
+
+  const updatedAt = new Date();
+  const productCount = Object.keys(productsMap).length;
+
+  if (!doc) {
+    await OutletProducts.create({
+      outletId,
+      products: productsMap,
+      productCount,
+      updatedAt
+    });
+    return;
+  }
+
+  doc.products = productsMap;
+  doc.productCount = productCount;
+  doc.updatedAt = updatedAt;
+  doc.markModified('products');
+  await doc.save();
+};
+
+const addDeliveredOrderItemsToOutletQuantity = async (outletId, items) => {
+  const safeOutletId = typeof outletId === 'string' ? outletId.trim() : '';
+  if (!safeOutletId || !Array.isArray(items) || items.length === 0) {
+    return;
+  }
+
+  if (!isOutletPortalMongoConnected()) {
+    console.warn(
+      `Skipping OutletProductQuantities update for outlet ${safeOutletId}: outlet portal MongoDB not connected.`
+    );
+    return;
+  }
+
+  const increments = new Map();
+  for (const item of items) {
+    const productId = item?.productId != null ? String(item.productId).trim() : '';
+    const quantity = toFiniteNumber(item?.quantity, 0);
+
+    if (!productId || quantity <= 0) {
+      continue;
+    }
+
+    increments.set(productId, (increments.get(productId) || 0) + quantity);
+  }
+
+  if (increments.size === 0) {
+    return;
+  }
+
+  const OutletProductQuantity = getOutletProductQuantityModel();
+  const updatedAt = new Date();
+  const doc = await OutletProductQuantity.findOne({
+    outletId: safeOutletId,
+    products: { $exists: true }
+  });
+  const productsMap =
+    doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
+      ? doc.products
+      : {};
+
+  for (const [productId, quantity] of increments.entries()) {
+    const current = toFiniteNumber(productsMap?.[productId]?.quantity, 0);
+    productsMap[productId] = { productId, quantity: current + quantity };
+  }
+
+  const payload = {
+    outletId: safeOutletId,
+    products: productsMap,
+    productCount: Object.keys(productsMap).length,
+    updatedAt
+  };
+
+  if (doc) {
+    doc.products = payload.products;
+    doc.productCount = payload.productCount;
+    doc.updatedAt = payload.updatedAt;
+    doc.markModified('products');
+    await doc.save();
+  } else {
+    await OutletProductQuantity.deleteMany({ outletId: safeOutletId });
+    await OutletProductQuantity.create(payload);
+  }
+
+  await syncDeliveredItemsToOutletProducts(safeOutletId, increments);
+};
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {
@@ -365,6 +481,21 @@ export const patchOrder = async (req, res) => {
       } catch (paymentError) {
         console.error('Error updating outlet_payments when cancelling order:', paymentError);
         // Don't fail order update if outlet_payments update fails
+      }
+    }
+
+    if (newStatus === 'delivered' && currentStatus !== 'delivered') {
+      try {
+        await addDeliveredOrderItemsToOutletQuantity(orderDataBefore.outletId, orderDataBefore.items || []);
+        await orderRef.update({
+          mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
+          mongoDeliverySyncStatus: 'synced'
+        });
+      } catch (mongoSyncError) {
+        console.error(
+          `Order ${orderId} delivered but failed to sync OutletProductQuantities:`,
+          mongoSyncError
+        );
       }
     }
 
@@ -970,6 +1101,7 @@ export const deliverOrder = async (req, res) => {
 
     const orderRef = db.collection('orders').doc(orderId);
     
+    let deliveredOrderData = null;
     await db.runTransaction(async (transaction) => {
       // STEP 1: READ ALL DOCUMENTS FIRST
       
@@ -980,6 +1112,7 @@ export const deliverOrder = async (req, res) => {
       }
 
       const orderData = orderDoc.data();
+      deliveredOrderData = orderData;
       console.log('Order data:', orderData);
       
       // Check if order is in dispatched status
@@ -1060,6 +1193,22 @@ export const deliverOrder = async (req, res) => {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+
+    try {
+      await addDeliveredOrderItemsToOutletQuantity(
+        deliveredOrderData?.outletId,
+        deliveredOrderData?.items || []
+      );
+      await orderRef.update({
+        mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
+        mongoDeliverySyncStatus: 'synced'
+      });
+    } catch (mongoSyncError) {
+      console.error(
+        `Order ${orderId} delivered but failed to sync OutletProductQuantities:`,
+        mongoSyncError
+      );
+    }
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();

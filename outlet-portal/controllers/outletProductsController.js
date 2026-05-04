@@ -1,8 +1,31 @@
 import { getOutletProductsModel } from '../models/OutletProducts.js';
+import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
 
 const toNum = (v, fallback = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+};
+
+const syncOutletQuantities = async (outletId, productsMap) => {
+  const OutletProductQuantity = getOutletProductQuantityModel();
+  const now = new Date();
+  const entries = Object.entries(productsMap || {});
+  const quantityMap = {};
+  for (const [productId, product] of entries) {
+    quantityMap[productId] = {
+      productId,
+      quantity: Math.max(0, toNum(product?.quantity, 0))
+    };
+  }
+
+  // Remove any legacy rows for this outlet, then keep one document per outlet.
+  await OutletProductQuantity.deleteMany({ outletId });
+  await OutletProductQuantity.create({
+    outletId,
+    products: quantityMap,
+    productCount: Object.keys(quantityMap).length,
+    updatedAt: now
+  });
 };
 
 /**
@@ -40,15 +63,17 @@ export const upsertOutletProducts = async (req, res) => {
       };
     }
 
+    const trimmedOutletId = outletId.trim();
     const productCount = Object.keys(productsMap).length;
     const updatedAt = new Date();
 
     const OutletProducts = getOutletProductsModel();
     const doc = await OutletProducts.findOneAndUpdate(
-      { outletId: outletId.trim() },
+      { outletId: trimmedOutletId },
       { $set: { products: productsMap, productCount, updatedAt } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
+    await syncOutletQuantities(trimmedOutletId, productsMap);
 
     res.status(200).json({
       success: true,
