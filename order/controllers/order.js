@@ -553,6 +553,26 @@ export const addItemsToOrder = async (req, res) => {
       return res.status(400).json({ error: 'Invalid request body: items array is required.' });
     }
 
+    // Preload GST from product master for items where payload GST is missing/blank.
+    const needsGstProductIds = Array.from(
+      new Set(
+        items
+          .filter((item) => item?.productId && (item.gst === undefined || item.gst === null || String(item.gst).trim() === ''))
+          .map((item) => String(item.productId))
+      )
+    );
+    const productGstMap = new Map();
+    if (needsGstProductIds.length > 0) {
+      const productDocs = await Promise.all(
+        needsGstProductIds.map((productId) => db.collection('products').doc(productId).get())
+      );
+      productDocs.forEach((doc, idx) => {
+        const productId = needsGstProductIds[idx];
+        const gstVal = doc.exists ? Number(doc.data()?.gst) : NaN;
+        productGstMap.set(productId, Number.isFinite(gstVal) ? gstVal : 0);
+      });
+    }
+
     const orderRef = db.collection('orders').doc(orderId);
     
     await db.runTransaction(async (transaction) => {
@@ -596,6 +616,12 @@ export const addItemsToOrder = async (req, res) => {
         }
 
         // Create new item object
+        const hasPayloadGst = gst !== undefined && gst !== null && String(gst).trim() !== '';
+        const parsedPayloadGst = Number(gst);
+        const resolvedGst = hasPayloadGst && Number.isFinite(parsedPayloadGst)
+          ? parsedPayloadGst
+          : (productGstMap.get(productId) ?? 0);
+
         const newItem = {
           productId: productId,
           prodid: prodid || productId,
@@ -604,7 +630,7 @@ export const addItemsToOrder = async (req, res) => {
           price: parseFloat(price),
           quantity: parseFloat(quantity), // Changed from parseInt to parseFloat to support decimal quantities
           icon: icon || '',
-          gst: parseFloat(gst) || 0,
+          gst: resolvedGst,
           discountPercentage: parseFloat(discountPercentage) || 0,
           discountAmount: parseFloat(discountAmount) || 0,
           hsn_sac_code: hsn_sac_code || '',
@@ -842,7 +868,9 @@ export const updateOrderQuantities = async (req, res) => {
 
         // Update item fields - use provided values or keep existing ones
         const finalDiscountPercentage = discountPercentage !== undefined ? discountPercentage : currentItem.discountPercentage;
-        const finalGst = gst !== undefined ? gst : currentItem.gst;
+        const hasGstInPayload = gst !== undefined && gst !== null && String(gst).trim() !== '';
+        const parsedGst = Number(gst);
+        const finalGst = hasGstInPayload && Number.isFinite(parsedGst) ? parsedGst : currentItem.gst;
         const finalHsnSacCode = hsn_sac_code !== undefined ? hsn_sac_code : currentItem.hsn_sac_code;
 
         // Calculate discount amount
