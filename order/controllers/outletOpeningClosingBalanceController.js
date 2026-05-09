@@ -188,7 +188,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const voucherNumber = startVoucherNumber + outletIndex;
     const products = outlet.products || [];
     const gstNo = outlet.gstNo || '';
-    const registrationType = gstNo ? 'Registered' : 'Unregistered';
+    const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
     const registrationNumber = gstNo || '';
     const state = outlet.state != null ? String(outlet.state).trim() : '';
 
