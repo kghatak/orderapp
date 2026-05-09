@@ -1,6 +1,7 @@
 export class Outlet {
   constructor(id, outletName, primaryPhoneNumber, {
     address = '',
+    state = '',
     gstNumber = '',
     pincode = '',
     managerName = '',
@@ -19,6 +20,7 @@ export class Outlet {
     this.id = id;
     this.outletName = outletName;
     this.address = address;
+    this.state = state;
     this.gstNumber = gstNumber;
     this.pincode = pincode;
     this.managerName = managerName;

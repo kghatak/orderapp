@@ -190,7 +190,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const gstNo = outlet.gstNo || '';
     const registrationType = gstNo ? 'Registered' : 'Unregistered';
     const registrationNumber = gstNo || '';
-    const state = outlet.address != null ? String(outlet.address).trim() : '';
+    const state = outlet.state != null ? String(outlet.state).trim() : '';
 
     products.forEach((product) => {
       const pid = product.productId;
@@ -542,6 +542,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
       outletMap.set(doc.id, {
         name: d.name || d.outletName || 'Unknown Outlet',
         gstNo: d.gstNo || d.gst || d.gstin || '',
+        state: d.state || '',
         address: d.address || '',
       });
     });
@@ -684,6 +685,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletMap.set(missingOutletIds[i], {
           name: d.name || d.outletName || 'Unknown Outlet',
           gstNo: d.gstNo || d.gst || d.gstin || '',
+          state: d.state || '',
           address: d.address || '',
         });
       });
@@ -711,7 +713,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', address: '' };
+      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', state: '', address: '' };
       const outletName = outletInfo.name;
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
@@ -721,6 +723,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        state: outletInfo.state || '',
         address: outletInfo.address || '',
         date: dateStr,
         products,
@@ -735,6 +738,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        state: outletInfo.state || '',
         address: outletInfo.address || '',
         totalOrders: entry.orderCount,
         totalProducts: products.length,
@@ -834,6 +838,7 @@ export const calculateDailyProductReturn = async (req, res) => {
       outletMap.set(doc.id, {
         name: d.name || d.outletName || 'Unknown Outlet',
         gstNo: d.gstNo || d.gst || d.gstin || '',
+        state: d.state || '',
         address: d.address || '',
       });
     });
@@ -970,6 +975,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletMap.set(missingOutletIds[i], {
           name: d.name || d.outletName || 'Unknown Outlet',
           gstNo: d.gstNo || d.gst || d.gstin || '',
+          state: d.state || '',
           address: d.address || '',
         });
       });
@@ -995,7 +1001,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', address: '' };
+      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', state: '', address: '' };
       const outletName = outletInfo.name;
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
@@ -1005,6 +1011,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        state: outletInfo.state || '',
         address: outletInfo.address || '',
         date: dateStr,
         products,
@@ -1019,6 +1026,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        state: outletInfo.state || '',
         address: outletInfo.address || '',
         totalReturns: entry.returnCount,
         totalProducts: products.length,

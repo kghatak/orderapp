@@ -41,6 +41,7 @@ export const createOutlet = async (req, res) => {
       outletName,
       name, // Accept both outletName and name for compatibility
       address = '',
+      state = '',
       gstNumber = '',
       pincode = '',
       managerName = '',
@@ -98,6 +99,7 @@ export const createOutlet = async (req, res) => {
       id: outletId,
       name: finalOutletName,
       address,
+      state,
       gstNo: gstNumber,
       pincode,
       managerName,
