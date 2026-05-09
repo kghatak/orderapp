@@ -17,9 +17,10 @@ const computeDeliveryCsvTaxLine = (itemRate, discountPct, qty, gstPct, interStat
   const gst = Number(gstPct) || 0;
 
   const rateAfterDiscountInclTax = roundMoney2(rate * (1 - disc / 100));
-  const billTotal = roundMoney2(rateAfterDiscountInclTax * q);
+  const billTotalBeforeRounding = roundMoney2(rateAfterDiscountInclTax * q);
+  const billTotal = Math.round(billTotalBeforeRounding);
   const gDec = gst / 100;
-  const taxableValue = gDec > 0 ? roundMoney2(billTotal / (1 + gDec)) : billTotal;
+  const taxableValue = gDec > 0 ? roundMoney2(billTotalBeforeRounding / (1 + gDec)) : billTotalBeforeRounding;
 
   let igstRate = 0;
   let igstAmt = 0;
@@ -42,7 +43,9 @@ const computeDeliveryCsvTaxLine = (itemRate, discountPct, qty, gstPct, interStat
   }
 
   const taxParts = igstAmt + cgstAmt + sgstAmt;
-  const rounding = roundMoney2(billTotal - taxableValue - taxParts);
+  const balancingRounding = roundMoney2(billTotalBeforeRounding - taxableValue - taxParts);
+  const billRoundOff = roundMoney2(billTotal - billTotalBeforeRounding);
+  const rounding = roundMoney2(balancingRounding + billRoundOff);
 
   return {
     rateAfterDiscountInclTax,
