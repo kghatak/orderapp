@@ -42,6 +42,7 @@ export const createOutlet = async (req, res) => {
       name, // Accept both outletName and name for compatibility
       address = '',
       state = '',
+      billToPalace = '',
       gstNumber = '',
       pincode = '',
       managerName = '',
@@ -100,6 +101,7 @@ export const createOutlet = async (req, res) => {
       name: finalOutletName,
       address,
       state,
+      billToPalace: String(billToPalace || '').trim(),
       gstNo: gstNumber,
       pincode,
       managerName,
@@ -263,6 +265,11 @@ export const updateOutlet = async (req, res) => {
         if (updateData.outletName !== undefined) {
             updateData.name = updateData.outletName;
             delete updateData.outletName; // Remove the original field
+        }
+
+        // Normalize billToPalace as trimmed string
+        if (updateData.billToPalace !== undefined) {
+            updateData.billToPalace = String(updateData.billToPalace || '').trim();
         }
         
         // Validate opening balance if provided (negative allowed, e.g. credit balance)
