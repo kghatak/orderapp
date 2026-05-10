@@ -66,6 +66,7 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
   'Voucher Date',
   'Voucher Number',
   'Buyer/Supplier',
+  'Address',
   'State',
   'Registration Type',
   'Registration Number',
@@ -85,6 +86,8 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
   'SGST Amount',
   'Rounding',
   'Bill Total',
+  'Bill To Palace',
+  'Ship To Palace',
 ];
 
 /**
@@ -193,7 +196,9 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const gstNo = outlet.gstNo || '';
     const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
     const registrationNumber = gstNo || '';
+    const address = outlet.address != null ? String(outlet.address).trim() : '';
     const state = outlet.state != null ? String(outlet.state).trim() : '';
+    const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
 
     products.forEach((product) => {
       const pid = product.productId;
@@ -219,6 +224,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
         voucherDate,
         voucherNumber,
         outlet.outletName ?? '',
+        address,
         state,
         registrationType,
         registrationNumber,
@@ -238,6 +244,8 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
         tax.sgstAmt,
         tax.rounding,
         tax.billTotal,
+        billToPalace,
+        billToPalace,
       ]);
     });
   });
@@ -545,6 +553,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
       outletMap.set(doc.id, {
         name: d.name || d.outletName || 'Unknown Outlet',
         gstNo: d.gstNo || d.gst || d.gstin || '',
+        billToPalace: d.billToPalace || '',
         state: d.state || '',
         address: d.address || '',
       });
@@ -688,6 +697,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletMap.set(missingOutletIds[i], {
           name: d.name || d.outletName || 'Unknown Outlet',
           gstNo: d.gstNo || d.gst || d.gstin || '',
+          billToPalace: d.billToPalace || '',
           state: d.state || '',
           address: d.address || '',
         });
@@ -716,7 +726,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', state: '', address: '' };
+      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '' };
       const outletName = outletInfo.name;
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
@@ -726,6 +736,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        billToPalace: outletInfo.billToPalace || '',
         state: outletInfo.state || '',
         address: outletInfo.address || '',
         date: dateStr,
@@ -741,6 +752,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        billToPalace: outletInfo.billToPalace || '',
         state: outletInfo.state || '',
         address: outletInfo.address || '',
         totalOrders: entry.orderCount,
@@ -841,6 +853,7 @@ export const calculateDailyProductReturn = async (req, res) => {
       outletMap.set(doc.id, {
         name: d.name || d.outletName || 'Unknown Outlet',
         gstNo: d.gstNo || d.gst || d.gstin || '',
+        billToPalace: d.billToPalace || '',
         state: d.state || '',
         address: d.address || '',
       });
@@ -978,6 +991,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletMap.set(missingOutletIds[i], {
           name: d.name || d.outletName || 'Unknown Outlet',
           gstNo: d.gstNo || d.gst || d.gstin || '',
+          billToPalace: d.billToPalace || '',
           state: d.state || '',
           address: d.address || '',
         });
@@ -1004,7 +1018,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', state: '', address: '' };
+      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '' };
       const outletName = outletInfo.name;
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
@@ -1014,6 +1028,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        billToPalace: outletInfo.billToPalace || '',
         state: outletInfo.state || '',
         address: outletInfo.address || '',
         date: dateStr,
@@ -1029,6 +1044,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         outletId,
         outletName,
         gstNo: outletInfo.gstNo || '',
+        billToPalace: outletInfo.billToPalace || '',
         state: outletInfo.state || '',
         address: outletInfo.address || '',
         totalReturns: entry.returnCount,
