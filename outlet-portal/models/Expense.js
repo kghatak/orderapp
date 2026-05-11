@@ -9,10 +9,12 @@ const expenseSchema = new mongoose.Schema({
   type: { type: String, required: true, trim: true },
   categoryLabel: { type: String, required: true, trim: true },
   amount: { type: Number, required: true },
+  // Business/use date of expense (can differ from createdAt/audit timestamp)
+  date: { type: Date, default: Date.now, index: true },
   createdAt: { type: Date, default: Date.now }
 });
 
-expenseSchema.index({ tenantId: 1, outletId: 1, createdAt: -1 });
+expenseSchema.index({ tenantId: 1, outletId: 1, date: -1, createdAt: -1 });
 expenseSchema.index({ expenseId: 1 }, { unique: true, sparse: true });
 
 export const getExpenseModel = () => {
