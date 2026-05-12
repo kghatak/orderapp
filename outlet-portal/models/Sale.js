@@ -37,13 +37,21 @@ const saleSchema = new mongoose.Schema({
   discount: { type: saleDiscountSchema, default: undefined },
   /** Final payable amount after discount */
   total: { type: Number, required: true },
-  paymentMode: { type: String, enum: ['Cash', 'Card', 'UPI'], required: true },
+  /** Cash / Card / UPI = paid at sale time; Due = sold on credit until collected */
+  paymentMode: { type: String, enum: ['Cash', 'Card', 'UPI', 'Due'], required: true },
+  /**
+   * pending = payment not yet received (typically paymentMode Due).
+   * collected = amount received or paid-at-POS (Cash/Card/UPI).
+   * Legacy docs without this field are treated as collected when paymentMode is not Due.
+   */
+  paymentStatus: { type: String, enum: ['pending', 'collected'], default: 'collected' },
+  /** When paymentStatus became collected (null while pending on Due). */
+  collectedAt: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 
 saleSchema.index({ tenantId: 1, outletId: 1, createdAt: -1 });
-saleSchema.index({ tenantId: 1, outletId: 1, saleId: 1 });
-saleSchema.index({ saleId: 1 }, { unique: true, sparse: true });
+saleSchema.index({ tenantId: 1, outletId: 1, saleId: 1 }, { unique: true });
 
 export const getSaleModel = () => {
   const conn = getPortalConnection();
