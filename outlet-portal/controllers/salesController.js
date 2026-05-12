@@ -3,11 +3,14 @@ import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
 import { getSaleModel } from '../models/Sale.js';
-import { generateSaleId } from '../util/businessIds.js';
+import { generateNextSaleId } from '../util/businessIds.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
-/** Flatten driver/Mongoose error text (nested cause, errorResponse). */
+/** Modes that represent money collected at the outlet (not credit). */
+const COLLECT_MODES = ['Cash', 'Card', 'UPI'];
+
+const ALL_SALE_PAYMENT_MODES = [...COLLECT_MODES, 'Due'];
 const mongoErrorText = (e) => {
   if (!e) return '';
   const bits = [];
@@ -256,13 +259,13 @@ const parseSaleBody = (body, authOutletId) => {
 
   const mode =
     paymentMode != null && typeof paymentMode === 'string' ? paymentMode.trim() : '';
-  if (!['Cash', 'Card', 'UPI'].includes(mode)) {
+  if (!['Cash', 'Card', 'UPI', 'Due'].includes(mode)) {
     return {
       error: {
         status: 400,
         json: {
           success: false,
-          message: 'paymentMode is required and must be "Cash", "Card", or "UPI"'
+          message: 'paymentMode is required and must be "Cash", "Card", "UPI", or "Due"'
         }
       }
     };
@@ -418,27 +421,56 @@ const parseSaleBody = (body, authOutletId) => {
   };
 };
 
+/** Normalize legacy docs that predate paymentStatus / collectedAt. */
+const withResolvedPaymentFields = (plain) => {
+  const mode = plain.paymentMode;
+  let paymentStatus = plain.paymentStatus;
+  if (paymentStatus !== 'pending' && paymentStatus !== 'collected') {
+    paymentStatus = mode === 'Due' ? 'pending' : 'collected';
+  }
+  const collectedAt =
+    plain.collectedAt != null && plain.collectedAt !== ''
+      ? plain.collectedAt
+      : paymentStatus === 'collected' && mode !== 'Due'
+        ? plain.createdAt
+        : null;
+  return { ...plain, paymentStatus, collectedAt };
+};
+
 const serializeSale = (doc) => {
   const s = doc.toObject ? doc.toObject() : { ...doc };
   const id = s._id;
   delete s._id;
   delete s.__v;
-  return { id, ...s };
+  return withResolvedPaymentFields({ id, ...s });
 };
 
 /**
  * GET /sales
- * Query: limit (default 50, max 100), skip (default 0)
- * Returns sales for the authenticated outlet only.
+ * Query: limit (default 10, max 100), skip (default 0),
+ *   optional paymentMode=Cash|Card|UPI|Due — e.g. Due returns only credit (due) sales.
  */
 export const listSales = async (req, res) => {
   try {
     const auth = req.portalAuth;
-    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 100);
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 100);
     const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
+
+    const pmRaw = req.query.paymentMode;
+    const pmTrim =
+      pmRaw !== undefined && pmRaw !== null ? String(pmRaw).trim() : '';
+    if (pmTrim !== '' && !ALL_SALE_PAYMENT_MODES.includes(pmTrim)) {
+      return res.status(400).json({
+        success: false,
+        message: `paymentMode must be one of: ${ALL_SALE_PAYMENT_MODES.join(', ')}`
+      });
+    }
 
     const Sale = getSaleModel();
     const filter = { tenantId: auth.tenantId, outletId: auth.outletId };
+    if (pmTrim !== '') {
+      filter.paymentMode = pmTrim;
+    }
 
     const [rows, total] = await Promise.all([
       Sale.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -449,7 +481,7 @@ export const listSales = async (req, res) => {
       success: true,
       data: rows.map((row) => {
         const { _id, __v, ...rest } = row;
-        return { id: _id, ...rest };
+        return withResolvedPaymentFields({ id: _id, ...rest });
       }),
       pagination: { total, limit, skip, hasMore: skip + rows.length < total }
     });
@@ -461,7 +493,7 @@ export const listSales = async (req, res) => {
 
 /**
  * GET /sales/:id
- * id may be MongoDB ObjectId or business saleId (e.g. OUTID099-SALE-1730000000000).
+ * id may be MongoDB ObjectId or business saleId (numeric string, e.g. "1001").
  */
 export const getSaleById = async (req, res) => {
   try {
@@ -486,7 +518,7 @@ export const getSaleById = async (req, res) => {
     const { _id, __v, ...rest } = sale;
     res.status(200).json({
       success: true,
-      data: { id: _id, ...rest }
+      data: withResolvedPaymentFields({ id: _id, ...rest })
     });
   } catch (err) {
     console.error('Get sale error:', err);
@@ -502,8 +534,10 @@ export const getSaleById = async (req, res) => {
  *   subtotal (sum of line totals, pre-discount),
  *   discount? { type: "%" | "₹", value, amount },
  *   total (after discount),
- *   paymentMode: "Cash" | "Card" | "UPI"
+ *   paymentMode: "Cash" | "Card" | "UPI" | "Due"
  * }
+ *
+ * When paymentMode is Due: paymentStatus is stored as pending and collectedAt is null until PATCH collects.
  */
 export const createSale = async (req, res) => {
   try {
@@ -514,7 +548,10 @@ export const createSale = async (req, res) => {
     }
     const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, customerDoc } = parsed.value;
 
-    const saleId = generateSaleId(auth.outletId);
+    const paymentStatus = mode === 'Due' ? 'pending' : 'collected';
+    const collectedAt = mode === 'Due' ? null : new Date();
+
+    const saleId = await generateNextSaleId(auth.tenantId, auth.outletId);
     const Sale = getSaleModel();
     const salePayload = {
       saleId,
@@ -526,7 +563,9 @@ export const createSale = async (req, res) => {
       subtotal: subtotalNum,
       ...(discountDoc ? { discount: discountDoc } : {}),
       total: totalNum,
-      paymentMode: mode
+      paymentMode: mode,
+      paymentStatus,
+      collectedAt
     };
 
     const conn = getPortalConnection();
@@ -588,9 +627,14 @@ export const createSale = async (req, res) => {
 
 /**
  * PATCH /sales/:id
- * id: MongoDB _id or business saleId (e.g. OUTID113-SALE-1775682117898).
- * Body: same shape as POST /sales; optional saleId must match the existing document when sent.
+ * id: MongoDB _id or business saleId (numeric string, e.g. "1002").
+ *
+ * Full update: same shape as POST /sales with a non-empty items array; optional saleId must match.
  * Restores outlet product quantities from the previous lines, updates the sale, then applies new lines.
+ *
+ * Payment-only (collect a Due sale): omit items or send items: []. Body:
+ *   { "paymentMode": "Cash" | "Card" | "UPI", "paymentStatus": "collected"? }
+ * Sets paymentStatus to collected and collectedAt to now when transitioning from credit.
  */
 export const updateSale = async (req, res) => {
   try {
@@ -620,6 +664,72 @@ export const updateSale = async (req, res) => {
       }
     }
 
+    const hasLineItems = Array.isArray(req.body.items) && req.body.items.length > 0;
+
+    if (!hasLineItems) {
+      const pm =
+        req.body.paymentMode != null ? String(req.body.paymentMode).trim() : '';
+      if (!pm) {
+        return res.status(400).json({
+          success: false,
+          message:
+            'For payment-only updates, paymentMode is required (Cash, Card, or UPI). To edit line items, include a non-empty items array.'
+        });
+      }
+      if (pm === 'Due') {
+        return res.status(400).json({
+          success: false,
+          message:
+            'PATCH without items cannot set paymentMode to Due. Create a Due sale via POST or send a full body with items.'
+        });
+      }
+      if (!COLLECT_MODES.includes(pm)) {
+        return res.status(400).json({
+          success: false,
+          message: 'paymentMode must be Cash, Card, or UPI when recording collected payment'
+        });
+      }
+      const bodyPs = req.body.paymentStatus;
+      if (bodyPs === 'pending') {
+        return res.status(400).json({
+          success: false,
+          message:
+            'Cannot set paymentStatus to pending with Cash/Card/UPI. Use POST with paymentMode Due for credit sales.'
+        });
+      }
+      if (bodyPs !== undefined && bodyPs !== 'collected') {
+        return res.status(400).json({
+          success: false,
+          message: 'paymentStatus may be omitted or set to "collected" when collecting payment'
+        });
+      }
+
+      const wasOpen =
+        saleDoc.paymentMode === 'Due' || saleDoc.paymentStatus === 'pending';
+      const now = new Date();
+      const nextCollectedAt =
+        wasOpen || saleDoc.collectedAt == null ? now : saleDoc.collectedAt;
+
+      await Sale.updateOne(
+        { _id: saleDoc._id },
+        {
+          $set: {
+            paymentMode: pm,
+            paymentStatus: 'collected',
+            collectedAt: nextCollectedAt
+          }
+        }
+      );
+
+      const fresh = await Sale.findById(saleDoc._id).lean();
+      const { _id, __v, ...rest } = fresh;
+      return res.status(200).json({
+        success: true,
+        message: 'Sale updated',
+        data: withResolvedPaymentFields({ id: _id, ...rest })
+      });
+    }
+
     const parsed = parseSaleBody(req.body, auth.outletId);
     if (parsed.error) {
       return res.status(parsed.error.status).json(parsed.error.json);
@@ -634,12 +744,24 @@ export const updateSale = async (req, res) => {
       lineTotal: line.lineTotal
     }));
 
+    const nextPaymentStatus = mode === 'Due' ? 'pending' : 'collected';
+    let nextCollectedAt;
+    if (mode === 'Due') {
+      nextCollectedAt = null;
+    } else if (saleDoc.paymentMode === 'Due' || saleDoc.paymentStatus === 'pending') {
+      nextCollectedAt = new Date();
+    } else {
+      nextCollectedAt = saleDoc.collectedAt != null ? saleDoc.collectedAt : new Date();
+    }
+
     const setFields = {
       customer: customerDoc,
       items: normalizedItems,
       subtotal: subtotalNum,
       total: totalNum,
-      paymentMode: mode
+      paymentMode: mode,
+      paymentStatus: nextPaymentStatus,
+      collectedAt: nextCollectedAt
     };
     if (discountDoc) {
       setFields.discount = discountDoc;
@@ -689,7 +811,7 @@ export const updateSale = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Sale updated',
-      data: { id: _id, ...rest }
+      data: withResolvedPaymentFields({ id: _id, ...rest })
     });
   } catch (err) {
     console.error('Update sale error:', err);
