@@ -3,6 +3,18 @@ import { getExpenseModel } from '../models/Expense.js';
 import { generateExpenseId } from '../util/businessIds.js';
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
+/** Include on create/update when sent; skips undefined/null/non-strings */
+const optionalTrimmedStringFields = (body, keys) => {
+  const out = {};
+  for (const key of keys) {
+    const v = body[key];
+    if (typeof v === 'string') {
+      out[key] = v.trim();
+    }
+  }
+  return out;
+};
+
 /**
  * Resolve expense Mongo document by `_id` or business `expenseId`, scoped to tenant/outlet.
  */
@@ -75,11 +87,14 @@ export const getExpenseById = async (req, res) => {
 };
 /**
  * POST /expenses
+ * Body: outletId (must match token), type, categoryLabel, amount, date (optional ISO date),
+ *       optional strings: paidFrom, remarks, employee
  * Authorization: Bearer <outlet-portal login token>
  */
 export const createExpense = async (req, res) => {
   try {
     const { outletId, type, categoryLabel, amount, date } = req.body;
+    const extras = optionalTrimmedStringFields(req.body, ['paidFrom', 'remarks', 'employee']);
     const auth = req.portalAuth;
 
     if (!outletId || typeof outletId !== 'string') {
@@ -131,7 +146,8 @@ export const createExpense = async (req, res) => {
       type: type.trim(),
       categoryLabel: categoryLabel.trim(),
       amount: amt,
-      date: expenseDate
+      date: expenseDate,
+      ...extras
     });
     const row = doc.toObject();
     const { _id, __v, ...rest } = row;
@@ -149,13 +165,23 @@ export const createExpense = async (req, res) => {
 /**
  * PATCH /expenses/:id
  * MongoDB ObjectId or business expenseId.
- * Body: optional type, categoryLabel, amount, date, outletId (must match token)
+ * Body: optional type, categoryLabel, amount, date, paidFrom, remarks, employee, outletId (must match token)
  */
 export const updateExpense = async (req, res) => {
   try {
     const { id } = req.params;
     const auth = req.portalAuth;
-    const { outletId, type, categoryLabel, amount, date } = req.body || {};
+    const body = req.body || {};
+    const {
+      outletId,
+      type,
+      categoryLabel,
+      amount,
+      date,
+      paidFrom,
+      remarks,
+      employee
+    } = body;
 
     if (outletId !== undefined && outletId !== null && String(outletId).trim() !== '') {
       if (String(outletId).trim() !== auth.outletId) {
@@ -170,12 +196,16 @@ export const updateExpense = async (req, res) => {
       type !== undefined ||
       categoryLabel !== undefined ||
       amount !== undefined ||
-      date !== undefined;
+      date !== undefined ||
+      paidFrom !== undefined ||
+      remarks !== undefined ||
+      employee !== undefined;
 
     if (!hasPatch) {
       return res.status(400).json({
         success: false,
-        message: 'Provide at least one of: type, categoryLabel, amount, date'
+        message:
+          'Provide at least one of: type, categoryLabel, amount, date, paidFrom, remarks, employee'
       });
     }
 
@@ -221,6 +251,24 @@ export const updateExpense = async (req, res) => {
         });
       }
       doc.date = expenseDate;
+    }
+    if (paidFrom !== undefined) {
+      if (typeof paidFrom !== 'string') {
+        return res.status(400).json({ success: false, message: 'paidFrom must be a string' });
+      }
+      doc.paidFrom = paidFrom.trim();
+    }
+    if (remarks !== undefined) {
+      if (typeof remarks !== 'string') {
+        return res.status(400).json({ success: false, message: 'remarks must be a string' });
+      }
+      doc.remarks = remarks.trim();
+    }
+    if (employee !== undefined) {
+      if (typeof employee !== 'string') {
+        return res.status(400).json({ success: false, message: 'employee must be a string' });
+      }
+      doc.employee = employee.trim();
     }
 
     await doc.save();
