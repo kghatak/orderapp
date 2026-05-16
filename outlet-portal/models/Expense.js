@@ -9,6 +9,9 @@ const expenseSchema = new mongoose.Schema({
   type: { type: String, required: true, trim: true },
   categoryLabel: { type: String, required: true, trim: true },
   amount: { type: Number, required: true },
+  paidFrom: { type: String, trim: true },
+  remarks: { type: String, trim: true },
+  employee: { type: String, trim: true },
   // Business/use date of expense (can differ from createdAt/audit timestamp)
   date: { type: Date, default: Date.now, index: true },
   createdAt: { type: Date, default: Date.now }
