@@ -239,6 +239,18 @@ curl -s "$BASE_URL/milk/payments/$PAYMENT_ID" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq
 ```
 
+### Per-supplier balances (Payment Management screen)
+Returns one row per active supplier with `totalMilk`, `totalAmount`, `paidAmount`, `pendingAmount`. Admin-only.
+```bash
+# All-time balances
+curl -s "$BASE_URL/milk/payments/balances" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# For a date range
+curl -s "$BASE_URL/milk/payments/balances?fromDate=2026-05-01&toDate=2026-05-31" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
 ---
 
 ## 5. Reports
@@ -252,6 +264,34 @@ curl -s "$BASE_URL/milk/reports/daily" \
 
 # Specific date
 curl -s "$BASE_URL/milk/reports/daily?date=2026-05-17" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+### Period summary (daily / weekly / monthly)
+Same shape as daily, plus `period`, `fromDate`, `toDate`. Admin-only.
+```bash
+# Daily (default)
+curl -s "$BASE_URL/milk/reports/summary?period=daily" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# This week (ISO week: Mon → Sun containing the anchor date)
+curl -s "$BASE_URL/milk/reports/summary?period=weekly" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# Specific week
+curl -s "$BASE_URL/milk/reports/summary?period=weekly&date=2026-05-10" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# This month (calendar month)
+curl -s "$BASE_URL/milk/reports/summary?period=monthly" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# Specific month
+curl -s "$BASE_URL/milk/reports/summary?period=monthly&date=2026-04-15" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# Invalid period → 400
+curl -s "$BASE_URL/milk/reports/summary?period=yearly" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq
 ```
 

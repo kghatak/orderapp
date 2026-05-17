@@ -215,24 +215,11 @@ Spec says **Kg** throughout (Sections 1, 3, 4, 5). [Procurement.js:7](milk/model
 
 **Decision needed.** Simplest fix: drop the misleading comment, treat `quantity` as Kg uniformly, and update [config/db.js](config/db.js) seed/test data accordingly. No conversion logic required if the unit is just renamed.
 
-### Gap #5 — Payment Management list view & "Total Milk"  ➕ + ✏️
+### Gap #5 — Payment Management list view & "Total Milk"  ✅ **[DONE]**
 
-**Two issues:**
+**5a — List view.** ✅ Added `GET /milk/payments/balances` (admin-only). Returns per-supplier rollup `{ supplierId, supplierCode, supplierName, phone, village, ratePerFat, totalMilk, totalAmount, paidAmount, pendingAmount, procurementCount, paymentCount }` for all active suppliers in the tenant. Supports `fromDate`/`toDate` query params. Implemented via Mongo aggregation pipeline. See [milkPaymentController.js — paymentBalances](milk/controllers/milkPaymentController.js).
 
-**5a — Missing list view.** Section 5 implies a screen listing **all suppliers** with their balances. `GET /milk/reports/supplier` only handles one supplier per call.
-
-**Fix:** add `GET /milk/payments/balances` (or `GET /milk/reports/suppliers`):
-```json
-{
-  "data": [
-    { "supplierId": "...", "supplierName": "...", "totalMilk": 0, "totalAmount": 0, "paidAmount": 0, "pendingAmount": 0 },
-    ...
-  ]
-}
-```
-With `fromDate`/`toDate` filters. Implementation: aggregation pipeline joining Suppliers → Procurements → MilkPayments.
-
-**5b — Missing `totalMilk` (Kg).** `GET /milk/reports/supplier` doesn't return total quantity ([milkReportController.js:71-85](milk/controllers/milkReportController.js#L71-L85)). Add it.
+**5b — `totalMilk` on supplier summary.** ✅ Added to `GET /milk/reports/supplier` response.
 
 ### Gap #6a — Fat Meter Reading on Procurement  ➕  **[RESOLVED — ready to implement]**
 
@@ -247,13 +234,15 @@ With `fromDate`/`toDate` filters. Implementation: aggregation pipeline joining S
 3. Return it in `listProcurements` (used by the Daily Report column).
 4. Display label everywhere: **"Fat Meter Reading"** (not "Mtr").
 
-### Gap #6b — Weekly / Monthly reports  ➕
+### Gap #6b — Weekly / Monthly reports  ✅ **[DONE]**
 
-**Reports (Section 6).** Add weekly + monthly. Recommend parameterising the existing daily endpoint:
-```
-GET /milk/reports/summary?period=daily|weekly|monthly&date=<anchor-date>
-```
-Mongo aggregation can group by `$dateTrunc`.
+✅ Added `GET /milk/reports/summary?period=daily|weekly|monthly&date=<anchor-date>` (admin-only). Returns `{ period, fromDate, toDate, totalQuantity, totalAmount, supplierCount, totalActiveSuppliers, recordCount }`. Period boundaries:
+
+- `daily` — calendar day matching `date` (default today)
+- `weekly` — ISO week (Mon 00:00 → Sun 23:59) containing `date`
+- `monthly` — calendar month (1st → last day) containing `date`
+
+The existing `GET /milk/reports/daily` is kept for backward compatibility. See [milkReportController.js — periodSummary](milk/controllers/milkReportController.js).
 
 ### Gap #7 — Settings API  🟡 **[DEFERRED]**
 
@@ -299,8 +288,8 @@ Section 8 — see endpoint suggestions under Section 8 above. Pick libraries: `e
 8. Rename/clarify `quantity` unit from litres → Kg (Gap #4).
 
 ### Medium-priority new features
-9. `GET /milk/payments/balances` — list view of all supplier balances (Gap #5a).
-10. Weekly/monthly reports — parameterise `/milk/reports/summary` (Gap #6b).
+9. ✅ ~~`GET /milk/payments/balances` — list view of all supplier balances (Gap #5a).~~ **DONE**
+10. ✅ ~~Weekly/monthly reports — `/milk/reports/summary?period=...` (Gap #6b).~~ **DONE**
 11. Staff role + admin-provisioned staff accounts (Gap #8).
 
 ### Larger new subsystems
@@ -329,6 +318,9 @@ Section 8 — see endpoint suggestions under Section 8 above. Pick libraries: `e
 | PUT    | `/milk/procurements/:id`      | JWT + tenant | admin          | [procurementRoutes.js:19](milk/routes/procurementRoutes.js#L19) |
 | GET    | `/milk/payments`              | JWT + tenant | any (scoped)   | [milkPaymentRoutes.js:11](milk/routes/milkPaymentRoutes.js#L11) |
 | GET    | `/milk/payments/:id`          | JWT + tenant | any (scoped)   | [milkPaymentRoutes.js:12](milk/routes/milkPaymentRoutes.js#L12) |
-| POST   | `/milk/payments`              | JWT + tenant | admin          | [milkPaymentRoutes.js:13](milk/routes/milkPaymentRoutes.js#L13) |
+| GET    | `/milk/payments/balances`     | JWT + tenant | admin          | [milkPaymentRoutes.js:12](milk/routes/milkPaymentRoutes.js#L12) |
+| POST   | `/milk/payments`              | JWT + tenant | admin          | [milkPaymentRoutes.js:14](milk/routes/milkPaymentRoutes.js#L14) |
 | GET    | `/milk/reports/daily`         | JWT + tenant | admin          | [milkReportRoutes.js:11](milk/routes/milkReportRoutes.js#L11) |
-| GET    | `/milk/reports/supplier`      | JWT + tenant | any (scoped)   | [milkReportRoutes.js:12](milk/routes/milkReportRoutes.js#L12) |
+| GET    | `/milk/reports/summary`       | JWT + tenant | admin          | [milkReportRoutes.js:12](milk/routes/milkReportRoutes.js#L12) |
+| GET    | `/milk/reports/supplier`      | JWT + tenant | any (scoped)   | [milkReportRoutes.js:13](milk/routes/milkReportRoutes.js#L13) |
+| DELETE | `/milk/procurements/:id`      | JWT + tenant | admin          | [procurementRoutes.js:20](milk/routes/procurementRoutes.js#L20) |

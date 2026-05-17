@@ -91,3 +91,64 @@ export const supplierSummary = async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to get supplier summary' });
   }
 };
+
+export const periodSummary = async (req, res) => {
+  try {
+    const { tenantId } = req;
+    const { period = 'daily', date } = req.query;
+
+    if (!['daily', 'weekly', 'monthly'].includes(period)) {
+      return res.status(400).json({
+        success: false,
+        message: "period must be 'daily', 'weekly', or 'monthly'"
+      });
+    }
+
+    const anchor = date ? new Date(date) : new Date();
+    let start, end;
+
+    if (period === 'daily') {
+      start = new Date(anchor); start.setHours(0, 0, 0, 0);
+      end = new Date(anchor); end.setHours(23, 59, 59, 999);
+    } else if (period === 'weekly') {
+      // ISO week: Monday 00:00 to Sunday 23:59
+      const day = anchor.getDay();
+      const diffToMon = (day + 6) % 7;
+      start = new Date(anchor);
+      start.setDate(anchor.getDate() - diffToMon);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(start);
+      end.setDate(start.getDate() + 6);
+      end.setHours(23, 59, 59, 999);
+    } else {
+      start = new Date(anchor.getFullYear(), anchor.getMonth(), 1, 0, 0, 0, 0);
+      end = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0, 23, 59, 59, 999);
+    }
+
+    const [procurements, totalActiveSuppliers] = await Promise.all([
+      Procurement.find({ tenantId, date: { $gte: start, $lte: end } }).lean(),
+      Supplier.countDocuments({ tenantId, isActive: true })
+    ]);
+
+    const totalQuantity = procurements.reduce((s, p) => s + (p.quantity || 0), 0);
+    const totalAmount = procurements.reduce((s, p) => s + (p.amount || 0), 0);
+    const supplierCount = new Set(procurements.map(p => p.supplierId?.toString())).size;
+
+    res.json({
+      success: true,
+      data: {
+        period,
+        fromDate: start.toISOString().split('T')[0],
+        toDate: end.toISOString().split('T')[0],
+        totalQuantity,
+        totalAmount,
+        supplierCount,
+        totalActiveSuppliers,
+        recordCount: procurements.length
+      }
+    });
+  } catch (err) {
+    console.error('Period summary error:', err);
+    res.status(500).json({ success: false, message: 'Failed to get period summary' });
+  }
+};

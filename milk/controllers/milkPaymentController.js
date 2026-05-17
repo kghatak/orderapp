@@ -116,3 +116,74 @@ export const createPayment = async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to create payment' });
   }
 };
+
+export const paymentBalances = async (req, res) => {
+  try {
+    const { tenantId } = req;
+    const { fromDate, toDate } = req.query;
+
+    const procMatch = { tenantId };
+    const payMatch = { tenantId };
+    if (fromDate) {
+      procMatch.date = { ...procMatch.date, $gte: new Date(fromDate) };
+      payMatch.paymentDate = { ...payMatch.paymentDate, $gte: new Date(fromDate) };
+    }
+    if (toDate) {
+      procMatch.date = { ...procMatch.date, $lte: new Date(toDate) };
+      payMatch.paymentDate = { ...payMatch.paymentDate, $lte: new Date(toDate) };
+    }
+
+    const [procAgg, payAgg, suppliers] = await Promise.all([
+      Procurement.aggregate([
+        { $match: procMatch },
+        { $group: {
+          _id: '$supplierId',
+          totalMilk: { $sum: '$quantity' },
+          totalAmount: { $sum: '$amount' },
+          procurementCount: { $sum: 1 }
+        }}
+      ]),
+      MilkPayment.aggregate([
+        { $match: payMatch },
+        { $group: {
+          _id: '$supplierId',
+          paidAmount: { $sum: '$amount' },
+          paymentCount: { $sum: 1 }
+        }}
+      ]),
+      Supplier.find({ tenantId, isActive: true })
+        .select('supplierCode name phone village ratePerFat')
+        .sort({ name: 1 })
+        .lean()
+    ]);
+
+    const procMap = new Map(procAgg.map(p => [p._id.toString(), p]));
+    const payMap = new Map(payAgg.map(p => [p._id.toString(), p]));
+
+    const balances = suppliers.map(s => {
+      const proc = procMap.get(s._id.toString()) || {};
+      const pay = payMap.get(s._id.toString()) || {};
+      const totalAmount = proc.totalAmount || 0;
+      const paidAmount = pay.paidAmount || 0;
+      return {
+        supplierId: s._id,
+        supplierCode: s.supplierCode,
+        supplierName: s.name,
+        phone: s.phone,
+        village: s.village,
+        ratePerFat: s.ratePerFat,
+        totalMilk: proc.totalMilk || 0,
+        totalAmount,
+        paidAmount,
+        pendingAmount: totalAmount - paidAmount,
+        procurementCount: proc.procurementCount || 0,
+        paymentCount: pay.paymentCount || 0
+      };
+    });
+
+    res.json({ success: true, data: balances });
+  } catch (err) {
+    console.error('Payment balances error:', err);
+    res.status(500).json({ success: false, message: 'Failed to get payment balances' });
+  }
+};
