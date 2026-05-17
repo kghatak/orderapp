@@ -5,7 +5,8 @@ import {
   listProcurements,
   getProcurement,
   createProcurement,
-  updateProcurement
+  updateProcurement,
+  deleteProcurement
 } from '../controllers/procurementController.js';
 
 const router = express.Router();
@@ -17,5 +18,6 @@ router.get('/', listProcurements);
 router.get('/:id', getProcurement);
 router.post('/', requireRole('admin'), createProcurement);
 router.put('/:id', requireRole('admin'), updateProcurement);
+router.delete('/:id', requireRole('admin'), deleteProcurement);
 
 export default router;

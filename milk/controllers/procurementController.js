@@ -4,7 +4,7 @@ import { Supplier } from '../models/Supplier.js';
 export const listProcurements = async (req, res) => {
   try {
     const { tenantId, user } = req;
-    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus } = req.query;
+    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift } = req.query;
 
     const filter = { tenantId };
     if (user.role === 'supplier') {
@@ -16,6 +16,7 @@ export const listProcurements = async (req, res) => {
     if (fromDate) filter.date = { ...filter.date, $gte: new Date(fromDate) };
     if (toDate) filter.date = { ...filter.date, $lte: new Date(toDate) };
     if (paymentStatus) filter.paymentStatus = paymentStatus;
+    if (shift) filter.shift = shift;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [procurements, total] = await Promise.all([
@@ -69,12 +70,19 @@ export const getProcurement = async (req, res) => {
 export const createProcurement = async (req, res) => {
   try {
     const { tenantId, user } = req;
-    const { supplierId, date, quantity, fat, snf, rate, remarks } = req.body;
+    const { supplierId, date, shift, quantity, fat, snf, fatMeterReading, remarks } = req.body;
 
-    if (!supplierId || !date || quantity == null || rate == null) {
+    if (!supplierId || !date || !shift || quantity == null || fat == null) {
       return res.status(400).json({
         success: false,
-        message: 'supplierId, date, quantity, and rate are required'
+        message: 'supplierId, date, shift, quantity, and fat are required'
+      });
+    }
+
+    if (!['morning', 'evening'].includes(shift)) {
+      return res.status(400).json({
+        success: false,
+        message: "shift must be 'morning' or 'evening'"
       });
     }
 
@@ -83,15 +91,19 @@ export const createProcurement = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
 
-    const amount = (quantity || 0) * (rate || 0);
+    const snappedRate = supplier.ratePerFat || 0;
+    const amount = (quantity || 0) * (fat || 0) * snappedRate;
+
     const procurement = new Procurement({
       tenantId,
       supplierId,
       date: new Date(date),
+      shift,
       quantity: quantity || 0,
       fat: fat || 0,
       snf: snf || 0,
-      rate: rate || 0,
+      fatMeterReading: fatMeterReading || 0,
+      ratePerFat: snappedRate,
       amount,
       recordedBy: user._id,
       remarks: remarks || ''
@@ -114,7 +126,7 @@ export const updateProcurement = async (req, res) => {
   try {
     const { tenantId } = req;
     const { id } = req.params;
-    const { quantity, fat, snf, rate, remarks } = req.body;
+    const { shift, quantity, fat, snf, fatMeterReading, ratePerFat, remarks } = req.body;
 
     const procurement = await Procurement.findOne({ _id: id, tenantId });
     if (!procurement) {
@@ -128,12 +140,22 @@ export const updateProcurement = async (req, res) => {
       });
     }
 
+    if (shift !== undefined) {
+      if (!['morning', 'evening'].includes(shift)) {
+        return res.status(400).json({
+          success: false,
+          message: "shift must be 'morning' or 'evening'"
+        });
+      }
+      procurement.shift = shift;
+    }
     if (quantity != null) procurement.quantity = quantity;
     if (fat != null) procurement.fat = fat;
     if (snf != null) procurement.snf = snf;
-    if (rate != null) procurement.rate = rate;
+    if (fatMeterReading != null) procurement.fatMeterReading = fatMeterReading;
+    if (ratePerFat != null) procurement.ratePerFat = ratePerFat;
     if (remarks != null) procurement.remarks = remarks;
-    procurement.amount = procurement.quantity * procurement.rate;
+    procurement.amount = procurement.quantity * procurement.fat * procurement.ratePerFat;
     procurement.updatedAt = new Date();
     await procurement.save();
     await procurement.populate('supplierId', 'supplierCode name phone village');
@@ -142,5 +164,30 @@ export const updateProcurement = async (req, res) => {
   } catch (err) {
     console.error('Update procurement error:', err);
     res.status(500).json({ success: false, message: 'Failed to update procurement' });
+  }
+};
+
+export const deleteProcurement = async (req, res) => {
+  try {
+    const { tenantId } = req;
+    const { id } = req.params;
+
+    const procurement = await Procurement.findOne({ _id: id, tenantId });
+    if (!procurement) {
+      return res.status(404).json({ success: false, message: 'Procurement not found' });
+    }
+
+    if (procurement.paymentStatus === 'paid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete paid procurement. Unlink the payment first.'
+      });
+    }
+
+    await Procurement.deleteOne({ _id: id, tenantId });
+    res.json({ success: true, message: 'Procurement deleted successfully' });
+  } catch (err) {
+    console.error('Delete procurement error:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete procurement' });
   }
 };

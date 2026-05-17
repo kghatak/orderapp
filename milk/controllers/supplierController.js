@@ -65,7 +65,7 @@ const generateSupplierCode = async (tenantId) => {
 export const createSupplier = async (req, res) => {
   try {
     const { tenantId } = req;
-    const { name, phone, village, address, milkType, bankAccountNo, bankName, ifscCode } = req.body;
+    const { name, phone, village, address, milkType, bankAccountNo, bankName, ifscCode, ratePerFat } = req.body;
 
     if (!name || !phone) {
       return res.status(400).json({
@@ -86,7 +86,8 @@ export const createSupplier = async (req, res) => {
       milkType: milkType || 'cow',
       bankAccountNo: bankAccountNo || '',
       bankName: bankName || '',
-      ifscCode: ifscCode || ''
+      ifscCode: ifscCode || '',
+      ratePerFat: ratePerFat ?? 0
     });
     await supplier.save();
 
@@ -107,7 +108,7 @@ export const updateSupplier = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const allowed = ['name', 'phone', 'village', 'address', 'milkType', 'bankAccountNo', 'bankName', 'ifscCode', 'isActive'];
+    const allowed = ['name', 'phone', 'village', 'address', 'milkType', 'bankAccountNo', 'bankName', 'ifscCode', 'ratePerFat', 'isActive'];
     const toUpdate = {};
     for (const k of allowed) {
       if (updates[k] !== undefined) toUpdate[k] = updates[k];

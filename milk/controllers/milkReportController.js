@@ -13,10 +13,10 @@ export const dailySummary = async (req, res) => {
     const end = new Date(targetDate);
     end.setHours(23, 59, 59, 999);
 
-    const procurements = await Procurement.find({
-      tenantId,
-      date: { $gte: start, $lte: end }
-    }).lean();
+    const [procurements, totalActiveSuppliers] = await Promise.all([
+      Procurement.find({ tenantId, date: { $gte: start, $lte: end } }).lean(),
+      Supplier.countDocuments({ tenantId, isActive: true })
+    ]);
 
     const totalQuantity = procurements.reduce((s, p) => s + (p.quantity || 0), 0);
     const totalAmount = procurements.reduce((s, p) => s + (p.amount || 0), 0);
@@ -29,6 +29,7 @@ export const dailySummary = async (req, res) => {
         totalQuantity,
         totalAmount,
         supplierCount,
+        totalActiveSuppliers,
         recordCount: procurements.length
       }
     });
@@ -68,6 +69,7 @@ export const supplierSummary = async (req, res) => {
       MilkPayment.find(payFilter).sort({ paymentDate: 1 }).lean()
     ]);
 
+    const totalMilk = procurements.reduce((s, p) => s + (p.quantity || 0), 0);
     const totalProcurement = procurements.reduce((s, p) => s + (p.amount || 0), 0);
     const totalPaid = payments.reduce((s, p) => s + (p.amount || 0), 0);
     const pending = totalProcurement - totalPaid;
@@ -76,6 +78,7 @@ export const supplierSummary = async (req, res) => {
       success: true,
       data: {
         supplierId,
+        totalMilk,
         totalProcurement,
         totalPaid,
         pending,

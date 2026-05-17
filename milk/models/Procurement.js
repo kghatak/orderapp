@@ -4,10 +4,12 @@ const procurementSchema = new mongoose.Schema({
   tenantId: { type: String, required: true, index: true },
   supplierId: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier', required: true },
   date: { type: Date, required: true },
-  quantity: { type: Number, required: true }, // litres
+  shift: { type: String, enum: ['morning', 'evening'], required: true },
+  quantity: { type: Number, required: true }, // Kg
   fat: { type: Number, default: 0 },
   snf: { type: Number, default: 0 },
-  rate: { type: Number, required: true }, // per litre
+  fatMeterReading: { type: Number, default: 0 },
+  ratePerFat: { type: Number, required: true }, // snapshot of supplier.ratePerFat at entry time
   amount: { type: Number, required: true },
   paymentStatus: { type: String, enum: ['pending', 'paid'], default: 'pending' },
   paymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'MilkPayment', default: null },
