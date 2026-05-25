@@ -6,6 +6,204 @@ import admin from 'firebase-admin';
 
 const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
+const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+/** Shared cap for GET range on daily-product-delivery / daily-product-return. */
+const MAX_DELIVERY_QUERY_RANGE_DAYS = 93;
+/** GET daily-product-* /xlsx: max inclusive calendar days when using from & to query params */
+const MAX_XLSX_VOUCHER_RANGE_DAYS = 10;
+
+/** Express query value → trimmed string (first element if repeated). */
+function firstQueryString(q) {
+  if (q == null || q === '') return '';
+  const s = Array.isArray(q) ? q[0] : q;
+  return String(s ?? '').trim();
+}
+
+function parseIsoDateUtc(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+/** Inclusive list of YYYY-MM-DD strings from fromStr through toStr (UTC calendar days). */
+function enumerateDateRangeInclusive(fromStr, toStr) {
+  const start = parseIsoDateUtc(fromStr);
+  const end = parseIsoDateUtc(toStr);
+  const dates = [];
+  const cur = new Date(start.getTime());
+  while (cur.getTime() <= end.getTime()) {
+    dates.push(
+      `${cur.getUTCFullYear()}-${String(cur.getUTCMonth() + 1).padStart(2, '0')}-${String(cur.getUTCDate()).padStart(2, '0')}`
+    );
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+/**
+ * @param {object} data - Firestore document data
+ * @returns {{ data: object, pagination: object }}
+ */
+function paginateDailyDeliveryDoc(data, pageNum, limitNum) {
+  const allProducts = data.products || [];
+  const totalProducts = allProducts.length;
+  const totalPages = Math.ceil(totalProducts / limitNum) || 1;
+  const offset = (pageNum - 1) * limitNum;
+  const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+  return {
+    data: {
+      date: data.date,
+      deliveredDate: data.deliveredDate,
+      totalOrders: data.totalOrders,
+      totalProducts,
+      totalDiscountPercentage: data.totalDiscountPercentage,
+      totalDiscount: data.totalDiscount,
+      totalAmount: data.totalAmount,
+      products: paginatedProducts,
+      timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+      status: data.status,
+    },
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      totalProducts,
+      totalPages,
+      hasNextPage: pageNum < totalPages,
+      hasPrevPage: pageNum > 1,
+    },
+  };
+}
+
+/**
+ * Pagination for DailyProductReturn (same shape as GET single-day response).
+ */
+function paginateDailyReturnDoc(data, pageNum, limitNum) {
+  const allProducts = data.products || [];
+  const totalProducts = allProducts.length;
+  const totalPages = Math.ceil(totalProducts / limitNum) || 1;
+  const offset = (pageNum - 1) * limitNum;
+  const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+  return {
+    data: {
+      date: data.date,
+      returnDate: data.returnDate,
+      totalReturns: data.totalReturns,
+      totalProducts,
+      totalDiscountPercentage: data.totalDiscountPercentage,
+      totalDiscount: data.totalDiscount,
+      totalAmount: data.totalAmount,
+      products: paginatedProducts,
+      timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+      status: data.status,
+    },
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      totalProducts,
+      totalPages,
+      hasNextPage: pageNum < totalPages,
+      hasPrevPage: pageNum > 1,
+    },
+  };
+}
+
+/**
+ * Merge `products` arrays across daily snapshots by productId (delivery & return docs share line shape).
+ * @param {string} countField — `totalOrders` (delivery) or `totalReturns` (returns)
+ */
+function mergeDailyProductDocuments(dayDocsData, countField) {
+  const map = new Map();
+  for (const doc of dayDocsData) {
+    const products = doc.products || [];
+    for (const p of products) {
+      const productId =
+        p.productId != null && String(p.productId).trim() !== '' ? String(p.productId).trim() : 'unknown';
+      const q = Number(p.totalQuantity);
+      const qty = Number.isFinite(q) ? q : 0;
+      const amt = Number(p.totalAmount);
+      const safeAmt = Number.isFinite(amt) ? amt : 0;
+      const disc = Number(p.totalDiscount);
+      const safeDisc = Number.isFinite(disc) ? disc : 0;
+      const gst = Number(p.gst);
+      const safeGst = Number.isFinite(gst) ? gst : 0;
+
+      if (map.has(productId)) {
+        const ex = map.get(productId);
+        ex.totalQuantity += qty;
+        ex.totalAmount += safeAmt;
+        ex.totalDiscount += safeDisc;
+        ex._gstWeighted += safeGst * qty;
+      } else {
+        map.set(productId, {
+          productId,
+          name: p.name || 'Unknown Product',
+          unit: p.unit || '',
+          totalQuantity: qty,
+          totalAmount: safeAmt,
+          totalDiscount: safeDisc,
+          _gstWeighted: safeGst * qty,
+        });
+      }
+    }
+  }
+
+  const merged = [...map.values()].map((row) => {
+    const qty = row.totalQuantity;
+    const subtotalBeforeDiscount = row.totalAmount + row.totalDiscount;
+    const avgPrice = qty > 0 ? subtotalBeforeDiscount / qty : 0;
+    const discPct =
+      subtotalBeforeDiscount > 0 ? (row.totalDiscount / subtotalBeforeDiscount) * 100 : 0;
+    const gstAvg = qty > 0 ? row._gstWeighted / qty : 0;
+    return {
+      productId: row.productId,
+      name: row.name,
+      totalQuantity: Math.round(row.totalQuantity * 1000) / 1000,
+      unit: row.unit,
+      price: Math.round(avgPrice * 100) / 100,
+      discountPercentage: Math.round(discPct * 100) / 100,
+      totalDiscount: Math.round(row.totalDiscount * 100) / 100,
+      totalAmount: Math.round(row.totalAmount * 100) / 100,
+      gst: Math.round(gstAvg * 100) / 100,
+    };
+  });
+
+  merged.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+  const rollupCount = dayDocsData.reduce((s, d) => {
+    const n = Number(d[countField]);
+    return s + (Number.isFinite(n) ? n : 0);
+  }, 0);
+
+  let totalDiscount = 0;
+  let totalAmount = 0;
+  merged.forEach((p) => {
+    totalDiscount += p.totalDiscount;
+    totalAmount += p.totalAmount;
+  });
+  const subAgg = totalAmount + totalDiscount;
+  const aggDiscPct = subAgg > 0 ? (totalDiscount / subAgg) * 100 : 0;
+
+  const totals = {
+    totalProducts: merged.length,
+    totalDiscount: Math.round(totalDiscount * 100) / 100,
+    totalAmount: Math.round(totalAmount * 100) / 100,
+    totalDiscountPercentage: Math.round(aggDiscPct * 100) / 100,
+  };
+  totals[countField] = rollupCount;
+
+  return {
+    mergedProducts: merged,
+    totals,
+  };
+}
+
+function mergeDeliveryProductsAcrossDays(dayDocsData) {
+  return mergeDailyProductDocuments(dayDocsData, 'totalOrders');
+}
+
+function mergeReturnProductsAcrossDays(dayDocsData) {
+  return mergeDailyProductDocuments(dayDocsData, 'totalReturns');
+}
+
 /**
  * List price is GST-inclusive. Discount % off list; tax split backed out from discounted inclusive total.
  * @param {boolean} interState — true: IGST only; false: CGST+SGST half each.
@@ -92,17 +290,64 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
 
 /**
  * Shared data for delivery/return voucher exports (.xlsx).
+ * Query: `date=YYYY-MM-DD` or `from` + `to` (inclusive, max MAX_XLSX_VOUCHER_RANGE_DAYS days).
  * @param {'delivery' | 'return'} kind
  */
 const buildDailyProductVoucherExportRows = async (req, kind) => {
   const db = getFirestoreDB();
-  const { date, interState, defaultGst, counter } = req.query;
+  const { date, from, to, interState, defaultGst, counter } = req.query;
 
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  const fromS = firstQueryString(from);
+  const toS = firstQueryString(to);
+  const dateS = date != null && String(date).trim() !== '' ? String(date).trim() : '';
+
+  /** @type {string[]} */
+  let dateKeys;
+
+  const usedRangeParams = Boolean(fromS && toS);
+  if (usedRangeParams) {
+    if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'from and to must be YYYY-MM-DD' },
+      };
+    }
+    if (fromS > toS) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'from must be on or before to' },
+      };
+    }
+    dateKeys = enumerateDateRangeInclusive(fromS, toS);
+    if (dateKeys.length > MAX_XLSX_VOUCHER_RANGE_DAYS) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: `Date range spans ${dateKeys.length} days; maximum is ${MAX_XLSX_VOUCHER_RANGE_DAYS}`,
+        },
+      };
+    }
+  } else if (dateS !== '') {
+    if (!YMD_DATE_REGEX.test(dateS)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'date must be YYYY-MM-DD' },
+      };
+    }
+    dateKeys = [dateS];
+  } else {
     return {
       ok: false,
       status: 400,
-      body: { success: false, error: 'date query parameter is required (format: YYYY-MM-DD)' },
+      body: {
+        success: false,
+        error: 'Provide date=YYYY-MM-DD or from and to (inclusive range, maximum 10 days)',
+      },
     };
   }
 
@@ -111,41 +356,43 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
   const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
 
   const isDelivery = kind === 'delivery';
-  const dateDocRef = db.collection(isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn').doc(date);
-  const dateDoc = await dateDocRef.get();
+  const collName = isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn';
 
-  if (!dateDoc.exists) {
-    return {
-      ok: false,
-      status: 404,
-      body: {
-        success: false,
-        message: isDelivery
-          ? `No product delivery record found for ${date}`
-          : `No product return record found for ${date}`,
-      },
-    };
+  /** @type {{ dateKey: string, outletDocs: import('firebase-admin').firestore.QueryDocumentSnapshot[] }[]} */
+  const dayBundles = [];
+
+  for (const dateKey of dateKeys) {
+    const dateDocRef = db.collection(collName).doc(dateKey);
+    const dateDoc = await dateDocRef.get();
+    if (!dateDoc.exists) continue;
+    const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
+    if (!outletsSnapshot.empty) {
+      dayBundles.push({ dateKey, outletDocs: outletsSnapshot.docs });
+    }
   }
 
-  const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
-
-  if (outletsSnapshot.empty) {
+  if (!dayBundles.length) {
+    const rangeLabel = dateKeys.length === 1
+      ? dateKeys[0]
+      : `${dateKeys[0]}–${dateKeys[dateKeys.length - 1]}`;
     return {
       ok: false,
       status: 404,
       body: {
         success: false,
         message: isDelivery
-          ? `No outlet-wise data found for ${date}`
-          : `No outlet-wise return data found for ${date}`,
+          ? `No product delivery data found for requested day(s): ${rangeLabel}`
+          : `No product return data found for requested day(s): ${rangeLabel}`,
       },
     };
   }
 
   const productIds = new Set();
-  outletsSnapshot.forEach((d) => {
-    (d.data().products || []).forEach((p) => {
-      if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+  dayBundles.forEach(({ outletDocs }) => {
+    outletDocs.forEach((d) => {
+      (d.data().products || []).forEach((p) => {
+        if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+      });
     });
   });
 
@@ -158,8 +405,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     })
   );
 
-  const outletDocs = outletsSnapshot.docs;
-  const voucherOutletCount = outletDocs.length;
+  const voucherOutletCount = dayBundles.reduce((sum, day) => sum + day.outletDocs.length, 0);
   const voucherCounterRef = db
     .collection('counters')
     .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
@@ -183,78 +429,87 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     });
   }
 
-  const [year, month, day] = date.split('-').map(Number);
-  const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
   /** @type {Array<Array<string|number>>} */
   const rows = [];
+  let outletGlobalIndex = 0;
 
-  outletDocs.forEach((doc, outletIndex) => {
-    const outlet = doc.data();
-    const voucherNumber = startVoucherNumber + outletIndex;
-    const products = outlet.products || [];
-    const gstNo = outlet.gstNo || '';
-    const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
-    const registrationNumber = gstNo || '';
-    const address = outlet.address != null ? String(outlet.address).trim() : '';
-    const state = outlet.state != null ? String(outlet.state).trim() : '';
-    const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
+  for (const { dateKey, outletDocs } of dayBundles) {
+    const [year, month, day] = dateKey.split('-').map(Number);
+    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
 
-    products.forEach((product) => {
-      const pid = product.productId;
-      let gstPct =
-        product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
-          ? Number(product.gst)
-          : undefined;
-      if (!Number.isFinite(gstPct)) {
-        gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
-      }
+    outletDocs.forEach((doc) => {
+      const outlet = doc.data();
+      const voucherNumber = startVoucherNumber + outletGlobalIndex;
+      outletGlobalIndex += 1;
+      const products = outlet.products || [];
+      const gstNo = outlet.gstNo || '';
+      const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
+      const registrationNumber = gstNo || '';
+      const address = outlet.address != null ? String(outlet.address).trim() : '';
+      const state = outlet.state != null ? String(outlet.state).trim() : '';
+      const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
 
-      const tax = computeDeliveryCsvTaxLine(
-        product.price,
-        product.discountPercentage || 0,
-        product.totalQuantity,
-        gstPct,
-        interStateBool
-      );
+      products.forEach((product) => {
+        const pid = product.productId;
+        let gstPct =
+          product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
+            ? Number(product.gst)
+            : undefined;
+        if (!Number.isFinite(gstPct)) {
+          gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
+        }
 
-      const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+        const tax = computeDeliveryCsvTaxLine(
+          product.price,
+          product.discountPercentage || 0,
+          product.totalQuantity,
+          gstPct,
+          interStateBool
+        );
 
-      rows.push([
-        voucherDate,
-        voucherNumber,
-        outlet.outletName ?? '',
-        address,
-        state,
-        registrationType,
-        registrationNumber,
-        product.name ?? '',
-        Number(product.totalQuantity),
-        Number(product.price),
-        (product.unit || 'kg').toString().toUpperCase(),
-        Number(product.discountPercentage || 0),
-        tax.rateAfterDiscountInclTax,
-        perUnitTaxable === '' ? '' : perUnitTaxable,
-        tax.totalTaxableLine,
-        tax.igstRate,
-        tax.igstAmt,
-        tax.cgstRate,
-        tax.cgstAmt,
-        tax.sgstRate,
-        tax.sgstAmt,
-        tax.rounding,
-        tax.billTotal,
-        billToPalace,
-        billToPalace,
-      ]);
+        const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+
+        rows.push([
+          voucherDate,
+          voucherNumber,
+          outlet.outletName ?? '',
+          address,
+          state,
+          registrationType,
+          registrationNumber,
+          product.name ?? '',
+          Number(product.totalQuantity),
+          Number(product.price),
+          (product.unit || 'kg').toString().toUpperCase(),
+          Number(product.discountPercentage || 0),
+          tax.rateAfterDiscountInclTax,
+          perUnitTaxable === '' ? '' : perUnitTaxable,
+          tax.totalTaxableLine,
+          tax.igstRate,
+          tax.igstAmt,
+          tax.cgstRate,
+          tax.cgstAmt,
+          tax.sgstRate,
+          tax.sgstAmt,
+          tax.rounding,
+          tax.billTotal,
+          billToPalace,
+          billToPalace,
+        ]);
+      });
     });
-  });
+  }
+
+  const prefix = isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn';
+  const filenameBase = usedRangeParams
+    ? `${prefix}_${fromS}_to_${toS}`
+    : `${prefix}_${dateKeys[0]}`;
 
   return {
     ok: true,
     headers: PRODUCT_VOUCHER_EXPORT_HEADERS,
     rows,
-    filenameBase: isDelivery ? `DailyProductDelivery_${date}` : `DailyProductReturn_${date}`,
+    filenameBase,
   };
 };
 
@@ -1098,12 +1353,16 @@ export const calculateDailyProductReturn = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5&counter=1
+ * GET /api/balance/daily-product-delivery/xlsx
  *
- * Voucher-style Excel export (GST-inclusive list price, discount %, tax backed out).
+ * Single day: `?date=2026-03-17&interState=false&defaultGst=5&counter=1`
+ * Date range (inclusive, max 10 days): `?from=2026-03-17&to=2026-03-20&…`
+ * Days with no `DailyProductDelivery` snapshot (or no outlets) are skipped; 404 if none of the requested days have data.
+ *
+ * Voucher-style Excel (GST-inclusive list price, discount %, tax backed out).
  * interState=true → IGST only; else CGST+SGST half each.
- * Optional `counter` (integer >= 1): first outlet voucher number; outlets get consecutive numbers (1,2,3…).
- * If omitted, voucher numbers come from `counters/deliveredvouchercounter` and the counter is advanced.
+ * Optional `counter` (integer >= 1): first voucher number; vouchers are consecutive across all outlet rows in date order.
+ * If omitted, voucher numbers come from `counters/deliveredvouchercounter` and the counter is advanced by the number of outlet-day rows included.
  */
 export const getDailyProductDeliveryXLSX = async (req, res) => {
   try {
@@ -1130,9 +1389,11 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5&counter=1
+ * GET /api/balance/daily-product-return/xlsx
  *
- * Same columns/GST logic as delivery xlsx. Optional `counter` as for delivery; else `counters/returnvouchercounter`.
+ * Single day: `?date=…&…` — same columns/GST logic as delivery xlsx.
+ * Date range (inclusive, max 10 days): `?from=…&to=…` — skips days without return snapshots.
+ * Optional `counter` as for delivery; else `counters/returnvouchercounter`.
  */
 export const getDailyProductReturnXLSX = async (req, res) => {
   try {
@@ -1159,24 +1420,175 @@ export const getDailyProductReturnXLSX = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery?date=2026-02-23&page=1&limit=20
+ * GET /api/balance/daily-product-delivery
  *
- * Returns the daily product delivery record for a specific date with pagination on products.
+ * Single day:
+ *   ?date=2026-02-23&page=1&limit=20
+ *
+ * Date range (inclusive, UTC calendar days): products merged by productId across days that have snapshots.
+ * Response uses the same { success, message, data, pagination } shape as single-day; merged totals in data.
+ *   data.date = range start, data.deliveredDate = range end (same values when from === to).
+ *   ?from=2026-05-01&to=2026-05-03&page=1&limit=20
+ * Optional: includeDays=true — also return per-day breakdown; optional range summary on the root object.
+ * Max span: MAX_DELIVERY_QUERY_RANGE_DAYS (~3 months).
  */
 export const getDailyProductDelivery = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const { date, page = 1, limit = 20 } = req.query;
+    const { date, from, to, page = 1, limit = 20, includeDays } = req.query;
+
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+
+    const includeDaysFlag =
+      includeDays === '1' || includeDays === 'true' || includeDays === true;
+
+    const hasFrom = from != null && String(from).trim() !== '';
+    const hasTo = to != null && String(to).trim() !== '';
+
+    if (hasFrom || hasTo) {
+      if (!hasFrom || !hasTo) {
+        return res.status(400).json({
+          success: false,
+          error: 'For a date range, both from and to are required (format: YYYY-MM-DD)',
+        });
+      }
+      const fromS = String(from).trim();
+      const toS = String(to).trim();
+      if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid date format. Use YYYY-MM-DD for from and to (e.g. 2026-05-27)',
+        });
+      }
+      if (fromS > toS) {
+        return res.status(400).json({
+          success: false,
+          error: 'from must be on or before to',
+        });
+      }
+      const dayKeys = enumerateDateRangeInclusive(fromS, toS);
+      if (dayKeys.length > MAX_DELIVERY_QUERY_RANGE_DAYS) {
+        return res.status(400).json({
+          success: false,
+          error: `Date range spans ${dayKeys.length} days; maximum allowed is ${MAX_DELIVERY_QUERY_RANGE_DAYS}`,
+        });
+      }
+
+      const snapshots = await Promise.all(
+        dayKeys.map((d) => db.collection('DailyProductDelivery').doc(d).get())
+      );
+
+      const foundDocsData = [];
+      const daysDetail = [];
+      let daysFound = 0;
+      snapshots.forEach((snap, idx) => {
+        const dayKey = dayKeys[idx];
+        if (!snap.exists) {
+          if (includeDaysFlag) {
+            daysDetail.push({
+              date: dayKey,
+              found: false,
+              message: `No product delivery record found for ${dayKey}`,
+              data: null,
+              pagination: null,
+            });
+          }
+          return;
+        }
+        daysFound += 1;
+        foundDocsData.push(snap.data());
+        if (includeDaysFlag) {
+          const payload = paginateDailyDeliveryDoc(snap.data(), pageNum, limitNum);
+          daysDetail.push({
+            date: dayKey,
+            found: true,
+            ...payload,
+          });
+        }
+      });
+
+      if (foundDocsData.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: `No DailyProductDelivery records in range ${fromS}–${toS}`,
+          range: { from: fromS, to: toS },
+          summary: {
+            daysRequested: dayKeys.length,
+            daysFound: 0,
+            daysMissing: dayKeys.length,
+          },
+        });
+      }
+
+      const { mergedProducts, totals } = mergeDeliveryProductsAcrossDays(foundDocsData);
+      const totalMergedLines = mergedProducts.length;
+      const totalProductPages = Math.ceil(totalMergedLines / limitNum) || 1;
+      const offset = (pageNum - 1) * limitNum;
+      const paginatedMerged = mergedProducts.slice(offset, offset + limitNum);
+
+      const allFound = daysFound === dayKeys.length;
+      const mergedData = {
+        date: fromS,
+        deliveredDate: fromS === toS ? fromS : toS,
+        totalOrders: totals.totalOrders,
+        totalProducts: totals.totalProducts,
+        totalDiscountPercentage: totals.totalDiscountPercentage,
+        totalDiscount: totals.totalDiscount,
+        totalAmount: totals.totalAmount,
+        products: paginatedMerged,
+        timestamp:
+          typeof foundDocsData[foundDocsData.length - 1].timestamp?.toDate === 'function'
+            ? foundDocsData[foundDocsData.length - 1].timestamp.toDate().toISOString()
+            : null,
+        status: 'success',
+      };
+
+      const payload = {
+        success: true,
+        message:
+          fromS === toS
+            ? `Product delivery details for ${fromS}`
+            : `Product delivery details for ${fromS}–${toS} (merged)`,
+        data: mergedData,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          totalProducts: totalMergedLines,
+          totalPages: totalProductPages,
+          hasNextPage: pageNum < totalProductPages,
+          hasPrevPage: pageNum > 1,
+        },
+        range:
+          fromS === toS
+            ? undefined
+            : { from: fromS, to: toS },
+        summary: {
+          daysRequested: dayKeys.length,
+          daysFound,
+          daysMissing: dayKeys.length - daysFound,
+        },
+      };
+      if (!allFound) {
+        payload.meta = {
+          note: 'Some dates in the range have no DailyProductDelivery document; merge uses only existing days.',
+        };
+      }
+      if (includeDaysFlag) {
+        payload.days = daysDetail;
+      }
+      return res.status(200).json(payload);
+    }
 
     if (!date) {
       return res.status(400).json({
         success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
+        error:
+          'Provide date=YYYY-MM-DD for a single day, or from=YYYY-MM-DD&to=YYYY-MM-DD for a range',
       });
     }
 
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
+    if (!YMD_DATE_REGEX.test(date)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid date format. Use YYYY-MM-DD (e.g., 2026-02-23)',
@@ -1192,39 +1604,13 @@ export const getDailyProductDelivery = async (req, res) => {
       });
     }
 
-    const data = doc.data();
-    const allProducts = data.products || [];
-
-    const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
-    const totalProducts = allProducts.length;
-    const totalPages = Math.ceil(totalProducts / limitNum);
-    const offset = (pageNum - 1) * limitNum;
-    const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+    const { data: body, pagination } = paginateDailyDeliveryDoc(doc.data(), pageNum, limitNum);
 
     return res.status(200).json({
       success: true,
       message: `Product delivery details for ${date}`,
-      data: {
-        date: data.date,
-        deliveredDate: data.deliveredDate,
-        totalOrders: data.totalOrders,
-        totalProducts,
-        totalDiscountPercentage: data.totalDiscountPercentage,
-        totalDiscount: data.totalDiscount,
-        totalAmount: data.totalAmount,
-        products: paginatedProducts,
-        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
-        status: data.status,
-      },
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        totalProducts,
-        totalPages,
-        hasNextPage: pageNum < totalPages,
-        hasPrevPage: pageNum > 1,
-      },
+      data: body,
+      pagination,
     });
   } catch (error) {
     console.error('❌ [Get Daily Product Delivery] Error:', error);
@@ -1236,24 +1622,173 @@ export const getDailyProductDelivery = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return?date=2026-02-23&page=1&limit=20
+ * GET /api/balance/daily-product-return
  *
- * Returns the daily aggregated product return record for a specific date with pagination on products.
+ * Single day:
+ *   ?date=2026-02-23&page=1&limit=20
+ *
+ * Date range (merged by productId, same { data, pagination } shape as single day):
+ *   data.date = range start; data.returnDate = range end (equal when single day).
+ *   ?from=2026-05-01&to=2026-05-03&page=1&limit=20
+ * Optional includeDays=true for per-day breakdown.
  */
 export const getDailyProductReturn = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const { date, page = 1, limit = 20 } = req.query;
+    const { date, from, to, page = 1, limit = 20, includeDays } = req.query;
+
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+
+    const includeDaysFlag =
+      includeDays === '1' || includeDays === 'true' || includeDays === true;
+
+    const hasFrom = from != null && String(from).trim() !== '';
+    const hasTo = to != null && String(to).trim() !== '';
+
+    if (hasFrom || hasTo) {
+      if (!hasFrom || !hasTo) {
+        return res.status(400).json({
+          success: false,
+          error: 'For a date range, both from and to are required (format: YYYY-MM-DD)',
+        });
+      }
+      const fromS = String(from).trim();
+      const toS = String(to).trim();
+      if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid date format. Use YYYY-MM-DD for from and to (e.g. 2026-05-27)',
+        });
+      }
+      if (fromS > toS) {
+        return res.status(400).json({
+          success: false,
+          error: 'from must be on or before to',
+        });
+      }
+      const dayKeys = enumerateDateRangeInclusive(fromS, toS);
+      if (dayKeys.length > MAX_DELIVERY_QUERY_RANGE_DAYS) {
+        return res.status(400).json({
+          success: false,
+          error: `Date range spans ${dayKeys.length} days; maximum allowed is ${MAX_DELIVERY_QUERY_RANGE_DAYS}`,
+        });
+      }
+
+      const snapshots = await Promise.all(
+        dayKeys.map((d) => db.collection('DailyProductReturn').doc(d).get())
+      );
+
+      const foundDocsData = [];
+      const daysDetail = [];
+      let daysFound = 0;
+      snapshots.forEach((snap, idx) => {
+        const dayKey = dayKeys[idx];
+        if (!snap.exists) {
+          if (includeDaysFlag) {
+            daysDetail.push({
+              date: dayKey,
+              found: false,
+              message: `No product return record found for ${dayKey}`,
+              data: null,
+              pagination: null,
+            });
+          }
+          return;
+        }
+        daysFound += 1;
+        foundDocsData.push(snap.data());
+        if (includeDaysFlag) {
+          const payload = paginateDailyReturnDoc(snap.data(), pageNum, limitNum);
+          daysDetail.push({
+            date: dayKey,
+            found: true,
+            ...payload,
+          });
+        }
+      });
+
+      if (foundDocsData.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: `No DailyProductReturn records in range ${fromS}–${toS}`,
+          range: { from: fromS, to: toS },
+          summary: {
+            daysRequested: dayKeys.length,
+            daysFound: 0,
+            daysMissing: dayKeys.length,
+          },
+        });
+      }
+
+      const { mergedProducts, totals } = mergeReturnProductsAcrossDays(foundDocsData);
+      const totalMergedLines = mergedProducts.length;
+      const totalProductPages = Math.ceil(totalMergedLines / limitNum) || 1;
+      const offset = (pageNum - 1) * limitNum;
+      const paginatedMerged = mergedProducts.slice(offset, offset + limitNum);
+
+      const allFound = daysFound === dayKeys.length;
+      const mergedData = {
+        date: fromS,
+        returnDate: fromS === toS ? fromS : toS,
+        totalReturns: totals.totalReturns,
+        totalProducts: totals.totalProducts,
+        totalDiscountPercentage: totals.totalDiscountPercentage,
+        totalDiscount: totals.totalDiscount,
+        totalAmount: totals.totalAmount,
+        products: paginatedMerged,
+        timestamp:
+          typeof foundDocsData[foundDocsData.length - 1].timestamp?.toDate === 'function'
+            ? foundDocsData[foundDocsData.length - 1].timestamp.toDate().toISOString()
+            : null,
+        status: 'success',
+      };
+
+      const payload = {
+        success: true,
+        message:
+          fromS === toS
+            ? `Product return details for ${fromS}`
+            : `Product return details for ${fromS}–${toS} (merged)`,
+        data: mergedData,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          totalProducts: totalMergedLines,
+          totalPages: totalProductPages,
+          hasNextPage: pageNum < totalProductPages,
+          hasPrevPage: pageNum > 1,
+        },
+        range:
+          fromS === toS
+            ? undefined
+            : { from: fromS, to: toS },
+        summary: {
+          daysRequested: dayKeys.length,
+          daysFound,
+          daysMissing: dayKeys.length - daysFound,
+        },
+      };
+      if (!allFound) {
+        payload.meta = {
+          note: 'Some dates in the range have no DailyProductReturn document; merge uses only existing days.',
+        };
+      }
+      if (includeDaysFlag) {
+        payload.days = daysDetail;
+      }
+      return res.status(200).json(payload);
+    }
 
     if (!date) {
       return res.status(400).json({
         success: false,
-        error: 'date query parameter is required (format: YYYY-MM-DD)',
+        error:
+          'Provide date=YYYY-MM-DD for a single day, or from=YYYY-MM-DD&to=YYYY-MM-DD for a range',
       });
     }
 
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
+    if (!YMD_DATE_REGEX.test(date)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid date format. Use YYYY-MM-DD (e.g., 2026-02-23)',
@@ -1269,39 +1804,13 @@ export const getDailyProductReturn = async (req, res) => {
       });
     }
 
-    const data = doc.data();
-    const allProducts = data.products || [];
-
-    const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
-    const totalProducts = allProducts.length;
-    const totalPages = Math.ceil(totalProducts / limitNum);
-    const offset = (pageNum - 1) * limitNum;
-    const paginatedProducts = allProducts.slice(offset, offset + limitNum);
+    const { data: body, pagination } = paginateDailyReturnDoc(doc.data(), pageNum, limitNum);
 
     return res.status(200).json({
       success: true,
       message: `Product return details for ${date}`,
-      data: {
-        date: data.date,
-        returnDate: data.returnDate,
-        totalReturns: data.totalReturns,
-        totalProducts,
-        totalDiscountPercentage: data.totalDiscountPercentage,
-        totalDiscount: data.totalDiscount,
-        totalAmount: data.totalAmount,
-        products: paginatedProducts,
-        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
-        status: data.status,
-      },
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        totalProducts,
-        totalPages,
-        hasNextPage: pageNum < totalPages,
-        hasPrevPage: pageNum > 1,
-      },
+      data: body,
+      pagination,
     });
   } catch (error) {
     console.error('❌ [Get Daily Product Return] Error:', error);
