@@ -9,6 +9,15 @@ const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 /** Shared cap for GET range on daily-product-delivery / daily-product-return. */
 const MAX_DELIVERY_QUERY_RANGE_DAYS = 93;
+/** GET daily-product-* /xlsx: max inclusive calendar days when using from & to query params */
+const MAX_XLSX_VOUCHER_RANGE_DAYS = 10;
+
+/** Express query value → trimmed string (first element if repeated). */
+function firstQueryString(q) {
+  if (q == null || q === '') return '';
+  const s = Array.isArray(q) ? q[0] : q;
+  return String(s ?? '').trim();
+}
 
 function parseIsoDateUtc(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -281,17 +290,64 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
 
 /**
  * Shared data for delivery/return voucher exports (.xlsx).
+ * Query: `date=YYYY-MM-DD` or `from` + `to` (inclusive, max MAX_XLSX_VOUCHER_RANGE_DAYS days).
  * @param {'delivery' | 'return'} kind
  */
 const buildDailyProductVoucherExportRows = async (req, kind) => {
   const db = getFirestoreDB();
-  const { date, interState, defaultGst, counter } = req.query;
+  const { date, from, to, interState, defaultGst, counter } = req.query;
 
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  const fromS = firstQueryString(from);
+  const toS = firstQueryString(to);
+  const dateS = date != null && String(date).trim() !== '' ? String(date).trim() : '';
+
+  /** @type {string[]} */
+  let dateKeys;
+
+  const usedRangeParams = Boolean(fromS && toS);
+  if (usedRangeParams) {
+    if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'from and to must be YYYY-MM-DD' },
+      };
+    }
+    if (fromS > toS) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'from must be on or before to' },
+      };
+    }
+    dateKeys = enumerateDateRangeInclusive(fromS, toS);
+    if (dateKeys.length > MAX_XLSX_VOUCHER_RANGE_DAYS) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: `Date range spans ${dateKeys.length} days; maximum is ${MAX_XLSX_VOUCHER_RANGE_DAYS}`,
+        },
+      };
+    }
+  } else if (dateS !== '') {
+    if (!YMD_DATE_REGEX.test(dateS)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'date must be YYYY-MM-DD' },
+      };
+    }
+    dateKeys = [dateS];
+  } else {
     return {
       ok: false,
       status: 400,
-      body: { success: false, error: 'date query parameter is required (format: YYYY-MM-DD)' },
+      body: {
+        success: false,
+        error: 'Provide date=YYYY-MM-DD or from and to (inclusive range, maximum 10 days)',
+      },
     };
   }
 
@@ -300,41 +356,43 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
   const fallbackGst = Number.isFinite(defaultGstNum) ? defaultGstNum : 0;
 
   const isDelivery = kind === 'delivery';
-  const dateDocRef = db.collection(isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn').doc(date);
-  const dateDoc = await dateDocRef.get();
+  const collName = isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn';
 
-  if (!dateDoc.exists) {
-    return {
-      ok: false,
-      status: 404,
-      body: {
-        success: false,
-        message: isDelivery
-          ? `No product delivery record found for ${date}`
-          : `No product return record found for ${date}`,
-      },
-    };
+  /** @type {{ dateKey: string, outletDocs: import('firebase-admin').firestore.QueryDocumentSnapshot[] }[]} */
+  const dayBundles = [];
+
+  for (const dateKey of dateKeys) {
+    const dateDocRef = db.collection(collName).doc(dateKey);
+    const dateDoc = await dateDocRef.get();
+    if (!dateDoc.exists) continue;
+    const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
+    if (!outletsSnapshot.empty) {
+      dayBundles.push({ dateKey, outletDocs: outletsSnapshot.docs });
+    }
   }
 
-  const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
-
-  if (outletsSnapshot.empty) {
+  if (!dayBundles.length) {
+    const rangeLabel = dateKeys.length === 1
+      ? dateKeys[0]
+      : `${dateKeys[0]}–${dateKeys[dateKeys.length - 1]}`;
     return {
       ok: false,
       status: 404,
       body: {
         success: false,
         message: isDelivery
-          ? `No outlet-wise data found for ${date}`
-          : `No outlet-wise return data found for ${date}`,
+          ? `No product delivery data found for requested day(s): ${rangeLabel}`
+          : `No product return data found for requested day(s): ${rangeLabel}`,
       },
     };
   }
 
   const productIds = new Set();
-  outletsSnapshot.forEach((d) => {
-    (d.data().products || []).forEach((p) => {
-      if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+  dayBundles.forEach(({ outletDocs }) => {
+    outletDocs.forEach((d) => {
+      (d.data().products || []).forEach((p) => {
+        if (p.productId && p.productId !== 'unknown') productIds.add(p.productId);
+      });
     });
   });
 
@@ -347,8 +405,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     })
   );
 
-  const outletDocs = outletsSnapshot.docs;
-  const voucherOutletCount = outletDocs.length;
+  const voucherOutletCount = dayBundles.reduce((sum, day) => sum + day.outletDocs.length, 0);
   const voucherCounterRef = db
     .collection('counters')
     .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
@@ -372,78 +429,87 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     });
   }
 
-  const [year, month, day] = date.split('-').map(Number);
-  const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
-
   /** @type {Array<Array<string|number>>} */
   const rows = [];
+  let outletGlobalIndex = 0;
 
-  outletDocs.forEach((doc, outletIndex) => {
-    const outlet = doc.data();
-    const voucherNumber = startVoucherNumber + outletIndex;
-    const products = outlet.products || [];
-    const gstNo = outlet.gstNo || '';
-    const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
-    const registrationNumber = gstNo || '';
-    const address = outlet.address != null ? String(outlet.address).trim() : '';
-    const state = outlet.state != null ? String(outlet.state).trim() : '';
-    const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
+  for (const { dateKey, outletDocs } of dayBundles) {
+    const [year, month, day] = dateKey.split('-').map(Number);
+    const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
 
-    products.forEach((product) => {
-      const pid = product.productId;
-      let gstPct =
-        product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
-          ? Number(product.gst)
-          : undefined;
-      if (!Number.isFinite(gstPct)) {
-        gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
-      }
+    outletDocs.forEach((doc) => {
+      const outlet = doc.data();
+      const voucherNumber = startVoucherNumber + outletGlobalIndex;
+      outletGlobalIndex += 1;
+      const products = outlet.products || [];
+      const gstNo = outlet.gstNo || '';
+      const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
+      const registrationNumber = gstNo || '';
+      const address = outlet.address != null ? String(outlet.address).trim() : '';
+      const state = outlet.state != null ? String(outlet.state).trim() : '';
+      const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
 
-      const tax = computeDeliveryCsvTaxLine(
-        product.price,
-        product.discountPercentage || 0,
-        product.totalQuantity,
-        gstPct,
-        interStateBool
-      );
+      products.forEach((product) => {
+        const pid = product.productId;
+        let gstPct =
+          product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
+            ? Number(product.gst)
+            : undefined;
+        if (!Number.isFinite(gstPct)) {
+          gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
+        }
 
-      const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+        const tax = computeDeliveryCsvTaxLine(
+          product.price,
+          product.discountPercentage || 0,
+          product.totalQuantity,
+          gstPct,
+          interStateBool
+        );
 
-      rows.push([
-        voucherDate,
-        voucherNumber,
-        outlet.outletName ?? '',
-        address,
-        state,
-        registrationType,
-        registrationNumber,
-        product.name ?? '',
-        Number(product.totalQuantity),
-        Number(product.price),
-        (product.unit || 'kg').toString().toUpperCase(),
-        Number(product.discountPercentage || 0),
-        tax.rateAfterDiscountInclTax,
-        perUnitTaxable === '' ? '' : perUnitTaxable,
-        tax.totalTaxableLine,
-        tax.igstRate,
-        tax.igstAmt,
-        tax.cgstRate,
-        tax.cgstAmt,
-        tax.sgstRate,
-        tax.sgstAmt,
-        tax.rounding,
-        tax.billTotal,
-        billToPalace,
-        billToPalace,
-      ]);
+        const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+
+        rows.push([
+          voucherDate,
+          voucherNumber,
+          outlet.outletName ?? '',
+          address,
+          state,
+          registrationType,
+          registrationNumber,
+          product.name ?? '',
+          Number(product.totalQuantity),
+          Number(product.price),
+          (product.unit || 'kg').toString().toUpperCase(),
+          Number(product.discountPercentage || 0),
+          tax.rateAfterDiscountInclTax,
+          perUnitTaxable === '' ? '' : perUnitTaxable,
+          tax.totalTaxableLine,
+          tax.igstRate,
+          tax.igstAmt,
+          tax.cgstRate,
+          tax.cgstAmt,
+          tax.sgstRate,
+          tax.sgstAmt,
+          tax.rounding,
+          tax.billTotal,
+          billToPalace,
+          billToPalace,
+        ]);
+      });
     });
-  });
+  }
+
+  const prefix = isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn';
+  const filenameBase = usedRangeParams
+    ? `${prefix}_${fromS}_to_${toS}`
+    : `${prefix}_${dateKeys[0]}`;
 
   return {
     ok: true,
     headers: PRODUCT_VOUCHER_EXPORT_HEADERS,
     rows,
-    filenameBase: isDelivery ? `DailyProductDelivery_${date}` : `DailyProductReturn_${date}`,
+    filenameBase,
   };
 };
 
@@ -1287,12 +1353,16 @@ export const calculateDailyProductReturn = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-delivery/xlsx?date=2026-03-17&interState=false&defaultGst=5&counter=1
+ * GET /api/balance/daily-product-delivery/xlsx
  *
- * Voucher-style Excel export (GST-inclusive list price, discount %, tax backed out).
+ * Single day: `?date=2026-03-17&interState=false&defaultGst=5&counter=1`
+ * Date range (inclusive, max 10 days): `?from=2026-03-17&to=2026-03-20&…`
+ * Days with no `DailyProductDelivery` snapshot (or no outlets) are skipped; 404 if none of the requested days have data.
+ *
+ * Voucher-style Excel (GST-inclusive list price, discount %, tax backed out).
  * interState=true → IGST only; else CGST+SGST half each.
- * Optional `counter` (integer >= 1): first outlet voucher number; outlets get consecutive numbers (1,2,3…).
- * If omitted, voucher numbers come from `counters/deliveredvouchercounter` and the counter is advanced.
+ * Optional `counter` (integer >= 1): first voucher number; vouchers are consecutive across all outlet rows in date order.
+ * If omitted, voucher numbers come from `counters/deliveredvouchercounter` and the counter is advanced by the number of outlet-day rows included.
  */
 export const getDailyProductDeliveryXLSX = async (req, res) => {
   try {
@@ -1319,9 +1389,11 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
 };
 
 /**
- * GET /api/balance/daily-product-return/xlsx?date=...&interState=false&defaultGst=5&counter=1
+ * GET /api/balance/daily-product-return/xlsx
  *
- * Same columns/GST logic as delivery xlsx. Optional `counter` as for delivery; else `counters/returnvouchercounter`.
+ * Single day: `?date=…&…` — same columns/GST logic as delivery xlsx.
+ * Date range (inclusive, max 10 days): `?from=…&to=…` — skips days without return snapshots.
+ * Optional `counter` as for delivery; else `counters/returnvouchercounter`.
  */
 export const getDailyProductReturnXLSX = async (req, res) => {
   try {
