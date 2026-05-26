@@ -405,7 +405,47 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     })
   );
 
-  const voucherOutletCount = dayBundles.reduce((sum, day) => sum + day.outletDocs.length, 0);
+  /**
+   * Pre-group each outlet's products into [taxable[], nonTaxable[]] using the already-loaded
+   * gstFromCatalog map. Each group will get its own voucher number so that taxable and
+   * non-taxable items are never mixed on the same voucher.
+   * Structure: dayBundlesGrouped[day][outlet] = { outletData, groups: [{gstPct, product}[]] }
+   */
+  const resolveGst = (product) => {
+    const raw = product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
+      ? Number(product.gst)
+      : undefined;
+    if (Number.isFinite(raw)) return raw;
+    return gstFromCatalog.get(product.productId) ?? fallbackGst;
+  };
+
+  const dayBundlesGrouped = dayBundles.map(({ dateKey, outletDocs }) => ({
+    dateKey,
+    outlets: outletDocs.map((doc) => {
+      const outletData = doc.data();
+      const products = outletData.products || [];
+      /** @type {{ product: object, gstPct: number }[]} */
+      const taxable = [];
+      /** @type {{ product: object, gstPct: number }[]} */
+      const nonTaxable = [];
+      products.forEach((product) => {
+        const gstPct = resolveGst(product);
+        (gstPct > 0 ? taxable : nonTaxable).push({ product, gstPct });
+      });
+      /** Each entry is one voucher number worth of product rows */
+      const groups = [];
+      if (taxable.length) groups.push(taxable);
+      if (nonTaxable.length) groups.push(nonTaxable);
+      return { outletData, groups };
+    }),
+  }));
+
+  // Count total voucher groups across all days + outlets for counter reservation
+  const totalVoucherGroups = dayBundlesGrouped.reduce(
+    (sum, day) => sum + day.outlets.reduce((s, o) => s + o.groups.length, 0),
+    0
+  );
+
   const voucherCounterRef = db
     .collection('counters')
     .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
@@ -423,25 +463,20 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
       const last = snap.exists ? Number(snap.data().count) : 0;
       const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
       const start = safeLast + 1;
-      const newCount = safeLast + voucherOutletCount;
-      transaction.set(voucherCounterRef, { count: newCount }, { merge: true });
+      transaction.set(voucherCounterRef, { count: safeLast + totalVoucherGroups }, { merge: true });
       return start;
     });
   }
 
   /** @type {Array<Array<string|number>>} */
   const rows = [];
-  let outletGlobalIndex = 0;
+  let voucherOffset = 0;
 
-  for (const { dateKey, outletDocs } of dayBundles) {
+  for (const { dateKey, outlets } of dayBundlesGrouped) {
     const [year, month, day] = dateKey.split('-').map(Number);
     const voucherDate = `${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
 
-    outletDocs.forEach((doc) => {
-      const outlet = doc.data();
-      const voucherNumber = startVoucherNumber + outletGlobalIndex;
-      outletGlobalIndex += 1;
-      const products = outlet.products || [];
+    for (const { outletData: outlet, groups } of outlets) {
       const gstNo = outlet.gstNo || '';
       const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
       const registrationNumber = gstNo || '';
@@ -449,55 +484,52 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
       const state = outlet.state != null ? String(outlet.state).trim() : '';
       const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
 
-      products.forEach((product) => {
-        const pid = product.productId;
-        let gstPct =
-          product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
-            ? Number(product.gst)
-            : undefined;
-        if (!Number.isFinite(gstPct)) {
-          gstPct = gstFromCatalog.get(pid) ?? fallbackGst;
+      for (const group of groups) {
+        // All products in this group share the same voucher number
+        const voucherNumber = startVoucherNumber + voucherOffset;
+        voucherOffset += 1;
+
+        for (const { product, gstPct } of group) {
+          const tax = computeDeliveryCsvTaxLine(
+            product.price,
+            product.discountPercentage || 0,
+            product.totalQuantity,
+            gstPct,
+            interStateBool
+          );
+
+          const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
+
+          rows.push([
+            voucherDate,
+            voucherNumber,
+            outlet.outletName ?? '',
+            address,
+            state,
+            registrationType,
+            registrationNumber,
+            product.name ?? '',
+            Number(product.totalQuantity),
+            Number(product.price),
+            (product.unit || 'kg').toString().toUpperCase(),
+            Number(product.discountPercentage || 0),
+            tax.rateAfterDiscountInclTax,
+            perUnitTaxable === '' ? '' : perUnitTaxable,
+            tax.totalTaxableLine,
+            tax.igstRate,
+            tax.igstAmt,
+            tax.cgstRate,
+            tax.cgstAmt,
+            tax.sgstRate,
+            tax.sgstAmt,
+            tax.rounding,
+            tax.billTotal,
+            billToPalace,
+            billToPalace,
+          ]);
         }
-
-        const tax = computeDeliveryCsvTaxLine(
-          product.price,
-          product.discountPercentage || 0,
-          product.totalQuantity,
-          gstPct,
-          interStateBool
-        );
-
-        const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
-
-        rows.push([
-          voucherDate,
-          voucherNumber,
-          outlet.outletName ?? '',
-          address,
-          state,
-          registrationType,
-          registrationNumber,
-          product.name ?? '',
-          Number(product.totalQuantity),
-          Number(product.price),
-          (product.unit || 'kg').toString().toUpperCase(),
-          Number(product.discountPercentage || 0),
-          tax.rateAfterDiscountInclTax,
-          perUnitTaxable === '' ? '' : perUnitTaxable,
-          tax.totalTaxableLine,
-          tax.igstRate,
-          tax.igstAmt,
-          tax.cgstRate,
-          tax.cgstAmt,
-          tax.sgstRate,
-          tax.sgstAmt,
-          tax.rounding,
-          tax.billTotal,
-          billToPalace,
-          billToPalace,
-        ]);
-      });
-    });
+      }
+    }
   }
 
   const prefix = isDelivery ? 'DailyProductDelivery' : 'DailyProductReturn';
