@@ -11,7 +11,27 @@ const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_DELIVERY_QUERY_RANGE_DAYS = 93;
 /** GET daily-product-* /xlsx: max inclusive calendar days when using from & to query params */
 const MAX_XLSX_VOUCHER_RANGE_DAYS = 10;
+/** Firestore batch write limit — stay under 500 when writing parent + many outlet subdocs */
+const FIRESTORE_BATCH_SET_LIMIT = 450;
 
+/** Split Firestore batch writes into chunks of FIRESTORE_BATCH_SET_LIMIT to stay under the 500-op limit. */
+async function commitBatchedDocumentSets(db, writes) {
+  if (!writes.length) return;
+  for (let i = 0; i < writes.length; i += FIRESTORE_BATCH_SET_LIMIT) {
+    const batch = db.batch();
+    for (const { ref, data } of writes.slice(i, i + FIRESTORE_BATCH_SET_LIMIT)) {
+      batch.set(ref, data);
+    }
+    await batch.commit();
+  }
+}
+
+/**
+ * Core aggregation for one IST calendar day's DailyProductReturn.
+ * Writes the parent doc + outlets subcollection; returns a summary object.
+ * @param {import('firebase-admin').firestore.Firestore} db
+ * @param {string} dateStr YYYY-MM-DD (IST calendar label)
+ */
 /** Express query value → trimmed string (first element if repeated). */
 function firstQueryString(q) {
   if (q == null || q === '') return '';
@@ -266,6 +286,7 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
   'Buyer/Supplier',
   'Address',
   'State',
+  'Pin Code',
   'Registration Type',
   'Registration Number',
   'Item Name',
@@ -415,7 +436,11 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const raw = product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
       ? Number(product.gst)
       : undefined;
-    if (Number.isFinite(raw)) return raw;
+    // Only trust the stored gst if it is a positive finite number.
+    // A stored value of 0 almost always means the field was absent on the
+    // original transaction item and defaulted to 0 during aggregation, so
+    // we fall back to the product-catalog rate instead.
+    if (Number.isFinite(raw) && raw > 0) return raw;
     return gstFromCatalog.get(product.productId) ?? fallbackGst;
   };
 
@@ -482,12 +507,16 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
       const registrationNumber = gstNo || '';
       const address = outlet.address != null ? String(outlet.address).trim() : '';
       const state = outlet.state != null ? String(outlet.state).trim() : '';
+      const pinCode = (outlet.pincode != null && outlet.pincode !== 0 && outlet.pincode !== '') ? String(outlet.pincode).trim() : ((outlet.pinCode != null && outlet.pinCode !== 0 && outlet.pinCode !== '') ? String(outlet.pinCode).trim() : '');
       const billToPalace = outlet.billToPalace != null ? String(outlet.billToPalace).trim() : '';
 
       for (const group of groups) {
         // All products in this group share the same voucher number
         const voucherNumber = startVoucherNumber + voucherOffset;
         voucherOffset += 1;
+
+        // Supplier identity columns appear only on the FIRST row of each voucher group
+        let isFirstRowOfGroup = true;
 
         for (const { product, gstPct } of group) {
           const tax = computeDeliveryCsvTaxLine(
@@ -500,12 +529,19 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
 
           const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
 
+          // Address and Pin Code appear only on the first row of each voucher group
+          const rowAddress = isFirstRowOfGroup ? address : '';
+          const rowPinCodeRaw = isFirstRowOfGroup ? pinCode : '';
+          const rowPinCode = rowPinCodeRaw !== '' && /^\d+$/.test(rowPinCodeRaw) ? Number(rowPinCodeRaw) : rowPinCodeRaw;
+          isFirstRowOfGroup = false;
+
           rows.push([
             voucherDate,
             voucherNumber,
             outlet.outletName ?? '',
-            address,
+            rowAddress,
             state,
+            rowPinCode,
             registrationType,
             registrationNumber,
             product.name ?? '',
@@ -793,6 +829,12 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
 };
 
 /**
+ * Core aggregation for one IST calendar day's DailyProductDelivery.
+ * Writes the parent doc + outlets subcollection (chunked batches); returns a summary object.
+ * @param {import('firebase-admin').firestore.Firestore} db
+ * @param {string} dateStr YYYY-MM-DD (IST calendar label)
+ */
+/**
  * POST /api/balance/daily-product-delivery
  *
  * Aggregates all products delivered across all orders for the triggered date
@@ -818,13 +860,11 @@ export const calculateDailyProductDelivery = async (req, res) => {
 
     const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
     const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
-
     const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
     const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
 
     console.log(`📅 Target date (IST): ${dateStr}`);
 
-    // Query active outlets and delivered orders in parallel
     const [outletsSnapshot, ordersSnapshot] = await Promise.all([
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('orders')
@@ -834,23 +874,22 @@ export const calculateDailyProductDelivery = async (req, res) => {
         .get(),
     ]);
 
-    const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => {
-      const d = doc.data();
-      outletMap.set(doc.id, {
-        name: d.name || d.outletName || 'Unknown Outlet',
-        gstNo: d.gstNo || d.gst || d.gstin || '',
-        billToPalace: d.billToPalace || '',
-        state: d.state || '',
-        address: d.address || '',
-      });
+    const readOutlet = (dd) => ({
+      name: dd.name || dd.outletName || 'Unknown Outlet',
+      gstNo: dd.gstNo || dd.gst || dd.gstin || '',
+      billToPalace: dd.billToPalace || '',
+      state: dd.state || '',
+      address: dd.address || '',
+      pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
     });
+
+    const outletMap = new Map();
+    outletsSnapshot.forEach((doc) => outletMap.set(doc.id, readOutlet(doc.data())));
 
     console.log(`🏪 Found ${outletMap.size} active outlets`);
     console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
 
-    // Group orders by outlet and aggregate products per outlet
-    const outletDataMap = new Map(); // outletId -> { orders, productMap }
+    const outletDataMap = new Map();
     const globalProductMap = new Map();
     let totalOrders = 0;
 
@@ -859,10 +898,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
       totalOrders++;
       const outletId = data.outletId || 'unknown';
       const items = data.items || [];
-
-      if (!outletDataMap.has(outletId)) {
-        outletDataMap.set(outletId, { orderCount: 0, productMap: new Map() });
-      }
+      if (!outletDataMap.has(outletId)) outletDataMap.set(outletId, { orderCount: 0, productMap: new Map() });
       const outletEntry = outletDataMap.get(outletId);
       outletEntry.orderCount++;
 
@@ -881,175 +917,130 @@ export const calculateDailyProductDelivery = async (req, res) => {
         const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
         const gstWeighted = lineGst * quantity;
 
-        // Per-outlet aggregation
-        const oMap = outletEntry.productMap;
-        if (oMap.has(productId)) {
-          const ex = oMap.get(productId);
-          ex.totalQuantity += quantity;
-          ex.totalAmount += itemAmount;
-          ex.totalDiscount += discountAmount;
-          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-        } else {
-          oMap.set(productId, {
-            productId,
-            name,
-            totalQuantity: quantity,
-            totalAmount: itemAmount,
-            totalDiscount: discountAmount,
-            gstWeighted,
-          });
-        }
-
-        // Global aggregation
-        if (globalProductMap.has(productId)) {
-          const ex = globalProductMap.get(productId);
-          ex.totalQuantity += quantity;
-          ex.totalAmount += itemAmount;
-          ex.totalDiscount += discountAmount;
-          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-        } else {
-          globalProductMap.set(productId, {
-            productId,
-            name,
-            totalQuantity: quantity,
-            totalAmount: itemAmount,
-            totalDiscount: discountAmount,
-            gstWeighted,
-          });
-        }
+        const accumulate = (map) => {
+          if (map.has(productId)) {
+            const ex = map.get(productId);
+            ex.totalQuantity += quantity;
+            ex.totalAmount += itemAmount;
+            ex.totalDiscount += discountAmount;
+            ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
+          } else {
+            map.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount, gstWeighted });
+          }
+        };
+        accumulate(outletEntry.productMap);
+        accumulate(globalProductMap);
       });
     });
 
-    // Fetch units for all unique productIds
-    const allProductIds = new Set([...globalProductMap.keys()]);
-    outletDataMap.forEach((entry) => {
-      entry.productMap.forEach((_, pid) => allProductIds.add(pid));
-    });
-    allProductIds.delete('unknown');
+    const missingIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
+    if (missingIds.length) {
+      const docs = await Promise.all(missingIds.map((id) => db.collection('outlets').doc(id).get()));
+      docs.forEach((doc, i) => outletMap.set(missingIds[i], readOutlet(doc.exists ? doc.data() : {})));
+    }
 
+    const allProductIds = new Set([...globalProductMap.keys()]);
+    outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
+    allProductIds.delete('unknown');
     const unitMap = new Map();
-    const productIdArr = Array.from(allProductIds);
-    if (productIdArr.length > 0) {
-      const productDocs = await Promise.all(
-        productIdArr.map((id) => db.collection('products').doc(id).get())
-      );
-      productDocs.forEach((doc, i) => {
-        unitMap.set(productIdArr[i], doc.exists ? (doc.data().unit || '') : '');
+    const gstCatalogMap = new Map();
+    if (allProductIds.size > 0) {
+      const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
+      [...allProductIds].forEach((id, i) => {
+        const d = pdocs[i].exists ? pdocs[i].data() : {};
+        unitMap.set(id, d.unit || '');
+        const catalogGst = parseFloat(d.gst ?? 0);
+        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
       });
     }
 
-    const buildProductList = (pMap) => {
-      return Array.from(pMap.values()).map((p) => {
-        const unit = unitMap.get(p.productId) || '';
-        const subtotalBeforeDiscount = p.totalAmount + (p.totalDiscount || 0);
-        const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
-        const discPct = subtotalBeforeDiscount > 0
-          ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
-        const gw = p.gstWeighted != null ? p.gstWeighted : 0;
-        const gstAvg = p.totalQuantity > 0 ? gw / p.totalQuantity : 0;
-        return {
-          productId: p.productId,
-          name: p.name,
-          totalQuantity: p.totalQuantity,
-          unit,
-          price: Math.round(avgPrice * 100) / 100,
-          discountPercentage: Math.round(discPct * 100) / 100,
-          totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
-          totalAmount: Math.round(p.totalAmount * 100) / 100,
-          gst: Math.round(gstAvg * 100) / 100,
-        };
-      }).sort((a, b) => a.name.localeCompare(b.name));
-    };
+    const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
+      const sub = p.totalAmount + (p.totalDiscount || 0);
+      const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
+      const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
+      return {
+        productId: p.productId,
+        name: p.name,
+        totalQuantity: p.totalQuantity,
+        unit: unitMap.get(p.productId) || '',
+        price: Math.round(avgPrice * 100) / 100,
+        discountPercentage: Math.round(discPct * 100) / 100,
+        totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
+        totalAmount: Math.round(p.totalAmount * 100) / 100,
+        gst: gstCatalogMap.get(p.productId) ?? 0,
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
 
     const computeTotals = (products) => {
       const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
       const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
-      const subtotal = totalAmount + totalDiscount;
-      const discPct = subtotal > 0 ? (totalDiscount / subtotal) * 100 : 0;
+      const sub = totalAmount + totalDiscount;
       return {
         totalAmount: Math.round(totalAmount * 100) / 100,
         totalDiscount: Math.round(totalDiscount * 100) / 100,
-        totalDiscountPercentage: Math.round(discPct * 100) / 100,
+        totalDiscountPercentage: Math.round(sub > 0 ? (totalDiscount / sub) * 100 : 0, 2),
       };
     };
 
-    // Fetch missing outlet details (e.g. inactive outlets with orders)
-    const missingOutletIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
-    if (missingOutletIds.length > 0) {
-      const missingDocs = await Promise.all(
-        missingOutletIds.map((id) => db.collection('outlets').doc(id).get())
-      );
-      missingDocs.forEach((doc, i) => {
-        const d = doc.exists ? doc.data() : {};
-        outletMap.set(missingOutletIds[i], {
-          name: d.name || d.outletName || 'Unknown Outlet',
-          gstNo: d.gstNo || d.gst || d.gstin || '',
-          billToPalace: d.billToPalace || '',
-          state: d.state || '',
-          address: d.address || '',
-        });
-      });
-    }
-
-    // Build global product list
     const globalProducts = buildProductList(globalProductMap);
     const globalTotals = computeTotals(globalProducts);
-
-    // Build per-outlet results and write to subcollection
-    const outletSummaries = [];
     const dateDocRef = db.collection('DailyProductDelivery').doc(dateStr);
-    const batch = db.batch();
+    const batchWrites = [];
+    const outletSummaries = [];
 
-    batch.set(dateDocRef, {
-      date: dateStr,
-      deliveredDate: dateStr,
-      products: globalProducts,
-      totalProducts: globalProducts.length,
-      totalOrders,
-      totalOutlets: outletDataMap.size,
-      ...globalTotals,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'success',
+    batchWrites.push({
+      ref: dateDocRef,
+      data: {
+        date: dateStr,
+        deliveredDate: dateStr,
+        products: globalProducts,
+        totalProducts: globalProducts.length,
+        totalOrders,
+        totalOutlets: outletDataMap.size,
+        ...globalTotals,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      },
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '' };
-      const outletName = outletInfo.name;
+      const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
-
-      const outletDocRef = dateDocRef.collection('outlets').doc(outletId);
-      batch.set(outletDocRef, {
-        outletId,
-        outletName,
-        gstNo: outletInfo.gstNo || '',
-        billToPalace: outletInfo.billToPalace || '',
-        state: outletInfo.state || '',
-        address: outletInfo.address || '',
-        date: dateStr,
-        products,
-        totalProducts: products.length,
-        totalOrders: entry.orderCount,
-        ...totals,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'success',
+      batchWrites.push({
+        ref: dateDocRef.collection('outlets').doc(outletId),
+        data: {
+          outletId,
+          outletName: info.name,
+          gstNo: info.gstNo || '',
+          billToPalace: info.billToPalace || '',
+          state: info.state || '',
+          address: info.address || '',
+          pincode: info.pincode || '',
+          date: dateStr,
+          products,
+          totalProducts: products.length,
+          totalOrders: entry.orderCount,
+          ...totals,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          status: 'success',
+        },
       });
-
       outletSummaries.push({
         outletId,
-        outletName,
-        gstNo: outletInfo.gstNo || '',
-        billToPalace: outletInfo.billToPalace || '',
-        state: outletInfo.state || '',
-        address: outletInfo.address || '',
+        outletName: info.name,
+        gstNo: info.gstNo || '',
+        billToPalace: info.billToPalace || '',
+        state: info.state || '',
+        address: info.address || '',
+        pincode: info.pincode || '',
         totalOrders: entry.orderCount,
         totalProducts: products.length,
         ...totals,
       });
     }
 
-    await batch.commit();
-
+    await commitBatchedDocumentSets(db, batchWrites);
     console.log(`✅ Stored ${globalProducts.length} products from ${totalOrders} orders across ${outletDataMap.size} outlets for ${dateStr}`);
 
     return res.status(200).json({
@@ -1092,6 +1083,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
   }
 };
 
+
 /**
  * POST /api/balance/daily-product-return
  *
@@ -1119,7 +1111,6 @@ export const calculateDailyProductReturn = async (req, res) => {
 
     const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
     const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
-
     const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
     const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
 
@@ -1134,17 +1125,17 @@ export const calculateDailyProductReturn = async (req, res) => {
         .get(),
     ]);
 
-    const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => {
-      const d = doc.data();
-      outletMap.set(doc.id, {
-        name: d.name || d.outletName || 'Unknown Outlet',
-        gstNo: d.gstNo || d.gst || d.gstin || '',
-        billToPalace: d.billToPalace || '',
-        state: d.state || '',
-        address: d.address || '',
-      });
+    const readOutlet = (dd) => ({
+      name: dd.name || dd.outletName || 'Unknown Outlet',
+      gstNo: dd.gstNo || dd.gst || dd.gstin || '',
+      billToPalace: dd.billToPalace || '',
+      state: dd.state || '',
+      address: dd.address || '',
+      pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
     });
+
+    const outletMap = new Map();
+    outletsSnapshot.forEach((doc) => outletMap.set(doc.id, readOutlet(doc.data())));
 
     const outletDataMap = new Map();
     const globalProductMap = new Map();
@@ -1153,14 +1144,10 @@ export const calculateDailyProductReturn = async (req, res) => {
     returnsSnapshot.forEach((doc) => {
       const data = doc.data();
       if (data.archived) return;
-
       totalReturns++;
       const outletId = data.outletId || 'unknown';
-      const items = data.items || [];
-
-      if (!outletDataMap.has(outletId)) {
-        outletDataMap.set(outletId, { returnCount: 0, productMap: new Map() });
-      }
+      const items = data.items || data.returnItems || [];
+      if (!outletDataMap.has(outletId)) outletDataMap.set(outletId, { returnCount: 0, productMap: new Map() });
       const outletEntry = outletDataMap.get(outletId);
       outletEntry.returnCount++;
 
@@ -1179,170 +1166,131 @@ export const calculateDailyProductReturn = async (req, res) => {
         const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
         const gstWeighted = lineGst * quantity;
 
-        const oMap = outletEntry.productMap;
-        if (oMap.has(productId)) {
-          const ex = oMap.get(productId);
-          ex.totalQuantity += quantity;
-          ex.totalAmount += itemAmount;
-          ex.totalDiscount += discountAmount;
-          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-        } else {
-          oMap.set(productId, {
-            productId,
-            name,
-            totalQuantity: quantity,
-            totalAmount: itemAmount,
-            totalDiscount: discountAmount,
-            gstWeighted,
-          });
-        }
-
-        if (globalProductMap.has(productId)) {
-          const ex = globalProductMap.get(productId);
-          ex.totalQuantity += quantity;
-          ex.totalAmount += itemAmount;
-          ex.totalDiscount += discountAmount;
-          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-        } else {
-          globalProductMap.set(productId, {
-            productId,
-            name,
-            totalQuantity: quantity,
-            totalAmount: itemAmount,
-            totalDiscount: discountAmount,
-            gstWeighted,
-          });
-        }
+        const accumulate = (map) => {
+          if (map.has(productId)) {
+            const ex = map.get(productId);
+            ex.totalQuantity += quantity;
+            ex.totalAmount += itemAmount;
+            ex.totalDiscount += discountAmount;
+            ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
+          } else {
+            map.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount, gstWeighted });
+          }
+        };
+        accumulate(outletEntry.productMap);
+        accumulate(globalProductMap);
       });
     });
 
-    const allProductIds = new Set([...globalProductMap.keys()]);
-    outletDataMap.forEach((entry) => {
-      entry.productMap.forEach((_, pid) => allProductIds.add(pid));
-    });
-    allProductIds.delete('unknown');
+    const missingIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
+    if (missingIds.length) {
+      const docs = await Promise.all(missingIds.map((id) => db.collection('outlets').doc(id).get()));
+      docs.forEach((doc, i) => outletMap.set(missingIds[i], readOutlet(doc.exists ? doc.data() : {})));
+    }
 
+    const allProductIds = new Set([...globalProductMap.keys()]);
+    outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
+    allProductIds.delete('unknown');
     const unitMap = new Map();
-    const productIdArr = Array.from(allProductIds);
-    if (productIdArr.length > 0) {
-      const productDocs = await Promise.all(
-        productIdArr.map((id) => db.collection('products').doc(id).get())
-      );
-      productDocs.forEach((doc, i) => {
-        unitMap.set(productIdArr[i], doc.exists ? (doc.data().unit || '') : '');
+    const gstCatalogMap = new Map();
+    if (allProductIds.size > 0) {
+      const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
+      [...allProductIds].forEach((id, i) => {
+        const d = pdocs[i].exists ? pdocs[i].data() : {};
+        unitMap.set(id, d.unit || '');
+        const catalogGst = parseFloat(d.gst ?? 0);
+        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
       });
     }
 
-    const buildProductList = (pMap) => {
-      return Array.from(pMap.values()).map((p) => {
-        const unit = unitMap.get(p.productId) || '';
-        const subtotalBeforeDiscount = p.totalAmount + (p.totalDiscount || 0);
-        const avgPrice = p.totalQuantity > 0 ? subtotalBeforeDiscount / p.totalQuantity : 0;
-        const discPct = subtotalBeforeDiscount > 0
-          ? ((p.totalDiscount || 0) / subtotalBeforeDiscount) * 100 : 0;
-        const gw = p.gstWeighted != null ? p.gstWeighted : 0;
-        const gstAvg = p.totalQuantity > 0 ? gw / p.totalQuantity : 0;
-        return {
-          productId: p.productId,
-          name: p.name,
-          totalQuantity: p.totalQuantity,
-          unit,
-          price: Math.round(avgPrice * 100) / 100,
-          discountPercentage: Math.round(discPct * 100) / 100,
-          totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
-          totalAmount: Math.round(p.totalAmount * 100) / 100,
-          gst: Math.round(gstAvg * 100) / 100,
-        };
-      }).sort((a, b) => a.name.localeCompare(b.name));
-    };
+    const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
+      const sub = p.totalAmount + (p.totalDiscount || 0);
+      const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
+      const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
+      return {
+        productId: p.productId,
+        name: p.name,
+        totalQuantity: p.totalQuantity,
+        unit: unitMap.get(p.productId) || '',
+        price: Math.round(avgPrice * 100) / 100,
+        discountPercentage: Math.round(discPct * 100) / 100,
+        totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
+        totalAmount: Math.round(p.totalAmount * 100) / 100,
+        gst: gstCatalogMap.get(p.productId) ?? 0,
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
 
     const computeTotals = (products) => {
       const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
       const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
-      const subtotal = totalAmount + totalDiscount;
-      const discPct = subtotal > 0 ? (totalDiscount / subtotal) * 100 : 0;
+      const sub = totalAmount + totalDiscount;
       return {
         totalAmount: Math.round(totalAmount * 100) / 100,
         totalDiscount: Math.round(totalDiscount * 100) / 100,
-        totalDiscountPercentage: Math.round(discPct * 100) / 100,
+        totalDiscountPercentage: Math.round(sub > 0 ? (totalDiscount / sub) * 100 : 0, 2),
       };
     };
 
-    const missingOutletIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
-    if (missingOutletIds.length > 0) {
-      const missingDocs = await Promise.all(
-        missingOutletIds.map((id) => db.collection('outlets').doc(id).get())
-      );
-      missingDocs.forEach((doc, i) => {
-        const d = doc.exists ? doc.data() : {};
-        outletMap.set(missingOutletIds[i], {
-          name: d.name || d.outletName || 'Unknown Outlet',
-          gstNo: d.gstNo || d.gst || d.gstin || '',
-          billToPalace: d.billToPalace || '',
-          state: d.state || '',
-          address: d.address || '',
-        });
-      });
-    }
-
     const globalProducts = buildProductList(globalProductMap);
     const globalTotals = computeTotals(globalProducts);
-
-    const outletSummaries = [];
     const dateDocRef = db.collection('DailyProductReturn').doc(dateStr);
-    const batch = db.batch();
+    const batchWrites = [];
+    const outletSummaries = [];
 
-    batch.set(dateDocRef, {
-      date: dateStr,
-      returnDate: dateStr,
-      products: globalProducts,
-      totalProducts: globalProducts.length,
-      totalReturns,
-      totalOutlets: outletDataMap.size,
-      ...globalTotals,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'success',
+    batchWrites.push({
+      ref: dateDocRef,
+      data: {
+        date: dateStr,
+        returnDate: dateStr,
+        products: globalProducts,
+        totalProducts: globalProducts.length,
+        totalReturns,
+        totalOutlets: outletDataMap.size,
+        ...globalTotals,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      },
     });
 
     for (const [outletId, entry] of outletDataMap) {
-      const outletInfo = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '' };
-      const outletName = outletInfo.name;
+      const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
       const products = buildProductList(entry.productMap);
       const totals = computeTotals(products);
-
-      const outletDocRef = dateDocRef.collection('outlets').doc(outletId);
-      batch.set(outletDocRef, {
-        outletId,
-        outletName,
-        gstNo: outletInfo.gstNo || '',
-        billToPalace: outletInfo.billToPalace || '',
-        state: outletInfo.state || '',
-        address: outletInfo.address || '',
-        date: dateStr,
-        products,
-        totalProducts: products.length,
-        totalReturns: entry.returnCount,
-        ...totals,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'success',
+      batchWrites.push({
+        ref: dateDocRef.collection('outlets').doc(outletId),
+        data: {
+          outletId,
+          outletName: info.name,
+          gstNo: info.gstNo || '',
+          billToPalace: info.billToPalace || '',
+          state: info.state || '',
+          address: info.address || '',
+          pincode: info.pincode || '',
+          date: dateStr,
+          products,
+          totalProducts: products.length,
+          totalReturns: entry.returnCount,
+          ...totals,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          status: 'success',
+        },
       });
-
       outletSummaries.push({
         outletId,
-        outletName,
-        gstNo: outletInfo.gstNo || '',
-        billToPalace: outletInfo.billToPalace || '',
-        state: outletInfo.state || '',
-        address: outletInfo.address || '',
+        outletName: info.name,
+        gstNo: info.gstNo || '',
+        billToPalace: info.billToPalace || '',
+        state: info.state || '',
+        address: info.address || '',
+        pincode: info.pincode || '',
         totalReturns: entry.returnCount,
         totalProducts: products.length,
         ...totals,
       });
     }
 
-    await batch.commit();
-
-    console.log(`✅ Stored ${globalProducts.length} return line-aggregated products from ${totalReturns} returns across ${outletDataMap.size} outlets for ${dateStr}`);
+    await commitBatchedDocumentSets(db, batchWrites);
+    console.log(`✅ Stored ${globalProducts.length} return products from ${totalReturns} returns across ${outletDataMap.size} outlets for ${dateStr}`);
 
     return res.status(200).json({
       success: true,
@@ -1383,6 +1331,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     });
   }
 };
+
 
 /**
  * GET /api/balance/daily-product-delivery/xlsx
