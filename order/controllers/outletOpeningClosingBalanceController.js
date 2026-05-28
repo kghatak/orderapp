@@ -436,7 +436,11 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const raw = product.gst !== undefined && product.gst !== null && String(product.gst).trim() !== ''
       ? Number(product.gst)
       : undefined;
-    if (Number.isFinite(raw)) return raw;
+    // Only trust the stored gst if it is a positive finite number.
+    // A stored value of 0 almost always means the field was absent on the
+    // original transaction item and defaulted to 0 during aggregation, so
+    // we fall back to the product-catalog rate instead.
+    if (Number.isFinite(raw) && raw > 0) return raw;
     return gstFromCatalog.get(product.productId) ?? fallbackGst;
   };
 
@@ -939,16 +943,21 @@ export const calculateDailyProductDelivery = async (req, res) => {
     outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
     allProductIds.delete('unknown');
     const unitMap = new Map();
+    const gstCatalogMap = new Map();
     if (allProductIds.size > 0) {
       const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
-      [...allProductIds].forEach((id, i) => unitMap.set(id, pdocs[i].exists ? (pdocs[i].data().unit || '') : ''));
+      [...allProductIds].forEach((id, i) => {
+        const d = pdocs[i].exists ? pdocs[i].data() : {};
+        unitMap.set(id, d.unit || '');
+        const catalogGst = parseFloat(d.gst ?? 0);
+        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
+      });
     }
 
     const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
       const sub = p.totalAmount + (p.totalDiscount || 0);
       const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
       const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
-      const gstAvg = p.totalQuantity > 0 ? (p.gstWeighted || 0) / p.totalQuantity : 0;
       return {
         productId: p.productId,
         name: p.name,
@@ -958,7 +967,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
         discountPercentage: Math.round(discPct * 100) / 100,
         totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
         totalAmount: Math.round(p.totalAmount * 100) / 100,
-        gst: Math.round(gstAvg * 100) / 100,
+        gst: gstCatalogMap.get(p.productId) ?? 0,
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1183,16 +1192,21 @@ export const calculateDailyProductReturn = async (req, res) => {
     outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
     allProductIds.delete('unknown');
     const unitMap = new Map();
+    const gstCatalogMap = new Map();
     if (allProductIds.size > 0) {
       const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
-      [...allProductIds].forEach((id, i) => unitMap.set(id, pdocs[i].exists ? (pdocs[i].data().unit || '') : ''));
+      [...allProductIds].forEach((id, i) => {
+        const d = pdocs[i].exists ? pdocs[i].data() : {};
+        unitMap.set(id, d.unit || '');
+        const catalogGst = parseFloat(d.gst ?? 0);
+        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
+      });
     }
 
     const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
       const sub = p.totalAmount + (p.totalDiscount || 0);
       const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
       const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
-      const gstAvg = p.totalQuantity > 0 ? (p.gstWeighted || 0) / p.totalQuantity : 0;
       return {
         productId: p.productId,
         name: p.name,
@@ -1202,7 +1216,7 @@ export const calculateDailyProductReturn = async (req, res) => {
         discountPercentage: Math.round(discPct * 100) / 100,
         totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
         totalAmount: Math.round(p.totalAmount * 100) / 100,
-        gst: Math.round(gstAvg * 100) / 100,
+        gst: gstCatalogMap.get(p.productId) ?? 0,
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
