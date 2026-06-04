@@ -1,6 +1,7 @@
 import { MilkPayment } from '../models/MilkPayment.js';
 import { Procurement } from '../models/Procurement.js';
 import { Supplier } from '../models/Supplier.js';
+import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 
 export const listPayments = async (req, res) => {
   try {
@@ -105,6 +106,15 @@ export const createPayment = async (req, res) => {
     }
 
     await payment.populate('supplierId', 'supplierCode name phone village');
+
+    // WhatsApp notification to supplier on payment received
+    if (supplier.phone) {
+      sendWhatsAppTemplate(
+        supplier.phone,
+        'milk_payment_received',
+        [supplier.name, String(amount), new Date(paymentDate).toLocaleDateString('en-IN')]
+      );
+    }
 
     res.status(201).json({
       success: true,

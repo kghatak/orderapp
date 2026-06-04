@@ -1,5 +1,6 @@
 import { Procurement } from '../models/Procurement.js';
 import { Supplier } from '../models/Supplier.js';
+import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 
 export const listProcurements = async (req, res) => {
   try {
@@ -110,6 +111,14 @@ export const createProcurement = async (req, res) => {
     });
     await procurement.save();
     await procurement.populate('supplierId', 'supplierCode name phone village');
+
+    if (supplier.phone) {
+      sendWhatsAppTemplate(
+        supplier.phone,
+        'milk_delivery',
+        [supplier.name, `${quantity} Kg`, `₹${amount.toFixed(2)}`]
+      );
+    }
 
     res.status(201).json({
       success: true,
