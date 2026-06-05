@@ -12,6 +12,8 @@ const wastageSchema = new mongoose.Schema(
     unit:        { type: String, trim: true },
     price:       { type: Number },
     reason:      { type: String, trim: true },
+    customerPhone: { type: String, trim: true },
+    customerAddress: { type: String, trim: true },
     status:      { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
     date:        { type: String, index: true },
     createdAt:   { type: Date, default: Date.now },

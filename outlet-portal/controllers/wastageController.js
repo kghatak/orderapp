@@ -3,6 +3,7 @@ import { getWastageModel } from '../models/Wastage.js';
 import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CUSTOMER_REPLACEMENT_REASON = 'customer_replacement';
 
 const parseYmd = (value, label) => {
   if (value === undefined || value === null || String(value).trim() === '') return null;
@@ -24,6 +25,17 @@ const findWastage = async (id, auth) => {
   const doc = await Wastage.findOne({ _id: id, tenantId: auth.tenantId, outletId: auth.outletId });
   if (!doc) return { err: { status: 404, message: 'Wastage record not found' } };
   return { doc };
+};
+
+/** Set or clear customer fields based on effective reason. */
+const applyCustomerFields = (target, reason, { customerPhone, customerAddress } = {}) => {
+  if (reason === CUSTOMER_REPLACEMENT_REASON) {
+    if (typeof customerPhone === 'string') target.customerPhone = customerPhone.trim();
+    if (typeof customerAddress === 'string') target.customerAddress = customerAddress.trim();
+    return;
+  }
+  target.customerPhone = undefined;
+  target.customerAddress = undefined;
 };
 
 export const listWastages = async (req, res) => {
@@ -67,7 +79,7 @@ export const listWastages = async (req, res) => {
 export const createWastage = async (req, res) => {
   try {
     const auth = req.portalAuth;
-    const { outletId, name, productId, productName, quantity, unit, price, reason, date } = req.body || {};
+    const { outletId, name, productId, productName, quantity, unit, price, reason, date, customerPhone, customerAddress } = req.body || {};
 
     if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
       return res.status(400).json({ success: false, message: 'outletId is required' });
@@ -103,6 +115,7 @@ export const createWastage = async (req, res) => {
     if (price != null && !Number.isNaN(Number(price))) payload.price = Number(price);
     if (reason != null) payload.reason = String(reason).trim();
     if (parsedDate) payload.date = parsedDate;
+    applyCustomerFields(payload, payload.reason, { customerPhone, customerAddress });
 
     const doc = await getWastageModel().create(payload);
     res.status(201).json({ success: true, message: 'Wastage record created', data: serialize(doc) });
@@ -116,7 +129,7 @@ export const updateWastage = async (req, res) => {
   try {
     const auth = req.portalAuth;
     const body = req.body || {};
-    const { outletId, name, productId, productName, quantity, unit, price, reason, date } = body;
+    const { outletId, name, productId, productName, quantity, unit, price, reason, date, customerPhone, customerAddress } = body;
 
     if (outletId !== undefined && outletId !== null && String(outletId).trim() !== '') {
       if (String(outletId).trim() !== auth.outletId) {
@@ -132,12 +145,15 @@ export const updateWastage = async (req, res) => {
       unit !== undefined ||
       price !== undefined ||
       reason !== undefined ||
-      date !== undefined;
+      date !== undefined ||
+      customerPhone !== undefined ||
+      customerAddress !== undefined;
 
     if (!hasPatch) {
       return res.status(400).json({
         success: false,
-        message: 'Provide at least one of: name, productId, productName, quantity, unit, price, reason, date'
+        message:
+          'Provide at least one of: name, productId, productName, quantity, unit, price, reason, date, customerPhone, customerAddress'
       });
     }
 
@@ -195,6 +211,16 @@ export const updateWastage = async (req, res) => {
       }
       doc.reason = String(reason).trim();
     }
+    if (customerPhone !== undefined) {
+      if (customerPhone !== null && typeof customerPhone !== 'string') {
+        return res.status(400).json({ success: false, message: 'customerPhone must be a string' });
+      }
+    }
+    if (customerAddress !== undefined) {
+      if (customerAddress !== null && typeof customerAddress !== 'string') {
+        return res.status(400).json({ success: false, message: 'customerAddress must be a string' });
+      }
+    }
     if (date !== undefined) {
       if (date === null || String(date).trim() === '') {
         return res.status(400).json({ success: false, message: 'date cannot be empty when provided' });
@@ -203,6 +229,11 @@ export const updateWastage = async (req, res) => {
       if (parsedDate?.error) return res.status(400).json({ success: false, message: parsedDate.error });
       doc.date = parsedDate;
     }
+
+    applyCustomerFields(doc, doc.reason, {
+      customerPhone: customerPhone !== undefined ? customerPhone : doc.customerPhone,
+      customerAddress: customerAddress !== undefined ? customerAddress : doc.customerAddress
+    });
 
     doc.updatedAt = new Date();
     await doc.save();
