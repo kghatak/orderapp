@@ -1,5 +1,6 @@
 import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getFirestoreDB } from '../../util/firebase.js';
+import { roundQty } from '../../util/quantities.js';
 
 const toNum = (v, fallback = 0) => {
   const n = Number(v);
@@ -17,7 +18,10 @@ const normalizeProductLine = (p, existing) => {
     category: p.category != null ? String(p.category) : (prev.category != null ? String(prev.category) : ''),
     unit: p.unit != null ? String(p.unit) : (prev.unit != null ? String(prev.unit) : ''),
     price: p.price !== undefined && p.price !== null ? toNum(p.price, 0) : toNum(prev.price, 0),
-    quantity: p.quantity !== undefined && p.quantity !== null ? toNum(p.quantity, 0) : toNum(prev.quantity, 0)
+    quantity:
+      p.quantity !== undefined && p.quantity !== null
+        ? roundQty(p.quantity, 0)
+        : roundQty(prev.quantity, 0)
   };
 };
 
@@ -52,8 +56,24 @@ const catalogToOutletLine = (mapKey, existing, catalog) => {
     unit: prev.unit || catalog?.unit || '',
     price:
       prev.price != null && toNum(prev.price, 0) > 0 ? toNum(prev.price, 0) : toNum(catalog?.price, 0),
-    quantity: toNum(prev.quantity, 0)
+    quantity: roundQty(prev.quantity, 0)
   };
+};
+
+const withRoundedQuantities = (products) => {
+  if (!products || typeof products !== 'object' || Array.isArray(products)) return products || {};
+  const out = {};
+  for (const [key, line] of Object.entries(products)) {
+    if (!line || typeof line !== 'object') {
+      out[key] = line;
+      continue;
+    }
+    out[key] = {
+      ...line,
+      quantity: roundQty(line.quantity, 0)
+    };
+  }
+  return out;
 };
 
 /**
@@ -111,7 +131,7 @@ export const upsertOutletProducts = async (req, res) => {
       message: merge ? 'Outlet products merged' : 'Outlet products saved',
       data: {
         outletId: doc.outletId,
-        products: doc.products || {},
+        products: withRoundedQuantities(doc.products || {}),
         productCount: doc.productCount ?? productCount,
         updatedAt: doc.updatedAt
       }
@@ -174,7 +194,7 @@ export const patchOutletProduct = async (req, res) => {
     if (category !== undefined) patch.category = String(category);
     if (unit !== undefined) patch.unit = String(unit);
     if (price !== undefined) patch.price = toNum(price, 0);
-    if (quantity !== undefined) patch.quantity = toNum(quantity, 0);
+    if (quantity !== undefined) patch.quantity = roundQty(quantity, 0);
 
     productsMap[mapKey] = patch;
     doc.products = productsMap;
@@ -300,7 +320,7 @@ export const getOutletProductsByOutletId = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: { id: _id, ...rest, productCount }
+      data: { id: _id, ...rest, products: withRoundedQuantities(rest.products), productCount }
     });
   } catch (err) {
     console.error('getOutletProductsByOutletId error:', err);
