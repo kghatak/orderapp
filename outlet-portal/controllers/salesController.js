@@ -3,6 +3,7 @@ import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
+import { roundQty } from '../../util/quantities.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
@@ -55,7 +56,7 @@ const soldQtyByProductId = (normalizedItems) => {
     const pid = line.productId;
     const q = Number(line.quantity);
     if (!Number.isFinite(q) || q <= 0) continue;
-    map.set(pid, (map.get(pid) || 0) + q);
+    map.set(pid, roundQty((map.get(pid) || 0) + q));
   }
   return map;
 };
@@ -87,7 +88,7 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
     }
     const current = Number(entry.quantity);
     const safeCurrent = Number.isFinite(current) ? current : 0;
-    entry.quantity = Math.max(0, safeCurrent - soldTotal);
+    entry.quantity = roundQty(Math.max(0, safeCurrent - soldTotal));
     touched = true;
   }
 
@@ -124,7 +125,7 @@ const incrementOutletProductsForSale = async (outletId, normalizedItems, session
     }
     const current = Number(entry.quantity);
     const safeCurrent = Number.isFinite(current) ? current : 0;
-    entry.quantity = safeCurrent + soldTotal;
+    entry.quantity = roundQty(safeCurrent + soldTotal);
     touched = true;
   }
 
@@ -192,10 +193,10 @@ const parseSaleBody = (body, authOutletId) => {
         }
       };
     }
-    const qty = Number(line.quantity);
+    const qty = roundQty(line.quantity, 0);
     const unitPrice = Number(line.unitPrice);
     const lineTotal = Number(line.lineTotal);
-    if (Number.isNaN(qty) || qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
+    if (qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
       return {
         error: {
           status: 400,

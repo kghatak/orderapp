@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { getWastageModel } from '../models/Wastage.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
+import { roundQty } from '../../util/quantities.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CUSTOMER_REPLACEMENT_REASON = 'customer_replacement';
@@ -91,8 +92,8 @@ export const createWastage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'productId is required' });
     }
 
-    const qty = Number(quantity);
-    if (!Number.isFinite(qty) || qty <= 0) {
+    const qty = roundQty(quantity, 0);
+    if (qty <= 0) {
       return res.status(400).json({ success: false, message: 'quantity must be greater than 0' });
     }
 
@@ -187,8 +188,8 @@ export const updateWastage = async (req, res) => {
       doc.productName = productName.trim();
     }
     if (quantity !== undefined) {
-      const qty = Number(quantity);
-      if (!Number.isFinite(qty) || qty <= 0) {
+      const qty = roundQty(quantity, 0);
+      if (qty <= 0) {
         return res.status(400).json({ success: false, message: 'quantity must be greater than 0' });
       }
       doc.quantity = qty;
@@ -319,8 +320,8 @@ export const acceptWastage = async (req, res) => {
     const productsDoc = await getOutletProductsModel().findOne({ outletId: doc.outletId });
     const entry = productsDoc?.products?.[doc.productId];
     if (entry && typeof entry === 'object') {
-      const current = Number(entry.quantity) || 0;
-      entry.quantity = Math.max(0, current - doc.quantity);
+      const current = roundQty(entry.quantity, 0);
+      entry.quantity = roundQty(Math.max(0, current - roundQty(doc.quantity, 0)));
       productsDoc.markModified('products');
       productsDoc.updatedAt = new Date();
       await productsDoc.save();
