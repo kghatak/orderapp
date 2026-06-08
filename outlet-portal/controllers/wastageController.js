@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { getWastageModel } from '../models/Wastage.js';
-import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
+import { getOutletProductsModel } from '../models/OutletProducts.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CUSTOMER_REPLACEMENT_REASON = 'customer_replacement';
@@ -316,16 +316,14 @@ export const acceptWastage = async (req, res) => {
     doc.updatedAt = new Date();
     await doc.save();
 
-    const qtyDoc = await getOutletProductQuantityModel().findOne({ outletId: doc.outletId });
-    if (qtyDoc?.products && typeof qtyDoc.products === 'object') {
-      const current = Number(qtyDoc.products[doc.productId]?.quantity) || 0;
-      qtyDoc.products[doc.productId] = {
-        productId: doc.productId,
-        quantity: Math.max(0, current - doc.quantity)
-      };
-      qtyDoc.markModified('products');
-      qtyDoc.updatedAt = new Date();
-      await qtyDoc.save();
+    const productsDoc = await getOutletProductsModel().findOne({ outletId: doc.outletId });
+    const entry = productsDoc?.products?.[doc.productId];
+    if (entry && typeof entry === 'object') {
+      const current = Number(entry.quantity) || 0;
+      entry.quantity = Math.max(0, current - doc.quantity);
+      productsDoc.markModified('products');
+      productsDoc.updatedAt = new Date();
+      await productsDoc.save();
     }
 
     res.status(200).json({

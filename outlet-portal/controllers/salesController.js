@@ -1,7 +1,6 @@
 import mongoose from 'mongoose';
 import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
-import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
 
@@ -62,55 +61,6 @@ const soldQtyByProductId = (normalizedItems) => {
 };
 
 /**
- * Subtracts sold quantities from MongoDB `OutletProductQuantities` for this outlet.
- * Each quantity floors at 0. Runs inside optional Mongoose session (transaction).
- */
-const decrementOutletProductQuantitiesForSale = async (outletId, normalizedItems, session) => {
-  const quantityTotals = soldQtyByProductId(normalizedItems);
-  if (quantityTotals.size === 0) return;
-
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const now = new Date();
-  const q = OutletProductQuantity.findOne({ outletId, products: { $exists: true } });
-  const doc = session ? await q.session(session) : await q;
-  const productsMap =
-    doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
-      ? doc.products
-      : {};
-
-  let touched = false;
-  for (const [productId, soldTotal] of quantityTotals) {
-    const current = Number(productsMap?.[productId]?.quantity);
-    const safeCurrent = Number.isFinite(current) ? current : 0;
-    const nextQuantity = Math.max(0, safeCurrent - soldTotal);
-    productsMap[productId] = { productId, quantity: nextQuantity };
-    touched = true;
-  }
-
-  if (touched) {
-    const payload = {
-      outletId,
-      products: productsMap,
-      productCount: Object.keys(productsMap).length,
-      updatedAt: now
-    };
-    if (doc) {
-      doc.products = payload.products;
-      doc.productCount = payload.productCount;
-      doc.updatedAt = payload.updatedAt;
-      doc.markModified('products');
-      await doc.save(session ? { session } : {});
-    } else if (session) {
-      await OutletProductQuantity.deleteMany({ outletId }, { session });
-      await OutletProductQuantity.create([payload], { session });
-    } else {
-      await OutletProductQuantity.deleteMany({ outletId });
-      await OutletProductQuantity.create(payload);
-    }
-  }
-};
-
-/**
  * Subtracts sold quantities from MongoDB `Products` for this outlet (keys must exist).
  * Each quantity floors at 0. Runs inside optional Mongoose session (transaction).
  */
@@ -146,8 +96,6 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
     doc.markModified('products');
     await doc.save(session ? { session } : {});
   }
-
-  await decrementOutletProductQuantitiesForSale(outletId, normalizedItems, session);
 };
 
 /**
@@ -184,45 +132,6 @@ const incrementOutletProductsForSale = async (outletId, normalizedItems, session
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save(session ? { session } : {});
-  }
-
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const now = new Date();
-  const quantityQuery = OutletProductQuantity.findOne({ outletId, products: { $exists: true } });
-  const quantityDoc = session ? await quantityQuery.session(session) : await quantityQuery;
-  const productsMap =
-    quantityDoc?.products && typeof quantityDoc.products === 'object' && !Array.isArray(quantityDoc.products)
-      ? quantityDoc.products
-      : {};
-
-  let quantityTouched = false;
-  for (const [productId, soldTotal] of totals) {
-    const current = Number(productsMap?.[productId]?.quantity);
-    const safeCurrent = Number.isFinite(current) ? current : 0;
-    productsMap[productId] = { productId, quantity: safeCurrent + soldTotal };
-    quantityTouched = true;
-  }
-
-  if (quantityTouched) {
-    const payload = {
-      outletId,
-      products: productsMap,
-      productCount: Object.keys(productsMap).length,
-      updatedAt: now
-    };
-    if (quantityDoc) {
-      quantityDoc.products = payload.products;
-      quantityDoc.productCount = payload.productCount;
-      quantityDoc.updatedAt = payload.updatedAt;
-      quantityDoc.markModified('products');
-      await quantityDoc.save(session ? { session } : {});
-    } else if (session) {
-      await OutletProductQuantity.deleteMany({ outletId }, { session });
-      await OutletProductQuantity.create([payload], { session });
-    } else {
-      await OutletProductQuantity.deleteMany({ outletId });
-      await OutletProductQuantity.create(payload);
-    }
   }
 };
 
