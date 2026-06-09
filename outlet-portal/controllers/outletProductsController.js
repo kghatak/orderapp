@@ -7,12 +7,36 @@ const toNum = (v, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const isManualProductId = (productId) => String(productId || '').trim().startsWith('manual:');
+
+const isManualProductLine = (mapKey, line) =>
+  isManualProductId(mapKey) || line?.isManual === true;
+
+const countManualProducts = (productsMap) => {
+  if (!productsMap || typeof productsMap !== 'object' || Array.isArray(productsMap)) return 0;
+  return Object.entries(productsMap).filter(([key, line]) => isManualProductLine(key, line)).length;
+};
+
+const productCountsFromMap = (productsMap) => {
+  const productCount = Object.keys(productsMap || {}).length;
+  const manualProductCount = countManualProducts(productsMap);
+  return { productCount, manualProductCount };
+};
+
+const withManualProductCount = (payload, manualProductCount) => {
+  if (manualProductCount > 0) {
+    payload.manualProductCount = manualProductCount;
+  }
+  return payload;
+};
+
 const normalizeProductLine = (p, existing) => {
   const productId = p?.productId != null ? String(p.productId).trim() : '';
   if (!productId) return null;
 
   const prev = existing && typeof existing === 'object' ? existing : {};
-  return {
+  const manual = isManualProductId(productId) || p?.isManual === true || prev.isManual === true;
+  const line = {
     productId,
     name: p.name != null ? String(p.name) : (prev.name != null ? String(prev.name) : ''),
     category: p.category != null ? String(p.category) : (prev.category != null ? String(prev.category) : ''),
@@ -23,6 +47,12 @@ const normalizeProductLine = (p, existing) => {
         ? roundQty(p.quantity, 0)
         : roundQty(prev.quantity, 0)
   };
+
+  if (manual) {
+    line.isManual = true;
+  }
+
+  return line;
 };
 
 const isProductLineIncomplete = (line) => {
@@ -114,27 +144,42 @@ export const upsertOutletProducts = async (req, res) => {
       if (!line) {
         return res.status(400).json({ success: false, message: 'Each product must include productId' });
       }
+
+      if (isManualProductId(productId)) {
+        if (isProductLineIncomplete(line)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Manual products require name, category, unit, and price > 0'
+          });
+        }
+        line.isManual = true;
+      }
+
       productsMap[productId] = line;
     }
 
-    const productCount = Object.keys(productsMap).length;
+    const { productCount, manualProductCount } = productCountsFromMap(productsMap);
     const updatedAt = new Date();
 
     const doc = await OutletProducts.findOneAndUpdate(
       { outletId: trimmedOutletId },
-      { $set: { products: productsMap, productCount, updatedAt } },
+      { $set: { products: productsMap, productCount, manualProductCount, updatedAt } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
 
+    const savedManualCount = doc.manualProductCount ?? manualProductCount;
     res.status(200).json({
       success: true,
       message: merge ? 'Outlet products merged' : 'Outlet products saved',
-      data: {
-        outletId: doc.outletId,
-        products: withRoundedQuantities(doc.products || {}),
-        productCount: doc.productCount ?? productCount,
-        updatedAt: doc.updatedAt
-      }
+      data: withManualProductCount(
+        {
+          outletId: doc.outletId,
+          products: withRoundedQuantities(doc.products || {}),
+          productCount: doc.productCount ?? productCount,
+          updatedAt: doc.updatedAt
+        },
+        savedManualCount
+      )
     });
   } catch (err) {
     console.error('upsertOutletProducts error:', err);
@@ -198,7 +243,9 @@ export const patchOutletProduct = async (req, res) => {
 
     productsMap[mapKey] = patch;
     doc.products = productsMap;
-    doc.productCount = Object.keys(productsMap).length;
+    const counts = productCountsFromMap(productsMap);
+    doc.productCount = counts.productCount;
+    doc.manualProductCount = counts.manualProductCount;
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save();
@@ -206,12 +253,15 @@ export const patchOutletProduct = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Outlet product updated',
-      data: {
-        outletId: doc.outletId,
-        product: patch,
-        productCount: doc.productCount,
-        updatedAt: doc.updatedAt
-      }
+      data: withManualProductCount(
+        {
+          outletId: doc.outletId,
+          product: patch,
+          productCount: doc.productCount,
+          updatedAt: doc.updatedAt
+        },
+        doc.manualProductCount
+      )
     });
   } catch (err) {
     console.error('patchOutletProduct error:', err);
@@ -244,6 +294,11 @@ export const repairMissingOutletProducts = async (req, res) => {
     let notFound = 0;
 
     for (const [mapKey, line] of Object.entries(doc.products)) {
+      if (isManualProductId(mapKey) || line?.isManual === true) {
+        skipped++;
+        continue;
+      }
+
       if (!isProductLineIncomplete(line)) {
         skipped++;
         continue;
@@ -308,19 +363,28 @@ export const getOutletProductsByOutletId = async (req, res) => {
       });
     }
 
-    const { _id, __v, ...rest } = doc;
-    const derived =
-      rest.products && typeof rest.products === 'object' && !Array.isArray(rest.products)
-        ? Object.keys(rest.products).length
-        : 0;
+    const { _id, __v, manualProductCount: storedManualCount, ...rest } = doc;
+    const counts = productCountsFromMap(rest.products);
     const productCount =
       typeof rest.productCount === 'number' && Number.isFinite(rest.productCount)
         ? rest.productCount
-        : derived;
+        : counts.productCount;
+    const manualProductCount =
+      typeof storedManualCount === 'number' && Number.isFinite(storedManualCount)
+        ? storedManualCount
+        : counts.manualProductCount;
 
     res.status(200).json({
       success: true,
-      data: { id: _id, ...rest, products: withRoundedQuantities(rest.products), productCount }
+      data: withManualProductCount(
+        {
+          id: _id,
+          ...rest,
+          products: withRoundedQuantities(rest.products),
+          productCount
+        },
+        manualProductCount
+      )
     });
   } catch (err) {
     console.error('getOutletProductsByOutletId error:', err);
