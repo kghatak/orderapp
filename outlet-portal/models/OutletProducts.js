@@ -10,6 +10,7 @@ const outletProductsSchema = new mongoose.Schema(
     outletId: { type: String, required: true, unique: true, index: true },
     products: { type: mongoose.Schema.Types.Mixed, default: {} },
     productCount: { type: Number, default: 0 },
+    manualProductCount: { type: Number, default: 0 },
     updatedAt: { type: Date, default: Date.now }
   },
   { collection: 'Products' }
