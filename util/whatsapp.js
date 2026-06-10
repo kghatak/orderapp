@@ -3,7 +3,7 @@ import axios from 'axios';
 const MSG91_BULK_API_URL = 'https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/';
 const MSG91_TEXT_API_URL = 'https://api.msg91.com/api/v5/whatsapp/whatsappmessage';
 
-const TEMPLATE_NAMESPACE = 'c71e92fc_33d8_4cfa_9deb_9c910d378e4d';
+const TEMPLATE_NAMESPACE = '20aaa74c_28e4_4da7_849d_35872c9e3e41';
 
 // Read at call-time so dotenv.config() in the entry file has already run
 function getCredentials() {
@@ -27,16 +27,29 @@ function normalizePhone(phone) {
 
 /**
  * Build the components object expected by the MSG91 bulk API.
- * bodyParams[0] → body_1, bodyParams[1] → body_2, etc.
+ * Named params: { quantity: '5 Kg', amount: '₹100' } → body_quantity, body_amount, ...
+ * Legacy array: ['a', 'b'] → body_1, body_2 (for older templates without parameter_name).
  *
- * @param {string[]} bodyParams
- * @returns {Record<string, { type: string, value: string }>}
+ * @param {Record<string, string|number>|string[]} bodyParams
+ * @returns {Record<string, { type: string, value: string, parameter_name?: string }>}
  */
 function buildComponents(bodyParams) {
   const components = {};
-  bodyParams.forEach((value, i) => {
-    components[`body_${i + 1}`] = { type: 'text', value: String(value) };
-  });
+
+  if (Array.isArray(bodyParams)) {
+    bodyParams.forEach((value, i) => {
+      components[`body_${i + 1}`] = { type: 'text', value: String(value) };
+    });
+    return components;
+  }
+
+  for (const [paramName, value] of Object.entries(bodyParams)) {
+    components[`body_${paramName}`] = {
+      type: 'text',
+      value: String(value),
+      parameter_name: paramName,
+    };
+  }
   return components;
 }
 
@@ -86,7 +99,7 @@ export async function sendWhatsAppText(toPhone, body) {
  *
  * @param {string} toPhone - Recipient phone number
  * @param {string} templateName - Approved template name in MSG91 dashboard
- * @param {string[]} bodyParams - Values for body_1, body_2, ... variables in the template
+ * @param {Record<string, string|number>|string[]} bodyParams - Named template params or legacy positional values
  * @param {string} [languageCode='en'] - Template language code
  */
 export async function sendWhatsAppTemplate(toPhone, templateName, bodyParams = [], languageCode = 'en') {
@@ -99,7 +112,7 @@ export async function sendWhatsAppTemplate(toPhone, templateName, bodyParams = [
  *
  * @param {string[]} toPhones - List of recipient phone numbers
  * @param {string} templateName - Approved template name in MSG91 dashboard
- * @param {string[]} bodyParams - Values for body_1, body_2, ... variables in the template
+ * @param {Record<string, string|number>|string[]} bodyParams - Named template params or legacy positional values
  * @param {string} [languageCode='en'] - Template language code
  */
 export async function sendWhatsAppTemplateBulk(toPhones, templateName, bodyParams = [], languageCode = 'en') {

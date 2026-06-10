@@ -115,8 +115,13 @@ export const createProcurement = async (req, res) => {
     if (supplier.phone) {
       sendWhatsAppTemplate(
         supplier.phone,
-        'milk_delivery',
-        [supplier.name, `${quantity} Kg`, `₹${amount.toFixed(2)}`]
+        'milk_delivery_alert',
+        {
+          quantity: `${quantity} Kg`,
+          amount: `₹${amount.toFixed(2)}`,
+          name: supplier.name,
+          fat_percentage: `${fat}%`,
+        }
       );
     }
 
