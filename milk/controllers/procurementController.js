@@ -118,9 +118,9 @@ export const createProcurement = async (req, res) => {
         'milk_delivery_alert',
         {
           quantity: `${quantity} Kg`,
-          amount: `₹${amount.toFixed(2)}`,
+          amount: `${amount.toFixed(2)}`,
           name: supplier.name,
-          fat_percentage: `${fat}%`,
+          fat_percentage: `${fat}`,
         }
       );
     }
