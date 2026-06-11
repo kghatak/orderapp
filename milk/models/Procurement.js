@@ -1,15 +1,27 @@
 import mongoose from 'mongoose';
 
+const procurementLineSchema = new mongoose.Schema({
+  milkType: { type: String, enum: ['cow', 'buffalo'], required: true },
+  quantity: { type: Number, required: true },
+  fat: { type: Number, default: 0 },
+  snf: { type: Number, default: 0 },
+  fatMeterReading: { type: Number, default: 0 },
+  ratePerFat: { type: Number, required: true },
+  amount: { type: Number, required: true }
+}, { _id: false });
+
 const procurementSchema = new mongoose.Schema({
   tenantId: { type: String, required: true, index: true },
   supplierId: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier', required: true },
   date: { type: Date, required: true },
   shift: { type: String, enum: ['morning', 'evening'], required: true },
+  milkType: { type: String, enum: ['cow', 'buffalo', 'mixed'], default: 'cow' },
   quantity: { type: Number, required: true }, // Kg
   fat: { type: Number, default: 0 },
   snf: { type: Number, default: 0 },
   fatMeterReading: { type: Number, default: 0 },
-  ratePerFat: { type: Number, required: true }, // snapshot of supplier.ratePerFat at entry time
+  lines: { type: [procurementLineSchema], default: undefined },
+  ratePerFat: { type: Number, required: true }, // snapshot of supplier rate for milkType at entry time
   amount: { type: Number, required: true },
   paymentStatus: { type: String, enum: ['pending', 'paid'], default: 'pending' },
   paymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'MilkPayment', default: null },
