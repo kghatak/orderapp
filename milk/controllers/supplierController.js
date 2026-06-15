@@ -87,6 +87,17 @@ export const createSupplier = async (req, res) => {
     }
 
     const supplierCode = await generateSupplierCode(tenantId);
+    const resolvedMilkType = milkType || 'cow';
+    const resolvedRatePerFat = ratePerFat ?? 0;
+    let resolvedCowRate = cowRatePerFat ?? 0;
+    let resolvedBuffaloRate = buffaloRatePerFat ?? 0;
+
+    if (!resolvedCowRate && resolvedRatePerFat && (resolvedMilkType === 'cow' || resolvedMilkType === 'mixed')) {
+      resolvedCowRate = resolvedRatePerFat;
+    }
+    if (!resolvedBuffaloRate && resolvedRatePerFat && (resolvedMilkType === 'buffalo' || resolvedMilkType === 'mixed')) {
+      resolvedBuffaloRate = resolvedRatePerFat;
+    }
 
     const supplier = new Supplier({
       tenantId,
@@ -95,13 +106,13 @@ export const createSupplier = async (req, res) => {
       phone,
       village: village || '',
       address: address || '',
-      milkType: milkType || 'cow',
+      milkType: resolvedMilkType,
       bankAccountNo: bankAccountNo || '',
       bankName: bankName || '',
       ifscCode: ifscCode || '',
-      ratePerFat: ratePerFat ?? 0,
-      cowRatePerFat: cowRatePerFat ?? 0,
-      buffaloRatePerFat: buffaloRatePerFat ?? 0
+      ratePerFat: resolvedRatePerFat,
+      cowRatePerFat: resolvedCowRate,
+      buffaloRatePerFat: resolvedBuffaloRate
     });
     await supplier.save();
 
