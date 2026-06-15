@@ -5,21 +5,51 @@ import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 const FAT_METER_MIN_READING = 28;
 const MILK_TYPES = ['cow', 'buffalo', 'mixed'];
 
-/** Pick supplier base rate for the procurement milk type. */
-const resolveSupplierRatePerFat = (supplier, milkType) => {
-  if (milkType === 'buffalo') return supplier.buffaloRatePerFat ?? 0;
-  if (milkType === 'mixed') return supplier.ratePerFat ?? 0;
-  return supplier.cowRatePerFat ?? 0;
+const RATE_FIELD_BY_MILK_TYPE = {
+  cow: 'cowRatePerFat',
+  buffalo: 'buffaloRatePerFat',
+  mixed: 'ratePerFat'
 };
 
-/** Deduct 1 from supplier ratePerFat when fat meter reading is below 28. */
+/** Pick supplier base rate for the procurement milk type. */
+const resolveSupplierRatePerFat = (supplier, milkType) => {
+  const legacyRate = supplier.ratePerFat ?? 0;
+  if (milkType === 'buffalo') {
+    return supplier.buffaloRatePerFat > 0 ? supplier.buffaloRatePerFat : legacyRate;
+  }
+  if (milkType === 'mixed') {
+    return legacyRate;
+  }
+  return supplier.cowRatePerFat > 0 ? supplier.cowRatePerFat : legacyRate;
+};
+
+const missingRateMessage = (milkType) => {
+  const field = RATE_FIELD_BY_MILK_TYPE[milkType] || 'ratePerFat';
+  return `Supplier ${field} is not set. Update the supplier rate before recording ${milkType} procurement.`;
+};
+
+const validateSupplierRate = (supplier, milkType) => {
+  if (resolveSupplierRatePerFat(supplier, milkType) > 0) return null;
+  return missingRateMessage(milkType);
+};
+
+const validateMixedLineRates = (supplier, lines) => {
+  for (const line of lines) {
+    const rateError = validateSupplierRate(supplier, line.milkType);
+    if (rateError) return rateError;
+  }
+  return null;
+};
+
+/** Deduct (28 - reading) from rate when fat meter reading is below 28 (e.g. 27→−1, 26→−2, 25→−3). */
 const effectiveRatePerFat = (baseRate, fatMeterReading, { ignoreZero = false } = {}) => {
   const rate = baseRate || 0;
   if (fatMeterReading == null || fatMeterReading === '') return rate;
   const reading = Number(fatMeterReading);
   if (ignoreZero && reading === 0) return rate;
   if (reading < FAT_METER_MIN_READING) {
-    return Math.max(0, rate - 1);
+    const deduction = FAT_METER_MIN_READING - reading;
+    return Math.max(0, rate - deduction);
   }
   return rate;
 };
@@ -215,6 +245,11 @@ export const createProcurement = async (req, res) => {
         return res.status(400).json({ success: false, message: lineError });
       }
 
+      const rateError = validateMixedLineRates(supplier, inputLines);
+      if (rateError) {
+        return res.status(400).json({ success: false, message: rateError });
+      }
+
       const computed = computeMixedProcurement(supplier, inputLines);
       procurementData = {
         tenantId,
@@ -235,6 +270,11 @@ export const createProcurement = async (req, res) => {
       }
 
       const procurementMilkType = milkType || supplier.milkType || 'cow';
+      const rateError = validateSupplierRate(supplier, procurementMilkType);
+      if (rateError) {
+        return res.status(400).json({ success: false, message: rateError });
+      }
+
       const baseRate = resolveSupplierRatePerFat(supplier, procurementMilkType);
       const effectiveRate = effectiveRatePerFat(baseRate, fatMeterReading);
       const amount = (quantity || 0) * (fat || 0) * effectiveRate;
@@ -334,6 +374,11 @@ export const updateProcurement = async (req, res) => {
         return res.status(400).json({ success: false, message: lineError });
       }
 
+      const rateError = validateMixedLineRates(supplier, inputLines);
+      if (rateError) {
+        return res.status(400).json({ success: false, message: rateError });
+      }
+
       const computed = computeMixedProcurement(supplier, inputLines);
       procurement.lines = computed.lines;
       procurement.quantity = computed.quantity;
@@ -352,6 +397,10 @@ export const updateProcurement = async (req, res) => {
       if (ratePerFat != null) {
         procurement.ratePerFat = ratePerFat;
       } else if (supplier) {
+        const rateError = validateSupplierRate(supplier, procurement.milkType);
+        if (rateError) {
+          return res.status(400).json({ success: false, message: rateError });
+        }
         const baseRate = resolveSupplierRatePerFat(supplier, procurement.milkType);
         procurement.ratePerFat = effectiveRatePerFat(
           baseRate,
