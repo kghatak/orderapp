@@ -41,17 +41,23 @@ const validateMixedLineRates = (supplier, lines) => {
   return null;
 };
 
-/** Deduct (28 - reading) from rate when fat meter reading is below 28 (e.g. 27→−1, 26→−2, 25→−3). */
-const effectiveRatePerFat = (baseRate, fatMeterReading, { ignoreZero = false } = {}) => {
-  const rate = baseRate || 0;
-  if (fatMeterReading == null || fatMeterReading === '') return rate;
+/** Flat ₹ deduction when fat meter reading is below 28 (e.g. 27→₹1, 26→₹2). */
+const fatMeterDeduction = (fatMeterReading, { ignoreZero = false } = {}) => {
+  if (fatMeterReading == null || fatMeterReading === '') return 0;
   const reading = Number(fatMeterReading);
-  if (ignoreZero && reading === 0) return rate;
+  if (ignoreZero && reading === 0) return 0;
   if (reading < FAT_METER_MIN_READING) {
-    const deduction = FAT_METER_MIN_READING - reading;
-    return Math.max(0, rate - deduction);
+    return FAT_METER_MIN_READING - reading;
   }
-  return rate;
+  return 0;
+};
+
+/** gross = qty × fat × ratePerFat; total = gross − fat-meter deduction */
+const computeProcurementAmount = (quantity, fat, ratePerFat, fatMeterReading, options = {}) => {
+  const gross = (quantity || 0) * (fat || 0) * (ratePerFat || 0);
+  const deduction = fatMeterDeduction(fatMeterReading, options);
+  const amount = Math.max(0, gross - deduction);
+  return { gross, deduction, amount };
 };
 
 const isMixedPayload = (body) =>
@@ -98,9 +104,13 @@ const parseMixedInputLines = (body) => {
 };
 
 const computeLine = (supplier, line) => {
-  const baseRate = resolveSupplierRatePerFat(supplier, line.milkType);
-  const ratePerFat = effectiveRatePerFat(baseRate, line.fatMeterReading);
-  const amount = line.quantity * line.fat * ratePerFat;
+  const ratePerFat = resolveSupplierRatePerFat(supplier, line.milkType);
+  const { amount } = computeProcurementAmount(
+    line.quantity,
+    line.fat,
+    ratePerFat,
+    line.fatMeterReading
+  );
   return {
     milkType: line.milkType,
     quantity: line.quantity,
@@ -120,7 +130,10 @@ const computeMixedProcurement = (supplier, inputLines) => {
   const snfWeight = lines.reduce((sum, line) => sum + line.quantity * (line.snf || 0), 0);
   const fat = quantity > 0 ? fatWeight / quantity : 0;
   const snf = quantity > 0 ? snfWeight / quantity : 0;
-  const ratePerFat = quantity > 0 && fat > 0 ? amount / (quantity * fat) : 0;
+  const rateWeight = lines.reduce((sum, line) => sum + line.quantity * line.fat, 0);
+  const ratePerFat = rateWeight > 0
+    ? lines.reduce((sum, line) => sum + line.quantity * line.fat * line.ratePerFat, 0) / rateWeight
+    : 0;
 
   return { lines, quantity, fat, snf, amount, ratePerFat, fatMeterReading: 0 };
 };
@@ -276,8 +289,7 @@ export const createProcurement = async (req, res) => {
       }
 
       const baseRate = resolveSupplierRatePerFat(supplier, procurementMilkType);
-      const effectiveRate = effectiveRatePerFat(baseRate, fatMeterReading);
-      const amount = (quantity || 0) * (fat || 0) * effectiveRate;
+      const { amount } = computeProcurementAmount(quantity, fat, baseRate, fatMeterReading);
 
       procurementData = {
         tenantId,
@@ -289,7 +301,7 @@ export const createProcurement = async (req, res) => {
         fat: fat || 0,
         snf: snf || 0,
         fatMeterReading: fatMeterReading || 0,
-        ratePerFat: effectiveRate,
+        ratePerFat: baseRate,
         amount,
         recordedBy: user._id,
         remarks: remarks || ''
@@ -401,14 +413,16 @@ export const updateProcurement = async (req, res) => {
         if (rateError) {
           return res.status(400).json({ success: false, message: rateError });
         }
-        const baseRate = resolveSupplierRatePerFat(supplier, procurement.milkType);
-        procurement.ratePerFat = effectiveRatePerFat(
-          baseRate,
-          procurement.fatMeterReading,
-          { ignoreZero: fatMeterReading == null }
-        );
+        procurement.ratePerFat = resolveSupplierRatePerFat(supplier, procurement.milkType);
       }
-      procurement.amount = procurement.quantity * procurement.fat * procurement.ratePerFat;
+      const { amount } = computeProcurementAmount(
+        procurement.quantity,
+        procurement.fat,
+        procurement.ratePerFat,
+        procurement.fatMeterReading,
+        { ignoreZero: fatMeterReading == null }
+      );
+      procurement.amount = amount;
     }
 
     procurement.updatedAt = new Date();
