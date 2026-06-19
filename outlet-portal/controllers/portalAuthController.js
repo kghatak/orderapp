@@ -143,7 +143,8 @@ export const login = async (req, res) => {
           outletId: outletDocId,
           name: responseName,
           address: outletData.address || '',
-          primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || ''
+          primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || '',
+          gstNo: outletData.gstNo || outletData.gstNumber || outletData.gst || outletData.gstin || ''
         }
       }
     });
