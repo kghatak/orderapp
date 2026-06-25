@@ -3,6 +3,16 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import admin from 'firebase-admin';
 
+const toFirestoreTimestamp = (val) => {
+  if (val == null) return null;
+  if (val.toDate && typeof val.toDate === 'function') return val;
+  if (typeof val === 'object' && val._seconds != null) {
+    return new admin.firestore.Timestamp(val._seconds, val._nanoseconds || 0);
+  }
+  const d = new Date(val);
+  return Number.isNaN(d.getTime()) ? null : admin.firestore.Timestamp.fromDate(d);
+};
+
 // Helper to generate sequential payment IDs (PAY0001, PAY0002, ...)
 const generatePaymentId = async (db) => {
   const counterRef = db.collection('counters').doc('paymentCounter');
@@ -371,6 +381,9 @@ export const approvePaymentRequest = async (req, res) => {
       approvedAt: new Date(),
       approvedBy: admin,
       createdAt: requestData.createdAt,
+      paymentDate:
+        toFirestoreTimestamp(requestData.paymentDate || requestData.createdAt) ||
+        admin.firestore.Timestamp.now(),
       outletId: requestData.outletId,
       outletName: requestData.outletName,
       paymentId: paymentId,
