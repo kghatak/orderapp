@@ -44,6 +44,71 @@ function parseIsoDateUtc(dateStr) {
   return new Date(Date.UTC(y, m - 1, d));
 }
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/** IST calendar day boundaries for a given instant (used by daily balance job). */
+function getIstDayBoundaries(triggeredDate) {
+  const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
+  const targetYear = istDate.getUTCFullYear();
+  const targetMonth = istDate.getUTCMonth();
+  const targetDay = istDate.getUTCDate();
+  const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
+  const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
+  return {
+    dateStr: `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`,
+    dayStartTimestamp: admin.firestore.Timestamp.fromDate(startOfDayUTC),
+    dayEndTimestamp: admin.firestore.Timestamp.fromDate(endOfDayUTC),
+  };
+}
+
+/**
+ * Sum approved payments for one outlet and day.
+ * Uses paymentDate (business date); falls back to createdAt only when paymentDate is absent.
+ */
+async function fetchApprovedPaymentsForDay(db, outletId, dayStartTimestamp, dayEndTimestamp) {
+  const countedIds = new Set();
+  const paymentsList = [];
+  let total = 0;
+
+  const addPayment = (doc) => {
+    if (countedIds.has(doc.id)) return;
+    countedIds.add(doc.id);
+    const data = doc.data();
+    const amount = parseFloat(data.amount || 0);
+    total += amount;
+    paymentsList.push({
+      id: doc.id,
+      outletId: data.outletId || outletId,
+      amount,
+      status: data.status,
+    });
+  };
+
+  const byPaymentDate = await db
+    .collection('payments')
+    .where('outletId', '==', outletId)
+    .where('status', '==', 'approved')
+    .where('paymentDate', '>=', dayStartTimestamp)
+    .where('paymentDate', '<=', dayEndTimestamp)
+    .get();
+  byPaymentDate.forEach(addPayment);
+
+  const byCreatedAt = await db
+    .collection('payments')
+    .where('outletId', '==', outletId)
+    .where('status', '==', 'approved')
+    .where('createdAt', '>=', dayStartTimestamp)
+    .where('createdAt', '<=', dayEndTimestamp)
+    .get();
+  byCreatedAt.forEach((doc) => {
+    if (countedIds.has(doc.id)) return;
+    if (doc.data().paymentDate != null) return;
+    addPayment(doc);
+  });
+
+  return { total, paymentsList };
+}
+
 /** Inclusive list of YYYY-MM-DD strings from fromStr through toStr (UTC calendar days). */
 function enumerateDateRangeInclusive(fromStr, toStr) {
   const start = parseIsoDateUtc(fromStr);
@@ -673,19 +738,9 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     // Compute date boundaries for the triggered date (in IST)
     // ──────────────────────────────────────────────
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
-    const targetYear = istDate.getUTCFullYear();
-    const targetMonth = istDate.getUTCMonth();
-    const targetDay = istDate.getUTCDate();
+    const { dateStr: targetDateStr, dayStartTimestamp, dayEndTimestamp } = getIstDayBoundaries(triggeredDate);
 
-    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
-    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
-
-    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
-    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
-
-    console.log(`📅 Target date (IST): ${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`);
+    console.log(`📅 Target date (IST): ${targetDateStr}`);
 
     // ──────────────────────────────────────────────
     // Step 3 & 4 — Create balance records & mark as success
@@ -725,18 +780,13 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             closingBalanceOrder += parseFloat(data['total amount'] || data.totalAmount || 0);
           });
 
-          // Query approved payments for this outlet on the triggered date
-          const paymentsSnapshot = await db.collection('payments')
-            .where('outletId', '==', outlet.id)
-            .where('status', '==', 'approved')
-            .where('paymentDate', '>=', dayStartTimestamp)
-            .where('paymentDate', '<=', dayEndTimestamp)
-            .get();
-
-          let closingBalancePayment = 0;
-          paymentsSnapshot.forEach((doc) => {
-            closingBalancePayment += parseFloat(doc.data().amount || 0);
-          });
+          // Approved payments: paymentDate (business date), or createdAt when paymentDate is missing
+          const { total: closingBalancePayment } = await fetchApprovedPaymentsForDay(
+            db,
+            outlet.id,
+            dayStartTimestamp,
+            dayEndTimestamp
+          );
 
           // Query collected returns for this outlet on the triggered date (collectedDate, like orders' deliveredDate)
           const returnsSnapshot = await db.collection('returns')
@@ -754,26 +804,38 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
           // Formula: previousDay totalClosingBalance + orders - returns - payments
           const totalClosingBalance = previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
 
-          // Step 3 — Create the balance calculation record
-          const docRef = await db.collection('OutletOpeningClosingBalance').add({
+          // Step 3 & 4 — Upsert balance record (timestamp = end of IST business day for GET ?date=)
+          const balancePayload = {
             OutletID: outlet.id,
             outletName: outlet.name,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            status: 'in_progress',
+            timestamp: dayEndTimestamp,
+            status: 'success',
             closingBalanceOrder,
             closingBalancePayment,
             closingBanlanceReturn,
             totalClosingBalance,
-            completedAt: null,
-          });
-
-          // Step 4 — Mark as success
-          await docRef.update({
-            status: 'success',
             completedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          };
 
-          return { outletId: outlet.id, outletName: outlet.name, docId: docRef.id, status: 'success' };
+          const existingDaySnapshot = await db
+            .collection('OutletOpeningClosingBalance')
+            .where('OutletID', '==', outlet.id)
+            .where('timestamp', '>=', dayStartTimestamp)
+            .where('timestamp', '<=', dayEndTimestamp)
+            .limit(1)
+            .get();
+
+          let docId;
+          if (!existingDaySnapshot.empty) {
+            const existingRef = existingDaySnapshot.docs[0].ref;
+            docId = existingDaySnapshot.docs[0].id;
+            await existingRef.update(balancePayload);
+          } else {
+            const docRef = await db.collection('OutletOpeningClosingBalance').add(balancePayload);
+            docId = docRef.id;
+          }
+
+          return { outletId: outlet.id, outletName: outlet.name, docId, status: 'success' };
         } catch (error) {
           console.error(`❌ Failed for outlet ${outlet.id} (${outlet.name}):`, error.message);
           throw error;
@@ -2034,7 +2096,7 @@ export const calculateClosingBalances = async (req, res) => {
       }
     });
 
-    // Note: Payments use createdAt per day; collected returns use collectedDate (composite index on returns)
+    // Note: Payments use paymentDate (business date); createdAt fallback when paymentDate is absent
 
     // Set opening balance on the previous date (one day before openingBalanceDate)
     // This ensures the ledger report shows the correct opening balance
@@ -2042,16 +2104,27 @@ export const calculateClosingBalances = async (req, res) => {
     const previousCompletedAt = admin.firestore.Timestamp.now();
 
     if (previousDoc) {
-      // Update existing document for previous date
-      await previousDoc.ref.update({
-        closingBalanceOrder: 0,
-        closingBalancePayment: 0,
-        closingBanlanceReturn: 0,
-        totalClosingBalance: openingBalance,
-        completedAt: previousCompletedAt,
-        status: 'success',
-        outletName,
-      });
+      const previousSnap = await previousDoc.ref.get();
+      const previousData = previousSnap.data() || {};
+      const hasDailyActivity =
+        parseFloat(previousData.closingBalanceOrder || 0) !== 0 ||
+        parseFloat(previousData.closingBalancePayment || 0) !== 0 ||
+        parseFloat(previousData.closingBanlanceReturn || 0) !== 0;
+
+      if (!hasDailyActivity) {
+        // Anchor row only when no orders/payments/returns were recorded for that day
+        await previousDoc.ref.update({
+          closingBalanceOrder: 0,
+          closingBalancePayment: 0,
+          closingBanlanceReturn: 0,
+          totalClosingBalance: openingBalance,
+          completedAt: previousCompletedAt,
+          status: 'success',
+          outletName,
+        });
+      } else {
+        await previousDoc.ref.update({ outletName, status: 'success' });
+      }
     } else {
       // Create new document for previous date
       const previousDocRef = db.collection('OutletOpeningClosingBalance').doc();
@@ -2147,28 +2220,13 @@ export const calculateClosingBalances = async (req, res) => {
         }
       });
 
-      // Query payments for this specific date
-      const paymentsSnapshot = await db.collection('payments')
-        .where('outletId', '==', outletId)
-        .where('status', '==', 'approved')
-        .where('createdAt', '>=', startTimestamp)
-        .where('createdAt', '<=', endTimestamp)
-        .get();
-
-      let closingBalancePayment = 0;
-      const paymentsList = [];
-      paymentsSnapshot.forEach((doc) => {
-        const paymentData = doc.data();
-        const paymentAmount = parseFloat(paymentData.amount || 0);
-        const pid = paymentData.outletId || outletId;
-        closingBalancePayment += paymentAmount;
-        paymentsList.push({
-          id: doc.id,
-          outletId: pid,
-          amount: paymentAmount,
-          status: paymentData.status,
-        });
-      });
+      // Query payments for this specific date (paymentDate, or createdAt when paymentDate missing)
+      const { total: closingBalancePayment, paymentsList } = await fetchApprovedPaymentsForDay(
+        db,
+        outletId,
+        startTimestamp,
+        endTimestamp
+      );
 
       // Calculate total closing balance
       const totalClosingBalance = currentOpeningBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
