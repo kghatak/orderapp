@@ -1,7 +1,6 @@
 // controllers/outletOpeningClosingBalanceController.js
 import ExcelJS from 'exceljs';
 import { getFirestoreDB } from '../../util/firebase.js';
-import { OutletOpeningClosingBalance } from '../models/outletOpeningClosingBalance.js';
 import admin from 'firebase-admin';
 
 const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -26,12 +25,6 @@ async function commitBatchedDocumentSets(db, writes) {
   }
 }
 
-/**
- * Core aggregation for one IST calendar day's DailyProductReturn.
- * Writes the parent doc + outlets subcollection; returns a summary object.
- * @param {import('firebase-admin').firestore.Firestore} db
- * @param {string} dateStr YYYY-MM-DD (IST calendar label)
- */
 /** Express query value → trimmed string (first element if repeated). */
 function firstQueryString(q) {
   if (q == null || q === '') return '';
@@ -59,6 +52,30 @@ function getIstDayBoundaries(triggeredDate) {
     dayStartTimestamp: admin.firestore.Timestamp.fromDate(startOfDayUTC),
     dayEndTimestamp: admin.firestore.Timestamp.fromDate(endOfDayUTC),
   };
+}
+
+/** IST calendar date key (YYYY-MM-DD) for a Firestore timestamp. */
+function getIstDateKeyFromTimestamp(timestamp) {
+  if (!timestamp) return null;
+  const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  return getIstDayBoundaries(date).dateStr;
+}
+
+/** IST day boundaries for a calendar date string YYYY-MM-DD. */
+function getIstBoundariesForCalendarDate(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const noonUtc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
+  return getIstDayBoundaries(noonUtc);
+}
+
+/** Add calendar days to a YYYY-MM-DD string. */
+function addDaysToDateStr(dateStr, deltaDays) {
+  const d = parseIsoDateUtc(dateStr);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 /**
@@ -729,6 +746,8 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
       activeOutlets.push({
         id: doc.id,
         name: data.name || 'Unknown Outlet',
+        openingBalance: parseFloat(data.openingBalance) || 0,
+        openingBalanceDate: data.openingBalanceDate || null,
       });
     });
 
@@ -801,8 +820,16 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             closingBanlanceReturn += parseFloat(doc.data().totalAmount || 0);
           });
 
-          // Formula: previousDay totalClosingBalance + orders - returns - payments
-          const totalClosingBalance = previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
+          const anchorPrevDate = outlet.openingBalanceDate
+            ? addDaysToDateStr(outlet.openingBalanceDate, -1)
+            : null;
+          const isOpeningBalanceAnchorDay =
+            anchorPrevDate && targetDateStr === anchorPrevDate;
+
+          // Anchor day uses configured opening balance; other days use running formula
+          const totalClosingBalance = isOpeningBalanceAnchorDay
+            ? outlet.openingBalance
+            : previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
 
           // Step 3 & 4 — Upsert balance record (timestamp = end of IST business day for GET ?date=)
           const balancePayload = {
@@ -890,12 +917,6 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
   }
 };
 
-/**
- * Core aggregation for one IST calendar day's DailyProductDelivery.
- * Writes the parent doc + outlets subcollection (chunked batches); returns a summary object.
- * @param {import('firebase-admin').firestore.Firestore} db
- * @param {string} dateStr YYYY-MM-DD (IST calendar label)
- */
 /**
  * POST /api/balance/daily-product-delivery
  *
@@ -1890,18 +1911,11 @@ export const getOutletOpeningClosingBalances = async (req, res) => {
       }
 
       try {
-        // Create start of day (00:00:00) in UTC
-        const [year, month, day] = date.split('-').map(Number);
-        const startOfDay = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
-        const endOfDay = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+        // Match daily balance job: filter by IST calendar day
+        const { dayStartTimestamp, dayEndTimestamp } = getIstBoundariesForCalendarDate(date);
 
-        // Convert to Firestore Timestamps
-        const startTimestamp = admin.firestore.Timestamp.fromDate(startOfDay);
-        const endTimestamp = admin.firestore.Timestamp.fromDate(endOfDay);
-
-        // Filter by timestamp range for the selected date
-        query = query.where('timestamp', '>=', startTimestamp)
-                     .where('timestamp', '<=', endTimestamp);
+        query = query.where('timestamp', '>=', dayStartTimestamp)
+                     .where('timestamp', '<=', dayEndTimestamp);
       } catch (error) {
         return res.status(400).json({
           error: 'Invalid date. Please provide a valid date in YYYY-MM-DD format',
@@ -2052,54 +2066,36 @@ export const calculateClosingBalances = async (req, res) => {
       });
     }
 
-    // Parse opening balance date
-    const [year, month, day] = openingBalanceDate.split('-').map(Number);
-    const startDate = new Date(year, month - 1, day);
-    const today = new Date();
-    today.setHours(23, 59, 59, 999);
+    // Parse opening balance date (IST calendar dates)
+    if (!YMD_DATE_REGEX.test(openingBalanceDate)) {
+      return res.status(400).json({
+        error: 'Invalid openingBalanceDate on outlet. Use YYYY-MM-DD format.',
+      });
+    }
 
-    // Calculate previous date (one day before openingBalanceDate)
-    const previousDate = new Date(startDate);
-    previousDate.setDate(previousDate.getDate() - 1);
-    previousDate.setHours(23, 59, 59, 999);
-    
-    const previousDateStr = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, '0')}-${String(previousDate.getDate()).padStart(2, '0')}`;
-    const previousDateTimestamp = admin.firestore.Timestamp.fromDate(previousDate);
+    const previousDateStr = addDaysToDateStr(openingBalanceDate, -1);
+    const todayIstDateStr = getIstDayBoundaries(new Date()).dateStr;
 
-    // Get existing OutletOpeningClosingBalance documents for this outlet within date range only
-    // Include previous date in the range to check if it exists
-    const startOfRange = new Date(previousDate);
-    startOfRange.setHours(0, 0, 0, 0);
-    const endOfRange = new Date(today);
-    endOfRange.setHours(23, 59, 59, 999);
-    
-    const startRangeTimestamp = admin.firestore.Timestamp.fromDate(startOfRange);
-    const endRangeTimestamp = admin.firestore.Timestamp.fromDate(endOfRange);
+    const previousBounds = getIstBoundariesForCalendarDate(previousDateStr);
+    const todayBounds = getIstBoundariesForCalendarDate(todayIstDateStr);
 
     const existingBalancesSnapshot = await db.collection('OutletOpeningClosingBalance')
       .where('OutletID', '==', outletId)
-      .where('timestamp', '>=', startRangeTimestamp)
-      .where('timestamp', '<=', endRangeTimestamp)
+      .where('timestamp', '>=', previousBounds.dayStartTimestamp)
+      .where('timestamp', '<=', todayBounds.dayEndTimestamp)
       .get();
 
-    // Create a map of existing documents by date for easy lookup
+    // Map existing documents by IST calendar date
     const existingDocsByDate = new Map();
     existingBalancesSnapshot.forEach((doc) => {
       const data = doc.data();
-      const docTimestamp = data.timestamp;
-      
-      if (docTimestamp) {
-        // Convert to Date if it's a Firestore Timestamp
-        const date = docTimestamp.toDate ? docTimestamp.toDate() : new Date(docTimestamp);
-        const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const dateKey = getIstDateKeyFromTimestamp(data.timestamp);
+      if (dateKey) {
         existingDocsByDate.set(dateKey, { ref: doc.ref, id: doc.id });
       }
     });
 
-    // Note: Payments use paymentDate (business date); createdAt fallback when paymentDate is absent
-
-    // Set opening balance on the previous date (one day before openingBalanceDate)
-    // This ensures the ledger report shows the correct opening balance
+    // Set opening balance on the previous IST day (anchor for ledger reports)
     const previousDoc = existingDocsByDate.get(previousDateStr);
     const previousCompletedAt = admin.firestore.Timestamp.now();
 
@@ -2112,7 +2108,6 @@ export const calculateClosingBalances = async (req, res) => {
         parseFloat(previousData.closingBanlanceReturn || 0) !== 0;
 
       if (!hasDailyActivity) {
-        // Anchor row only when no orders/payments/returns were recorded for that day
         await previousDoc.ref.update({
           closingBalanceOrder: 0,
           closingBalancePayment: 0,
@@ -2123,10 +2118,14 @@ export const calculateClosingBalances = async (req, res) => {
           outletName,
         });
       } else {
-        await previousDoc.ref.update({ outletName, status: 'success' });
+        await previousDoc.ref.update({
+          totalClosingBalance: openingBalance,
+          completedAt: previousCompletedAt,
+          status: 'success',
+          outletName,
+        });
       }
     } else {
-      // Create new document for previous date
       const previousDocRef = db.collection('OutletOpeningClosingBalance').doc();
       await previousDocRef.set({
         OutletID: outletId,
@@ -2135,42 +2134,37 @@ export const calculateClosingBalances = async (req, res) => {
         closingBalancePayment: 0,
         closingBanlanceReturn: 0,
         totalClosingBalance: openingBalance,
-        timestamp: previousDateTimestamp,
+        timestamp: previousBounds.dayEndTimestamp,
         completedAt: previousCompletedAt,
         status: 'success',
       });
-      // Add to map for consistency
       existingDocsByDate.set(previousDateStr, { ref: previousDocRef, id: previousDocRef.id });
     }
 
-    // Calculate balances for each date from openingBalanceDate to today
+    // Calculate balances for each IST date from openingBalanceDate through today
     const results = [];
-    // Start with opening balance (which is now set as previous date's closing balance)
     let currentOpeningBalance = openingBalance;
-    const currentDate = new Date(startDate);
+    let dateStr = openingBalanceDate;
 
-    while (currentDate <= today) {
-      // Get start and end of day timestamps
-      const startOfDay = new Date(currentDate);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(currentDate);
-      endOfDay.setHours(23, 59, 59, 999);
+    while (dateStr <= todayIstDateStr) {
+      // Never recalculate the anchor day (day before openingBalanceDate)
+      if (dateStr === previousDateStr) {
+        dateStr = addDaysToDateStr(dateStr, 1);
+        continue;
+      }
 
-      const startTimestamp = admin.firestore.Timestamp.fromDate(startOfDay);
-      const endTimestamp = admin.firestore.Timestamp.fromDate(endOfDay);
+      const { dayStartTimestamp, dayEndTimestamp } = getIstBoundariesForCalendarDate(dateStr);
 
-      // Calculate date string for this iteration
-      const currentYear = currentDate.getFullYear();
-      const currentMonth = currentDate.getMonth() + 1;
-      const currentDay = currentDate.getDate();
-      const dateStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(currentDay).padStart(2, '0')}`;
+      if (dateStr === openingBalanceDate) {
+        currentOpeningBalance = openingBalance;
+      }
 
       // Query orders for this specific date (only delivered orders)
       const ordersSnapshot = await db.collection('orders')
         .where('outletId', '==', outletId)
         .where('status', '==', 'delivered')
-        .where('Created at', '>=', startTimestamp)
-        .where('Created at', '<=', endTimestamp)
+        .where('Created at', '>=', dayStartTimestamp)
+        .where('Created at', '<=', dayEndTimestamp)
         .get();
 
       let closingBalanceOrder = 0;
@@ -2195,8 +2189,8 @@ export const calculateClosingBalances = async (req, res) => {
       const returnsSnapshot = await db.collection('returns')
         .where('outletId', '==', outletId)
         .where('status', '==', 'collected')
-        .where('collectedDate', '>=', startTimestamp)
-        .where('collectedDate', '<=', endTimestamp)
+        .where('collectedDate', '>=', dayStartTimestamp)
+        .where('collectedDate', '<=', dayEndTimestamp)
         .get();
 
       let closingBanlanceReturn = 0;
@@ -2224,14 +2218,13 @@ export const calculateClosingBalances = async (req, res) => {
       const { total: closingBalancePayment, paymentsList } = await fetchApprovedPaymentsForDay(
         db,
         outletId,
-        startTimestamp,
-        endTimestamp
+        dayStartTimestamp,
+        dayEndTimestamp
       );
 
-      // Calculate total closing balance
       const totalClosingBalance = currentOpeningBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
 
-      const timestamp = admin.firestore.Timestamp.fromDate(endOfDay);
+      const timestamp = dayEndTimestamp;
       const completedAt = admin.firestore.Timestamp.now();
 
       // Find existing document by date from our map
@@ -2292,9 +2285,7 @@ export const calculateClosingBalances = async (req, res) => {
 
       // Update opening balance for next day (use today's closing balance)
       currentOpeningBalance = totalClosingBalance;
-
-      // Move to next day
-      currentDate.setDate(currentDate.getDate() + 1);
+      dateStr = addDaysToDateStr(dateStr, 1);
     }
 
     res.status(200).json({
