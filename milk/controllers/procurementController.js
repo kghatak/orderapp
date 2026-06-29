@@ -5,6 +5,45 @@ import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 const FAT_METER_MIN_READING = 28;
 const MILK_TYPES = ['cow', 'buffalo', 'mixed'];
 
+const MILK_TYPE_LABELS = {
+  cow: 'Cow',
+  buffalo: 'Buffalo',
+  mixed: 'Mixed'
+};
+
+const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
+  const entry = line || procurement;
+  const milkType = line ? line.milkType : procurement.milkType;
+  const quantity = entry.quantity || 0;
+  const finalRatePerKg = quantity > 0 ? entry.amount / quantity : 0;
+
+  return {
+    supplier_name: supplier.name,
+    milk_type: MILK_TYPE_LABELS[milkType] || milkType,
+    date: new Date(procurement.date).toLocaleDateString('en-IN'),
+    quantity: String(quantity),
+    fat_percentage: String(entry.fat ?? 0),
+    meter_reading: String(entry.fatMeterReading ?? 0),
+    rate_per_fat: Number(entry.ratePerFat ?? 0).toFixed(2),
+    final_rate_per_kg: finalRatePerKg.toFixed(2),
+    total_amount: Number(entry.amount ?? 0).toFixed(2),
+  };
+};
+
+/** One message per line for mixed milk; otherwise a single message. */
+const getMilkEntryWhatsAppParamsList = (procurement, supplier) => {
+  if (
+    procurement.milkType === 'mixed'
+    && Array.isArray(procurement.lines)
+    && procurement.lines.length > 0
+  ) {
+    return procurement.lines
+      .filter((line) => line.quantity > 0)
+      .map((line) => buildMilkEntryWhatsAppParams(procurement, supplier, line));
+  }
+  return [buildMilkEntryWhatsAppParams(procurement, supplier)];
+};
+
 const RATE_FIELD_BY_MILK_TYPE = {
   cow: 'cowRatePerFat',
   buffalo: 'buffaloRatePerFat',
@@ -313,16 +352,13 @@ export const createProcurement = async (req, res) => {
     await procurement.populate('supplierId', 'supplierCode name phone village');
 
     if (supplier.phone) {
-      sendWhatsAppTemplate(
-        supplier.phone,
-        'milk_delivery_alert',
-        {
-          quantity: `${procurement.quantity} Kg`,
-          amount: `${procurement.amount.toFixed(2)}`,
-          name: supplier.name,
-          fat_percentage: `${procurement.fat}`,
-        }
-      );
+      for (const params of getMilkEntryWhatsAppParamsList(procurement, supplier)) {
+        sendWhatsAppTemplate(
+          supplier.phone,
+          'milk_entry_notification',
+          params
+        );
+      }
     }
 
     res.status(201).json({
