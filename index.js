@@ -25,6 +25,7 @@ import salesRoutes from './outlet-portal/routes/salesRoutes.js';
 import expensesRoutes from './outlet-portal/routes/expensesRoutes.js';
 import outletProductsRoutes from './outlet-portal/routes/outletProductsRoutes.js';
 import wastageRoutes from './outlet-portal/routes/wastageRoutes.js';
+import dashboardRoutes from './outlet-portal/routes/dashboardRoutes.js';
 import chatRoutes from './order/routes/chatRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
@@ -111,6 +112,7 @@ app.use('/outlet-portal', (req, res, next) => {
   next();
 });
 app.use('/outlet-portal/auth', portalAuthRoutes);
+app.use('/outlet-portal/dashboard', dashboardRoutes);
 
 // Outlet portal sales (MongoDB `sales` collection; requires portal JWT)
 app.use('/sales', (req, res, next) => {
