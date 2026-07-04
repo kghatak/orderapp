@@ -2159,12 +2159,12 @@ export const calculateClosingBalances = async (req, res) => {
         currentOpeningBalance = openingBalance;
       }
 
-      // Query orders for this specific date (only delivered orders)
+      // Query orders for this specific date (only delivered orders; deliveredDate matches ledger)
       const ordersSnapshot = await db.collection('orders')
         .where('outletId', '==', outletId)
         .where('status', '==', 'delivered')
-        .where('Created at', '>=', dayStartTimestamp)
-        .where('Created at', '<=', dayEndTimestamp)
+        .where('deliveredDate', '>=', dayStartTimestamp)
+        .where('deliveredDate', '<=', dayEndTimestamp)
         .get();
 
       let closingBalanceOrder = 0;

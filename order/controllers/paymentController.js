@@ -1,5 +1,6 @@
 // controllers/paymentController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import admin from 'firebase-admin';
 
@@ -842,9 +843,8 @@ export const getPaymentsReport = async (req, res) => {
       });
     }
 
-    // Convert dates to Firestore timestamps
-    const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
-    const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
+    // IST calendar day boundaries (matches opening/closing balance and ledger UI)
+    const { startTimestamp, endTimestamp } = getIstReportRangeTimestamps(startDate, endDate);
 
     // Build query - only include approved payments
     let query = db.collection('payments')
