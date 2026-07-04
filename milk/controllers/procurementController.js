@@ -11,6 +11,11 @@ const MILK_TYPE_LABELS = {
   mixed: 'Mixed'
 };
 
+const SHIFT_LABELS = {
+  morning: 'Morning',
+  evening: 'Evening'
+};
+
 const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
   const entry = line || procurement;
   const milkType = line ? line.milkType : procurement.milkType;
@@ -20,6 +25,7 @@ const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
   return {
     supplier_name: supplier.name,
     milk_type: MILK_TYPE_LABELS[milkType] || milkType,
+    shift: SHIFT_LABELS[procurement.shift] || procurement.shift,
     date: new Date(procurement.date).toLocaleDateString('en-IN'),
     quantity: String(quantity),
     fat_percentage: String(entry.fat ?? 0),
