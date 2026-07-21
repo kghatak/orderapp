@@ -198,7 +198,7 @@ const validateMixedLines = (lines) => {
 export const listProcurements = async (req, res) => {
   try {
     const { tenantId, user } = req;
-    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift } = req.query;
+    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift, milkType } = req.query;
 
     const filter = { tenantId };
     if (user.role === 'supplier') {
@@ -211,6 +211,15 @@ export const listProcurements = async (req, res) => {
     if (toDate) filter.date = { ...filter.date, $lte: new Date(toDate) };
     if (paymentStatus) filter.paymentStatus = paymentStatus;
     if (shift) filter.shift = shift;
+    if (milkType) {
+      if (!MILK_TYPES.includes(milkType)) {
+        return res.status(400).json({
+          success: false,
+          message: "milkType must be 'cow', 'buffalo', or 'mixed'"
+        });
+      }
+      filter.milkType = milkType;
+    }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [procurements, total] = await Promise.all([
