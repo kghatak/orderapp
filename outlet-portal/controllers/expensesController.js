@@ -2,6 +2,50 @@ import mongoose from 'mongoose';
 import { getExpenseModel } from '../models/Expense.js';
 import { generateExpenseId } from '../util/businessIds.js';
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const parseYmd = (value, label) => {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const d = String(value).trim();
+  if (!DATE_RE.test(d)) return { error: `${label} must be in yyyy-mm-dd format` };
+  return d;
+};
+
+const dayRangeUtc = (ymd) => {
+  const start = new Date(`${ymd}T00:00:00.000Z`);
+  const end = new Date(`${ymd}T23:59:59.999Z`);
+  return { start, end };
+};
+
+const formatYmd = (value) => {
+  if (!value) return '';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+};
+
+const assertOutletScope = (req, res) => {
+  const auth = req.portalAuth;
+  const outletId = req.query.outletId;
+  if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
+    res.status(400).json({ success: false, message: 'outletId query parameter is required' });
+    return null;
+  }
+  if (outletId.trim() !== auth.outletId) {
+    res.status(403).json({ success: false, message: 'outletId does not match authenticated outlet' });
+    return null;
+  }
+  return { auth, outletId: outletId.trim() };
+};
+
+const serializeExpenseDetail = (row) => {
+  const { _id, __v, date, ...rest } = row;
+  return {
+    _id,
+    ...rest,
+    date: formatYmd(date)
+  };
+};
 
 /** Include on create/update when sent; skips undefined/null/non-strings */
 const optionalTrimmedStringFields = (body, keys) => {
@@ -34,15 +78,95 @@ const findExpenseDoc = async (Expense, rawId, scope) => {
 
 /**
  * GET /expenses
- * Query: limit (default 50, max 100), skip
+ * Query:
+ *   outletId (required for groupBy=date and date filter)
+ *   groupBy=date — paginated date summaries (skip, limit default 10)
+ *   date=yyyy-mm-dd — all expenses for one day
+ *   skip, limit — flat list or date summaries (default limit 50 flat, 10 grouped)
  */
 export const listExpenses = async (req, res) => {
   try {
     const auth = req.portalAuth;
+    const { groupBy, date } = req.query;
+    const Expense = getExpenseModel();
+
+    if (groupBy === 'date') {
+      const scope = assertOutletScope(req, res);
+      if (!scope) return;
+
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 100);
+      const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
+      const match = { tenantId: scope.auth.tenantId, outletId: scope.outletId };
+
+      const [result] = await Expense.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
+            totalAmount: { $sum: '$amount' },
+            recordCount: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: -1 } },
+        {
+          $facet: {
+            data: [
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $project: {
+                  _id: 0,
+                  date: '$_id',
+                  totalAmount: { $round: ['$totalAmount', 2] },
+                  recordCount: 1
+                }
+              }
+            ],
+            meta: [{ $count: 'total' }]
+          }
+        }
+      ]);
+
+      const rows = result?.data || [];
+      const total = result?.meta?.[0]?.total ?? 0;
+
+      return res.status(200).json({
+        success: true,
+        data: rows.map((row) => ({
+          date: row.date,
+          totalAmount: roundMoney(row.totalAmount),
+          recordCount: row.recordCount
+        })),
+        pagination: { total, skip, limit }
+      });
+    }
+
+    if (date !== undefined && date !== null && String(date).trim() !== '') {
+      const scope = assertOutletScope(req, res);
+      if (!scope) return;
+
+      const parsedDate = parseYmd(date, 'date');
+      if (parsedDate?.error) {
+        return res.status(400).json({ success: false, message: parsedDate.error });
+      }
+
+      const { start, end } = dayRangeUtc(parsedDate);
+      const rows = await Expense.find({
+        tenantId: scope.auth.tenantId,
+        outletId: scope.outletId,
+        date: { $gte: start, $lte: end }
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      return res.status(200).json({
+        success: true,
+        data: rows.map(serializeExpenseDetail)
+      });
+    }
+
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 100);
     const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
-
-    const Expense = getExpenseModel();
     const filter = { tenantId: auth.tenantId, outletId: auth.outletId };
 
     const [rows, total] = await Promise.all([

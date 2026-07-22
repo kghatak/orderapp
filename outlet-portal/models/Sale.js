@@ -21,6 +21,14 @@ const saleDiscountSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const salePaymentSchema = new mongoose.Schema(
+  {
+    mode: { type: String, enum: ['Cash', 'Card', 'UPI'], required: true },
+    amount: { type: Number, required: true }
+  },
+  { _id: false }
+);
+
 const saleSchema = new mongoose.Schema({
   saleId: { type: String, required: true },
   tenantId: { type: String, required: true, index: true },
@@ -37,8 +45,10 @@ const saleSchema = new mongoose.Schema({
   discount: { type: saleDiscountSchema, default: undefined },
   /** Final payable amount after discount */
   total: { type: Number, required: true },
-  /** Cash / Card / UPI = paid at sale time; Due = sold on credit until collected */
-  paymentMode: { type: String, enum: ['Cash', 'Card', 'UPI', 'Due'], required: true },
+  /** Cash / Card / UPI = paid at sale time; Due = sold on credit; Split = mixed modes at sale time */
+  paymentMode: { type: String, enum: ['Cash', 'Card', 'UPI', 'Due', 'Split'], required: true },
+  /** Required when paymentMode is Split. Sum of amounts must equal total. */
+  payments: { type: [salePaymentSchema], default: undefined },
   /**
    * pending = payment not yet received (typically paymentMode Due).
    * collected = amount received or paid-at-POS (Cash/Card/UPI).

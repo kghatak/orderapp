@@ -1,42 +1,119 @@
 import { getOutletProductsModel } from '../models/OutletProducts.js';
-import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
+import { getFirestoreDB } from '../../util/firebase.js';
+import { roundQty } from '../../util/quantities.js';
 
 const toNum = (v, fallback = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
 
-const syncOutletQuantities = async (outletId, productsMap) => {
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const now = new Date();
-  const entries = Object.entries(productsMap || {});
-  const quantityMap = {};
-  for (const [productId, product] of entries) {
-    quantityMap[productId] = {
-      productId,
-      quantity: Math.max(0, toNum(product?.quantity, 0))
-    };
+const isManualProductId = (productId) => String(productId || '').trim().startsWith('manual:');
+
+const isManualProductLine = (mapKey, line) =>
+  isManualProductId(mapKey) || line?.isManual === true;
+
+const countManualProducts = (productsMap) => {
+  if (!productsMap || typeof productsMap !== 'object' || Array.isArray(productsMap)) return 0;
+  return Object.entries(productsMap).filter(([key, line]) => isManualProductLine(key, line)).length;
+};
+
+const productCountsFromMap = (productsMap) => {
+  const productCount = Object.keys(productsMap || {}).length;
+  const manualProductCount = countManualProducts(productsMap);
+  return { productCount, manualProductCount };
+};
+
+const withManualProductCount = (payload, manualProductCount) => {
+  if (manualProductCount > 0) {
+    payload.manualProductCount = manualProductCount;
+  }
+  return payload;
+};
+
+const normalizeProductLine = (p, existing) => {
+  const productId = p?.productId != null ? String(p.productId).trim() : '';
+  if (!productId) return null;
+
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  const manual = isManualProductId(productId) || p?.isManual === true || prev.isManual === true;
+  const line = {
+    productId,
+    name: p.name != null ? String(p.name) : (prev.name != null ? String(prev.name) : ''),
+    category: p.category != null ? String(p.category) : (prev.category != null ? String(prev.category) : ''),
+    unit: p.unit != null ? String(p.unit) : (prev.unit != null ? String(prev.unit) : ''),
+    price: p.price !== undefined && p.price !== null ? toNum(p.price, 0) : toNum(prev.price, 0),
+    quantity:
+      p.quantity !== undefined && p.quantity !== null
+        ? roundQty(p.quantity, 0)
+        : roundQty(prev.quantity, 0)
+  };
+
+  if (manual) {
+    line.isManual = true;
   }
 
-  // Remove any legacy rows for this outlet, then keep one document per outlet.
-  await OutletProductQuantity.deleteMany({ outletId });
-  await OutletProductQuantity.create({
-    outletId,
-    products: quantityMap,
-    productCount: Object.keys(quantityMap).length,
-    updatedAt: now
-  });
+  return line;
+};
+
+const isProductLineIncomplete = (line) => {
+  if (!line || typeof line !== 'object') return true;
+  const name = line.name != null ? String(line.name).trim() : '';
+  const category = line.category != null ? String(line.category).trim() : '';
+  const unit = line.unit != null ? String(line.unit).trim() : '';
+  const price = toNum(line.price, 0);
+  return !name || !category || !unit || price <= 0;
+};
+
+const fetchFirestoreCatalogProduct = async (db, mapKey) => {
+  const key = String(mapKey || '').trim();
+  if (!key) return null;
+
+  const byDocId = await db.collection('products').doc(key).get();
+  if (byDocId.exists) return byDocId.data();
+
+  const byBusinessId = await db.collection('products').where('productId', '==', key).limit(1).get();
+  if (!byBusinessId.empty) return byBusinessId.docs[0].data();
+
+  return null;
+};
+
+const catalogToOutletLine = (mapKey, existing, catalog) => {
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  return {
+    productId: mapKey,
+    name: prev.name || catalog?.name || '',
+    category: prev.category || catalog?.category || '',
+    unit: prev.unit || catalog?.unit || '',
+    price:
+      prev.price != null && toNum(prev.price, 0) > 0 ? toNum(prev.price, 0) : toNum(catalog?.price, 0),
+    quantity: roundQty(prev.quantity, 0)
+  };
+};
+
+const withRoundedQuantities = (products) => {
+  if (!products || typeof products !== 'object' || Array.isArray(products)) return products || {};
+  const out = {};
+  for (const [key, line] of Object.entries(products)) {
+    if (!line || typeof line !== 'object') {
+      out[key] = line;
+      continue;
+    }
+    out[key] = {
+      ...line,
+      quantity: roundQty(line.quantity, 0)
+    };
+  }
+  return out;
 };
 
 /**
  * POST /outlet-products
- * Body: { outletId, products: [{ productId, name, category, unit, price, quantity }, ...] }
- * Replaces the entire `products` map (keyed by productId). Duplicate productIds in the array: last wins.
- * An empty array clears all products for the outlet.
+ * Body: { outletId, products: [...], merge?: boolean }
+ * Default: replaces entire map. merge=true updates only sent productIds and keeps the rest.
  */
 export const upsertOutletProducts = async (req, res) => {
   try {
-    const { outletId, products } = req.body || {};
+    const { outletId, products, merge } = req.body || {};
 
     if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
       return res.status(400).json({ success: false, message: 'outletId is required' });
@@ -46,48 +123,218 @@ export const upsertOutletProducts = async (req, res) => {
       return res.status(400).json({ success: false, message: 'products must be an array' });
     }
 
-    const productsMap = {};
+    const trimmedOutletId = outletId.trim();
+    const OutletProducts = getOutletProductsModel();
+    const existingDoc = merge ? await OutletProducts.findOne({ outletId: trimmedOutletId }).lean() : null;
+    const productsMap =
+      merge &&
+      existingDoc?.products &&
+      typeof existingDoc.products === 'object' &&
+      !Array.isArray(existingDoc.products)
+        ? { ...existingDoc.products }
+        : {};
+
     for (const p of products) {
       const productId = p?.productId != null ? String(p.productId).trim() : '';
       if (!productId) {
         return res.status(400).json({ success: false, message: 'Each product must include productId' });
       }
 
-      productsMap[productId] = {
-        productId,
-        name: p.name != null ? String(p.name) : '',
-        category: p.category != null ? String(p.category) : '',
-        unit: p.unit != null ? String(p.unit) : '',
-        price: toNum(p.price, 0),
-        quantity: toNum(p.quantity, 0)
-      };
+      const line = normalizeProductLine(p, productsMap[productId]);
+      if (!line) {
+        return res.status(400).json({ success: false, message: 'Each product must include productId' });
+      }
+
+      if (isManualProductId(productId)) {
+        if (isProductLineIncomplete(line)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Manual products require name, category, unit, and price > 0'
+          });
+        }
+        line.isManual = true;
+      }
+
+      productsMap[productId] = line;
     }
 
-    const trimmedOutletId = outletId.trim();
-    const productCount = Object.keys(productsMap).length;
+    const { productCount, manualProductCount } = productCountsFromMap(productsMap);
     const updatedAt = new Date();
 
-    const OutletProducts = getOutletProductsModel();
     const doc = await OutletProducts.findOneAndUpdate(
       { outletId: trimmedOutletId },
-      { $set: { products: productsMap, productCount, updatedAt } },
+      { $set: { products: productsMap, productCount, manualProductCount, updatedAt } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
-    await syncOutletQuantities(trimmedOutletId, productsMap);
 
+    const savedManualCount = doc.manualProductCount ?? manualProductCount;
     res.status(200).json({
       success: true,
-      message: 'Outlet products saved',
-      data: {
-        outletId: doc.outletId,
-        products: doc.products || {},
-        productCount: doc.productCount ?? productCount,
-        updatedAt: doc.updatedAt
-      }
+      message: merge ? 'Outlet products merged' : 'Outlet products saved',
+      data: withManualProductCount(
+        {
+          outletId: doc.outletId,
+          products: withRoundedQuantities(doc.products || {}),
+          productCount: doc.productCount ?? productCount,
+          updatedAt: doc.updatedAt
+        },
+        savedManualCount
+      )
     });
   } catch (err) {
     console.error('upsertOutletProducts error:', err);
     res.status(500).json({ success: false, message: 'Failed to save outlet products' });
+  }
+};
+
+/**
+ * PATCH /outlet-products/:productId
+ * Body: { outletId, name?, category?, unit?, price?, quantity? }
+ * Updates one product without replacing the full outlet catalog.
+ */
+export const patchOutletProduct = async (req, res) => {
+  try {
+    const mapKey = req.params.productId != null ? String(req.params.productId).trim() : '';
+    const { outletId, name, category, unit, price, quantity } = req.body || {};
+
+    if (!mapKey) {
+      return res.status(400).json({ success: false, message: 'productId path parameter is required' });
+    }
+    if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
+      return res.status(400).json({ success: false, message: 'outletId is required' });
+    }
+
+    const hasPatch =
+      name !== undefined ||
+      category !== undefined ||
+      unit !== undefined ||
+      price !== undefined ||
+      quantity !== undefined;
+
+    if (!hasPatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide at least one of: name, category, unit, price, quantity'
+      });
+    }
+
+    const trimmedOutletId = outletId.trim();
+    const OutletProducts = getOutletProductsModel();
+    const doc = await OutletProducts.findOne({ outletId: trimmedOutletId });
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Outlet products not found' });
+    }
+
+    const productsMap =
+      doc.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
+        ? doc.products
+        : {};
+    const existing = productsMap[mapKey];
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Product not found for this outlet' });
+    }
+
+    const patch = { productId: mapKey, ...existing };
+    if (name !== undefined) patch.name = String(name);
+    if (category !== undefined) patch.category = String(category);
+    if (unit !== undefined) patch.unit = String(unit);
+    if (price !== undefined) patch.price = toNum(price, 0);
+    if (quantity !== undefined) patch.quantity = roundQty(quantity, 0);
+
+    productsMap[mapKey] = patch;
+    doc.products = productsMap;
+    const counts = productCountsFromMap(productsMap);
+    doc.productCount = counts.productCount;
+    doc.manualProductCount = counts.manualProductCount;
+    doc.updatedAt = new Date();
+    doc.markModified('products');
+    await doc.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Outlet product updated',
+      data: withManualProductCount(
+        {
+          outletId: doc.outletId,
+          product: patch,
+          productCount: doc.productCount,
+          updatedAt: doc.updatedAt
+        },
+        doc.manualProductCount
+      )
+    });
+  } catch (err) {
+    console.error('patchOutletProduct error:', err);
+    res.status(500).json({ success: false, message: 'Failed to update outlet product' });
+  }
+};
+
+/**
+ * POST /outlet-products/repair-missing
+ * Body or query: outletId
+ * Fills missing name/category/unit/price from Firestore master products.
+ */
+export const repairMissingOutletProducts = async (req, res) => {
+  try {
+    const outletId = req.body?.outletId ?? req.query?.outletId;
+    if (!outletId || typeof outletId !== 'string' || !String(outletId).trim()) {
+      return res.status(400).json({ success: false, message: 'outletId is required' });
+    }
+
+    const trimmedOutletId = String(outletId).trim();
+    const OutletProducts = getOutletProductsModel();
+    const doc = await OutletProducts.findOne({ outletId: trimmedOutletId });
+    if (!doc?.products || typeof doc.products !== 'object' || Array.isArray(doc.products)) {
+      return res.status(404).json({ success: false, message: 'Outlet products not found' });
+    }
+
+    const db = getFirestoreDB();
+    let repaired = 0;
+    let skipped = 0;
+    let notFound = 0;
+
+    for (const [mapKey, line] of Object.entries(doc.products)) {
+      if (isManualProductId(mapKey) || line?.isManual === true) {
+        skipped++;
+        continue;
+      }
+
+      if (!isProductLineIncomplete(line)) {
+        skipped++;
+        continue;
+      }
+
+      const catalog = await fetchFirestoreCatalogProduct(db, mapKey);
+      if (!catalog) {
+        notFound++;
+        continue;
+      }
+
+      doc.products[mapKey] = catalogToOutletLine(mapKey, line, catalog);
+      repaired++;
+    }
+
+    if (repaired > 0) {
+      doc.updatedAt = new Date();
+      doc.markModified('products');
+      await doc.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: repaired > 0 ? 'Missing outlet product details repaired' : 'No incomplete products found',
+      data: {
+        outletId: trimmedOutletId,
+        repaired,
+        skipped,
+        notFoundInCatalog: notFound,
+        productCount: Object.keys(doc.products).length,
+        updatedAt: doc.updatedAt
+      }
+    });
+  } catch (err) {
+    console.error('repairMissingOutletProducts error:', err);
+    res.status(500).json({ success: false, message: 'Failed to repair outlet products' });
   }
 };
 
@@ -116,19 +363,28 @@ export const getOutletProductsByOutletId = async (req, res) => {
       });
     }
 
-    const { _id, __v, ...rest } = doc;
-    const derived =
-      rest.products && typeof rest.products === 'object' && !Array.isArray(rest.products)
-        ? Object.keys(rest.products).length
-        : 0;
+    const { _id, __v, manualProductCount: storedManualCount, ...rest } = doc;
+    const counts = productCountsFromMap(rest.products);
     const productCount =
       typeof rest.productCount === 'number' && Number.isFinite(rest.productCount)
         ? rest.productCount
-        : derived;
+        : counts.productCount;
+    const manualProductCount =
+      typeof storedManualCount === 'number' && Number.isFinite(storedManualCount)
+        ? storedManualCount
+        : counts.manualProductCount;
 
     res.status(200).json({
       success: true,
-      data: { id: _id, ...rest, productCount }
+      data: withManualProductCount(
+        {
+          id: _id,
+          ...rest,
+          products: withRoundedQuantities(rest.products),
+          productCount
+        },
+        manualProductCount
+      )
     });
   } catch (err) {
     console.error('getOutletProductsByOutletId error:', err);

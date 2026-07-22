@@ -1,7 +1,18 @@
 // controllers/paymentController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import admin from 'firebase-admin';
+
+const toFirestoreTimestamp = (val) => {
+  if (val == null) return null;
+  if (val.toDate && typeof val.toDate === 'function') return val;
+  if (typeof val === 'object' && val._seconds != null) {
+    return new admin.firestore.Timestamp(val._seconds, val._nanoseconds || 0);
+  }
+  const d = new Date(val);
+  return Number.isNaN(d.getTime()) ? null : admin.firestore.Timestamp.fromDate(d);
+};
 
 // Helper to generate sequential payment IDs (PAY0001, PAY0002, ...)
 const generatePaymentId = async (db) => {
@@ -371,6 +382,9 @@ export const approvePaymentRequest = async (req, res) => {
       approvedAt: new Date(),
       approvedBy: admin,
       createdAt: requestData.createdAt,
+      paymentDate:
+        toFirestoreTimestamp(requestData.paymentDate || requestData.createdAt) ||
+        admin.firestore.Timestamp.now(),
       outletId: requestData.outletId,
       outletName: requestData.outletName,
       paymentId: paymentId,
@@ -829,9 +843,8 @@ export const getPaymentsReport = async (req, res) => {
       });
     }
 
-    // Convert dates to Firestore timestamps
-    const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
-    const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
+    // IST calendar day boundaries (matches opening/closing balance and ledger UI)
+    const { startTimestamp, endTimestamp } = getIstReportRangeTimestamps(startDate, endDate);
 
     // Build query - only include approved payments
     let query = db.collection('payments')

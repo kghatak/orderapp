@@ -2,9 +2,9 @@
 import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
 import { getFirestoreDB } from '../../util/firebase.js';
+import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { isOutletPortalMongoConnected } from '../../outlet-portal/config/portalDb.js';
-import { getOutletProductQuantityModel } from '../../outlet-portal/models/OutletProductQuantity.js';
 import { getOutletProductsModel } from '../../outlet-portal/models/OutletProducts.js';
 
 const toFiniteNumber = (value, fallback = 0) => {
@@ -12,8 +12,8 @@ const toFiniteNumber = (value, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const syncDeliveredItemsToOutletProducts = async (outletId, increments) => {
-  if (!increments || increments.size === 0) {
+const syncDeliveredItemsToOutletProducts = async (outletId, deliveryUpdates) => {
+  if (!deliveryUpdates || deliveryUpdates.size === 0) {
     return;
   }
 
@@ -24,13 +24,25 @@ const syncDeliveredItemsToOutletProducts = async (outletId, increments) => {
       ? doc.products
       : {};
 
-  for (const [productId, quantityToAdd] of increments.entries()) {
-    const existing = productsMap[productId];
+  for (const [mapKey, { quantityAdd, item, catalog }] of deliveryUpdates.entries()) {
+    const existing =
+      productsMap[mapKey] && typeof productsMap[mapKey] === 'object' ? productsMap[mapKey] : null;
     const currentQuantity = toFiniteNumber(existing?.quantity, 0);
-    productsMap[productId] = {
-      ...(existing && typeof existing === 'object' ? existing : { productId }),
-      productId,
-      quantity: currentQuantity + quantityToAdd
+    const name = existing?.name || item?.name || catalog?.name || '';
+    const category = existing?.category || catalog?.category || '';
+    const unit = existing?.unit || catalog?.unit || '';
+    const price =
+      existing?.price != null && Number.isFinite(Number(existing.price)) && Number(existing.price) > 0
+        ? Number(existing.price)
+        : toFiniteNumber(item?.price ?? catalog?.price, 0);
+
+    productsMap[mapKey] = {
+      productId: mapKey,
+      name: String(name),
+      category: String(category),
+      unit: String(unit),
+      price,
+      quantity: currentQuantity + quantityAdd
     };
   }
 
@@ -54,7 +66,29 @@ const syncDeliveredItemsToOutletProducts = async (outletId, increments) => {
   await doc.save();
 };
 
-const addDeliveredOrderItemsToOutletQuantity = async (outletId, items) => {
+const fetchProductCatalogByDocId = async (items) => {
+  const db = getFirestoreDB();
+  const docIds = [
+    ...new Set(
+      items
+        .map((item) => (item?.productId != null ? String(item.productId).trim() : ''))
+        .filter(Boolean)
+    )
+  ];
+  if (docIds.length === 0) return new Map();
+
+  const snapshots = await Promise.all(docIds.map((id) => db.collection('products').doc(id).get()));
+  const catalogByDocId = new Map();
+  docIds.forEach((id, index) => {
+    const snap = snapshots[index];
+    if (snap?.exists) {
+      catalogByDocId.set(id, snap.data());
+    }
+  });
+  return catalogByDocId;
+};
+
+const addDeliveredOrderItemsToOutletProducts = async (outletId, items) => {
   const safeOutletId = typeof outletId === 'string' ? outletId.trim() : '';
   if (!safeOutletId || !Array.isArray(items) || items.length === 0) {
     return;
@@ -62,62 +96,37 @@ const addDeliveredOrderItemsToOutletQuantity = async (outletId, items) => {
 
   if (!isOutletPortalMongoConnected()) {
     console.warn(
-      `Skipping OutletProductQuantities update for outlet ${safeOutletId}: outlet portal MongoDB not connected.`
+      `Skipping Products stock update for outlet ${safeOutletId}: outlet portal MongoDB not connected.`
     );
     return;
   }
 
-  const increments = new Map();
-  for (const item of items) {
-    const productId = item?.productId != null ? String(item.productId).trim() : '';
-    const quantity = toFiniteNumber(item?.quantity, 0);
+  const catalogByDocId = await fetchProductCatalogByDocId(items);
+  const deliveryUpdates = new Map();
 
-    if (!productId || quantity <= 0) {
+  for (const item of items) {
+    const docId = item?.productId != null ? String(item.productId).trim() : '';
+    const quantity = toFiniteNumber(item?.quantity, 0);
+    if (!docId || quantity <= 0) continue;
+
+    const catalog = catalogByDocId.get(docId);
+    const mapKey = String(catalog?.productId || item?.prodid || docId).trim();
+    if (!mapKey) continue;
+
+    const existing = deliveryUpdates.get(mapKey);
+    if (existing) {
+      existing.quantityAdd += quantity;
       continue;
     }
 
-    increments.set(productId, (increments.get(productId) || 0) + quantity);
+    deliveryUpdates.set(mapKey, { quantityAdd: quantity, item, catalog: catalog || null });
   }
 
-  if (increments.size === 0) {
+  if (deliveryUpdates.size === 0) {
     return;
   }
 
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const updatedAt = new Date();
-  const doc = await OutletProductQuantity.findOne({
-    outletId: safeOutletId,
-    products: { $exists: true }
-  });
-  const productsMap =
-    doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
-      ? doc.products
-      : {};
-
-  for (const [productId, quantity] of increments.entries()) {
-    const current = toFiniteNumber(productsMap?.[productId]?.quantity, 0);
-    productsMap[productId] = { productId, quantity: current + quantity };
-  }
-
-  const payload = {
-    outletId: safeOutletId,
-    products: productsMap,
-    productCount: Object.keys(productsMap).length,
-    updatedAt
-  };
-
-  if (doc) {
-    doc.products = payload.products;
-    doc.productCount = payload.productCount;
-    doc.updatedAt = payload.updatedAt;
-    doc.markModified('products');
-    await doc.save();
-  } else {
-    await OutletProductQuantity.deleteMany({ outletId: safeOutletId });
-    await OutletProductQuantity.create(payload);
-  }
-
-  await syncDeliveredItemsToOutletProducts(safeOutletId, increments);
+  await syncDeliveredItemsToOutletProducts(safeOutletId, deliveryUpdates);
 };
 
 // Helper function to generate the next sequential order ID
@@ -486,14 +495,14 @@ export const patchOrder = async (req, res) => {
 
     if (newStatus === 'delivered' && currentStatus !== 'delivered') {
       try {
-        await addDeliveredOrderItemsToOutletQuantity(orderDataBefore.outletId, orderDataBefore.items || []);
+        await addDeliveredOrderItemsToOutletProducts(orderDataBefore.outletId, orderDataBefore.items || []);
         await orderRef.update({
           mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
           mongoDeliverySyncStatus: 'synced'
         });
       } catch (mongoSyncError) {
         console.error(
-          `Order ${orderId} delivered but failed to sync OutletProductQuantities:`,
+          `Order ${orderId} delivered but failed to sync Products stock:`,
           mongoSyncError
         );
       }
@@ -1223,7 +1232,7 @@ export const deliverOrder = async (req, res) => {
     });
 
     try {
-      await addDeliveredOrderItemsToOutletQuantity(
+      await addDeliveredOrderItemsToOutletProducts(
         deliveredOrderData?.outletId,
         deliveredOrderData?.items || []
       );
@@ -1233,7 +1242,7 @@ export const deliverOrder = async (req, res) => {
       });
     } catch (mongoSyncError) {
       console.error(
-        `Order ${orderId} delivered but failed to sync OutletProductQuantities:`,
+        `Order ${orderId} delivered but failed to sync Products stock:`,
         mongoSyncError
       );
     }
@@ -1598,9 +1607,8 @@ export const getOrdersReport = async (req, res) => {
       });
     }
 
-    // Convert dates to Firestore timestamps
-    const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
-    const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
+    // IST calendar day boundaries (matches opening/closing balance and ledger UI)
+    const { startTimestamp, endTimestamp } = getIstReportRangeTimestamps(startDate, endDate);
 
     // Build query - only include delivered orders filtered by deliveredDate
     let query = db.collection('orders')

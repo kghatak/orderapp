@@ -65,7 +65,22 @@ const generateSupplierCode = async (tenantId) => {
 export const createSupplier = async (req, res) => {
   try {
     const { tenantId } = req;
-    const { name, phone, village, address, milkType, bankAccountNo, bankName, ifscCode, ratePerFat } = req.body;
+    const {
+      name,
+      phone,
+      village,
+      address,
+      state,
+      pinCode,
+      gstNumber,
+      milkType,
+      bankAccountNo,
+      bankName,
+      ifscCode,
+      ratePerFat,
+      cowRatePerFat,
+      buffaloRatePerFat
+    } = req.body;
 
     if (!name || !phone) {
       return res.status(400).json({
@@ -75,6 +90,17 @@ export const createSupplier = async (req, res) => {
     }
 
     const supplierCode = await generateSupplierCode(tenantId);
+    const resolvedMilkType = milkType || 'cow';
+    const resolvedRatePerFat = ratePerFat ?? 0;
+    let resolvedCowRate = cowRatePerFat ?? 0;
+    let resolvedBuffaloRate = buffaloRatePerFat ?? 0;
+
+    if (!resolvedCowRate && resolvedRatePerFat && (resolvedMilkType === 'cow' || resolvedMilkType === 'mixed')) {
+      resolvedCowRate = resolvedRatePerFat;
+    }
+    if (!resolvedBuffaloRate && resolvedRatePerFat && (resolvedMilkType === 'buffalo' || resolvedMilkType === 'mixed')) {
+      resolvedBuffaloRate = resolvedRatePerFat;
+    }
 
     const supplier = new Supplier({
       tenantId,
@@ -83,11 +109,16 @@ export const createSupplier = async (req, res) => {
       phone,
       village: village || '',
       address: address || '',
-      milkType: milkType || 'cow',
+      state: state || '',
+      pinCode: pinCode || '',
+      gstNumber: gstNumber ? String(gstNumber).toUpperCase() : '',
+      milkType: resolvedMilkType,
       bankAccountNo: bankAccountNo || '',
       bankName: bankName || '',
       ifscCode: ifscCode || '',
-      ratePerFat: ratePerFat ?? 0
+      ratePerFat: resolvedRatePerFat,
+      cowRatePerFat: resolvedCowRate,
+      buffaloRatePerFat: resolvedBuffaloRate
     });
     await supplier.save();
 
@@ -108,10 +139,31 @@ export const updateSupplier = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const allowed = ['name', 'phone', 'village', 'address', 'milkType', 'bankAccountNo', 'bankName', 'ifscCode', 'ratePerFat', 'isActive'];
+    const allowed = [
+      'name',
+      'phone',
+      'village',
+      'address',
+      'state',
+      'pinCode',
+      'gstNumber',
+      'milkType',
+      'bankAccountNo',
+      'bankName',
+      'ifscCode',
+      'ratePerFat',
+      'cowRatePerFat',
+      'buffaloRatePerFat',
+      'isActive'
+    ];
     const toUpdate = {};
     for (const k of allowed) {
       if (updates[k] !== undefined) toUpdate[k] = updates[k];
+    }
+    if (toUpdate.gstNumber !== undefined) {
+      toUpdate.gstNumber = toUpdate.gstNumber
+        ? String(toUpdate.gstNumber).toUpperCase()
+        : '';
     }
     toUpdate.updatedAt = new Date();
 

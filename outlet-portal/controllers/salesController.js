@@ -1,16 +1,78 @@
 import mongoose from 'mongoose';
 import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
-import { getOutletProductQuantityModel } from '../models/OutletProductQuantity.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
+import { roundQty } from '../../util/quantities.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 /** Modes that represent money collected at the outlet (not credit). */
 const COLLECT_MODES = ['Cash', 'Card', 'UPI'];
 
-const ALL_SALE_PAYMENT_MODES = [...COLLECT_MODES, 'Due'];
+const ALL_SALE_PAYMENT_MODES = [...COLLECT_MODES, 'Due', 'Split'];
+
+const parseSplitPayments = (body, totalNum) => {
+  const { payments } = body;
+  if (!Array.isArray(payments) || payments.length === 0) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: 'payments must be a non-empty array when paymentMode is Split'
+        }
+      }
+    };
+  }
+
+  const normalized = [];
+  let sum = 0;
+  for (const p of payments) {
+    const pMode = p?.mode != null ? String(p.mode).trim() : '';
+    if (!COLLECT_MODES.includes(pMode)) {
+      return {
+        error: {
+          status: 400,
+          json: {
+            success: false,
+            message: 'Each payment mode must be Cash, Card, or UPI'
+          }
+        }
+      };
+    }
+    const amt = Number(p.amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return {
+        error: {
+          status: 400,
+          json: {
+            success: false,
+            message: 'Each payment amount must be a positive number'
+          }
+        }
+      };
+    }
+    const rounded = roundMoney(amt);
+    sum += rounded;
+    normalized.push({ mode: pMode, amount: rounded });
+  }
+
+  sum = roundMoney(sum);
+  if (Math.abs(sum - totalNum) > 0.02) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: `Sum of payments (${sum}) must equal total (${totalNum})`
+        }
+      }
+    };
+  }
+
+  return { value: normalized };
+};
 const mongoErrorText = (e) => {
   if (!e) return '';
   const bits = [];
@@ -56,58 +118,9 @@ const soldQtyByProductId = (normalizedItems) => {
     const pid = line.productId;
     const q = Number(line.quantity);
     if (!Number.isFinite(q) || q <= 0) continue;
-    map.set(pid, (map.get(pid) || 0) + q);
+    map.set(pid, roundQty((map.get(pid) || 0) + q));
   }
   return map;
-};
-
-/**
- * Subtracts sold quantities from MongoDB `OutletProductQuantities` for this outlet.
- * Each quantity floors at 0. Runs inside optional Mongoose session (transaction).
- */
-const decrementOutletProductQuantitiesForSale = async (outletId, normalizedItems, session) => {
-  const quantityTotals = soldQtyByProductId(normalizedItems);
-  if (quantityTotals.size === 0) return;
-
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const now = new Date();
-  const q = OutletProductQuantity.findOne({ outletId, products: { $exists: true } });
-  const doc = session ? await q.session(session) : await q;
-  const productsMap =
-    doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
-      ? doc.products
-      : {};
-
-  let touched = false;
-  for (const [productId, soldTotal] of quantityTotals) {
-    const current = Number(productsMap?.[productId]?.quantity);
-    const safeCurrent = Number.isFinite(current) ? current : 0;
-    const nextQuantity = Math.max(0, safeCurrent - soldTotal);
-    productsMap[productId] = { productId, quantity: nextQuantity };
-    touched = true;
-  }
-
-  if (touched) {
-    const payload = {
-      outletId,
-      products: productsMap,
-      productCount: Object.keys(productsMap).length,
-      updatedAt: now
-    };
-    if (doc) {
-      doc.products = payload.products;
-      doc.productCount = payload.productCount;
-      doc.updatedAt = payload.updatedAt;
-      doc.markModified('products');
-      await doc.save(session ? { session } : {});
-    } else if (session) {
-      await OutletProductQuantity.deleteMany({ outletId }, { session });
-      await OutletProductQuantity.create([payload], { session });
-    } else {
-      await OutletProductQuantity.deleteMany({ outletId });
-      await OutletProductQuantity.create(payload);
-    }
-  }
 };
 
 /**
@@ -137,7 +150,7 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
     }
     const current = Number(entry.quantity);
     const safeCurrent = Number.isFinite(current) ? current : 0;
-    entry.quantity = Math.max(0, safeCurrent - soldTotal);
+    entry.quantity = roundQty(Math.max(0, safeCurrent - soldTotal));
     touched = true;
   }
 
@@ -146,8 +159,6 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
     doc.markModified('products');
     await doc.save(session ? { session } : {});
   }
-
-  await decrementOutletProductQuantitiesForSale(outletId, normalizedItems, session);
 };
 
 /**
@@ -176,7 +187,7 @@ const incrementOutletProductsForSale = async (outletId, normalizedItems, session
     }
     const current = Number(entry.quantity);
     const safeCurrent = Number.isFinite(current) ? current : 0;
-    entry.quantity = safeCurrent + soldTotal;
+    entry.quantity = roundQty(safeCurrent + soldTotal);
     touched = true;
   }
 
@@ -184,45 +195,6 @@ const incrementOutletProductsForSale = async (outletId, normalizedItems, session
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save(session ? { session } : {});
-  }
-
-  const OutletProductQuantity = getOutletProductQuantityModel();
-  const now = new Date();
-  const quantityQuery = OutletProductQuantity.findOne({ outletId, products: { $exists: true } });
-  const quantityDoc = session ? await quantityQuery.session(session) : await quantityQuery;
-  const productsMap =
-    quantityDoc?.products && typeof quantityDoc.products === 'object' && !Array.isArray(quantityDoc.products)
-      ? quantityDoc.products
-      : {};
-
-  let quantityTouched = false;
-  for (const [productId, soldTotal] of totals) {
-    const current = Number(productsMap?.[productId]?.quantity);
-    const safeCurrent = Number.isFinite(current) ? current : 0;
-    productsMap[productId] = { productId, quantity: safeCurrent + soldTotal };
-    quantityTouched = true;
-  }
-
-  if (quantityTouched) {
-    const payload = {
-      outletId,
-      products: productsMap,
-      productCount: Object.keys(productsMap).length,
-      updatedAt: now
-    };
-    if (quantityDoc) {
-      quantityDoc.products = payload.products;
-      quantityDoc.productCount = payload.productCount;
-      quantityDoc.updatedAt = payload.updatedAt;
-      quantityDoc.markModified('products');
-      await quantityDoc.save(session ? { session } : {});
-    } else if (session) {
-      await OutletProductQuantity.deleteMany({ outletId }, { session });
-      await OutletProductQuantity.create([payload], { session });
-    } else {
-      await OutletProductQuantity.deleteMany({ outletId });
-      await OutletProductQuantity.create(payload);
-    }
   }
 };
 
@@ -259,13 +231,13 @@ const parseSaleBody = (body, authOutletId) => {
 
   const mode =
     paymentMode != null && typeof paymentMode === 'string' ? paymentMode.trim() : '';
-  if (!['Cash', 'Card', 'UPI', 'Due'].includes(mode)) {
+  if (!ALL_SALE_PAYMENT_MODES.includes(mode)) {
     return {
       error: {
         status: 400,
         json: {
           success: false,
-          message: 'paymentMode is required and must be "Cash", "Card", "UPI", or "Due"'
+          message: `paymentMode is required and must be one of: ${ALL_SALE_PAYMENT_MODES.join(', ')}`
         }
       }
     };
@@ -283,10 +255,10 @@ const parseSaleBody = (body, authOutletId) => {
         }
       };
     }
-    const qty = Number(line.quantity);
+    const qty = roundQty(line.quantity, 0);
     const unitPrice = Number(line.unitPrice);
     const lineTotal = Number(line.lineTotal);
-    if (Number.isNaN(qty) || qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
+    if (qty <= 0 || Number.isNaN(unitPrice) || Number.isNaN(lineTotal)) {
       return {
         error: {
           status: 400,
@@ -409,6 +381,23 @@ const parseSaleBody = (body, authOutletId) => {
         }
       : {};
 
+  let paymentsDoc;
+  if (mode === 'Split') {
+    const parsedPayments = parseSplitPayments(body, totalNum);
+    if (parsedPayments.error) return parsedPayments;
+    paymentsDoc = parsedPayments.value;
+  } else if (Array.isArray(body.payments) && body.payments.length > 0) {
+    return {
+      error: {
+        status: 400,
+        json: {
+          success: false,
+          message: 'payments array is only allowed when paymentMode is Split'
+        }
+      }
+    };
+  }
+
   return {
     value: {
       normalizedItems,
@@ -416,6 +405,7 @@ const parseSaleBody = (body, authOutletId) => {
       discountDoc,
       totalNum,
       mode,
+      paymentsDoc,
       customerDoc
     }
   };
@@ -448,7 +438,7 @@ const serializeSale = (doc) => {
 /**
  * GET /sales
  * Query: limit (default 10, max 100), skip (default 0),
- *   optional paymentMode=Cash|Card|UPI|Due — e.g. Due returns only credit (due) sales.
+ *   optional paymentMode=Cash|Card|UPI|Due|Split — e.g. Due returns only credit (due) sales.
  */
 export const listSales = async (req, res) => {
   try {
@@ -534,10 +524,11 @@ export const getSaleById = async (req, res) => {
  *   subtotal (sum of line totals, pre-discount),
  *   discount? { type: "%" | "₹", value, amount },
  *   total (after discount),
- *   paymentMode: "Cash" | "Card" | "UPI" | "Due"
- * }
+ *   paymentMode: "Cash" | "Card" | "UPI" | "Due" | "Split"
+ *   payments?: [{ mode: "Cash" | "Card" | "UPI", amount: number }] — required when paymentMode is Split
  *
  * When paymentMode is Due: paymentStatus is stored as pending and collectedAt is null until PATCH collects.
+ * When paymentMode is Split: payments[] is stored and paymentStatus is collected.
  */
 export const createSale = async (req, res) => {
   try {
@@ -546,7 +537,8 @@ export const createSale = async (req, res) => {
     if (parsed.error) {
       return res.status(parsed.error.status).json(parsed.error.json);
     }
-    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, customerDoc } = parsed.value;
+    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, paymentsDoc, customerDoc } =
+      parsed.value;
 
     const paymentStatus = mode === 'Due' ? 'pending' : 'collected';
     const collectedAt = mode === 'Due' ? null : new Date();
@@ -564,6 +556,7 @@ export const createSale = async (req, res) => {
       ...(discountDoc ? { discount: discountDoc } : {}),
       total: totalNum,
       paymentMode: mode,
+      ...(paymentsDoc ? { payments: paymentsDoc } : {}),
       paymentStatus,
       collectedAt
     };
@@ -633,7 +626,7 @@ export const createSale = async (req, res) => {
  * Restores outlet product quantities from the previous lines, updates the sale, then applies new lines.
  *
  * Payment-only (collect a Due sale): omit items or send items: []. Body:
- *   { "paymentMode": "Cash" | "Card" | "UPI", "paymentStatus": "collected"? }
+ *   { "paymentMode": "Cash" | "Card" | "UPI" | "Split", "payments"?: [...], "paymentStatus": "collected"? }
  * Sets paymentStatus to collected and collectedAt to now when transitioning from credit.
  */
 export const updateSale = async (req, res) => {
@@ -673,7 +666,7 @@ export const updateSale = async (req, res) => {
         return res.status(400).json({
           success: false,
           message:
-            'For payment-only updates, paymentMode is required (Cash, Card, or UPI). To edit line items, include a non-empty items array.'
+            'For payment-only updates, paymentMode is required (Cash, Card, UPI, or Split). To edit line items, include a non-empty items array.'
         });
       }
       if (pm === 'Due') {
@@ -683,10 +676,10 @@ export const updateSale = async (req, res) => {
             'PATCH without items cannot set paymentMode to Due. Create a Due sale via POST or send a full body with items.'
         });
       }
-      if (!COLLECT_MODES.includes(pm)) {
+      if (!COLLECT_MODES.includes(pm) && pm !== 'Split') {
         return res.status(400).json({
           success: false,
-          message: 'paymentMode must be Cash, Card, or UPI when recording collected payment'
+          message: 'paymentMode must be Cash, Card, UPI, or Split when recording collected payment'
         });
       }
       const bodyPs = req.body.paymentStatus;
@@ -694,7 +687,7 @@ export const updateSale = async (req, res) => {
         return res.status(400).json({
           success: false,
           message:
-            'Cannot set paymentStatus to pending with Cash/Card/UPI. Use POST with paymentMode Due for credit sales.'
+            'Cannot set paymentStatus to pending with Cash/Card/UPI/Split. Use POST with paymentMode Due for credit sales.'
         });
       }
       if (bodyPs !== undefined && bodyPs !== 'collected') {
@@ -704,22 +697,39 @@ export const updateSale = async (req, res) => {
         });
       }
 
+      let paymentsDoc;
+      if (pm === 'Split') {
+        const parsedPayments = parseSplitPayments(req.body, roundMoney(saleDoc.total));
+        if (parsedPayments.error) {
+          return res.status(parsedPayments.error.status).json(parsedPayments.error.json);
+        }
+        paymentsDoc = parsedPayments.value;
+      } else if (Array.isArray(req.body.payments) && req.body.payments.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'payments array is only allowed when paymentMode is Split'
+        });
+      }
+
       const wasOpen =
         saleDoc.paymentMode === 'Due' || saleDoc.paymentStatus === 'pending';
       const now = new Date();
       const nextCollectedAt =
         wasOpen || saleDoc.collectedAt == null ? now : saleDoc.collectedAt;
 
-      await Sale.updateOne(
-        { _id: saleDoc._id },
-        {
-          $set: {
-            paymentMode: pm,
-            paymentStatus: 'collected',
-            collectedAt: nextCollectedAt
-          }
-        }
-      );
+      const paymentUpdate = {
+        paymentMode: pm,
+        paymentStatus: 'collected',
+        collectedAt: nextCollectedAt
+      };
+      const paymentMongoUpdate = { $set: paymentUpdate };
+      if (paymentsDoc) {
+        paymentUpdate.payments = paymentsDoc;
+      } else {
+        paymentMongoUpdate.$unset = { payments: '' };
+      }
+
+      await Sale.updateOne({ _id: saleDoc._id }, paymentMongoUpdate);
 
       const fresh = await Sale.findById(saleDoc._id).lean();
       const { _id, __v, ...rest } = fresh;
@@ -734,7 +744,8 @@ export const updateSale = async (req, res) => {
     if (parsed.error) {
       return res.status(parsed.error.status).json(parsed.error.json);
     }
-    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, customerDoc } = parsed.value;
+    const { normalizedItems, subtotalNum, discountDoc, totalNum, mode, paymentsDoc, customerDoc } =
+      parsed.value;
 
     const oldItems = saleDoc.items.map((line) => ({
       productId: line.productId,
@@ -766,9 +777,19 @@ export const updateSale = async (req, res) => {
     if (discountDoc) {
       setFields.discount = discountDoc;
     }
+    if (paymentsDoc) {
+      setFields.payments = paymentsDoc;
+    }
     const mongoUpdate = { $set: setFields };
+    const unsetFields = {};
     if (!discountDoc) {
-      mongoUpdate.$unset = { discount: '' };
+      unsetFields.discount = '';
+    }
+    if (!paymentsDoc) {
+      unsetFields.payments = '';
+    }
+    if (Object.keys(unsetFields).length > 0) {
+      mongoUpdate.$unset = unsetFields;
     }
 
     const conn = getPortalConnection();

@@ -138,12 +138,14 @@ export const login = async (req, res) => {
         userId: firestoreUserId,
         outletId: outletDocId,
         phoneNumber: userData.phoneNumber,
+        userProfile: userData.userProfile,
         name: responseName,
         outlet: {
           outletId: outletDocId,
           name: responseName,
           address: outletData.address || '',
-          primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || ''
+          primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || '',
+          gstNo: outletData.gstNo || outletData.gstNumber || outletData.gst || outletData.gstin || ''
         }
       }
     });
