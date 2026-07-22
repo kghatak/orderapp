@@ -57,6 +57,16 @@ const saleSchema = new mongoose.Schema({
   paymentStatus: { type: String, enum: ['pending', 'collected'], default: 'collected' },
   /** When paymentStatus became collected (null while pending on Due). */
   collectedAt: { type: Date, default: null },
+  /** Unguessable token for public bill view / PDF download links. */
+  billToken: { type: String, index: true, sparse: true },
+  /** Outlet header snapshot at sale time (for WhatsApp bill links). */
+  outletSnapshot: {
+    name: { type: String },
+    address: { type: String },
+    gstNo: { type: String }
+  },
+  /** Staff name shown on receipt (from POS session). */
+  cashierName: { type: String },
   createdAt: { type: Date, default: Date.now }
 });
 
