@@ -70,6 +70,9 @@ export const createSupplier = async (req, res) => {
       phone,
       village,
       address,
+      state,
+      pinCode,
+      gstNumber,
       milkType,
       bankAccountNo,
       bankName,
@@ -106,6 +109,9 @@ export const createSupplier = async (req, res) => {
       phone,
       village: village || '',
       address: address || '',
+      state: state || '',
+      pinCode: pinCode || '',
+      gstNumber: gstNumber ? String(gstNumber).toUpperCase() : '',
       milkType: resolvedMilkType,
       bankAccountNo: bankAccountNo || '',
       bankName: bankName || '',
@@ -138,6 +144,9 @@ export const updateSupplier = async (req, res) => {
       'phone',
       'village',
       'address',
+      'state',
+      'pinCode',
+      'gstNumber',
       'milkType',
       'bankAccountNo',
       'bankName',
@@ -150,6 +159,11 @@ export const updateSupplier = async (req, res) => {
     const toUpdate = {};
     for (const k of allowed) {
       if (updates[k] !== undefined) toUpdate[k] = updates[k];
+    }
+    if (toUpdate.gstNumber !== undefined) {
+      toUpdate.gstNumber = toUpdate.gstNumber
+        ? String(toUpdate.gstNumber).toUpperCase()
+        : '';
     }
     toUpdate.updatedAt = new Date();
 
