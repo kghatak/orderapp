@@ -306,6 +306,162 @@ function mergeReturnProductsAcrossDays(dayDocsData) {
   return mergeDailyProductDocuments(dayDocsData, 'totalReturns');
 }
 
+const escapeCsvCell = (value) => {
+  if (value == null) return '';
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+  return str;
+};
+
+const DELIVERY_PRODUCT_CSV_HEADERS = ['S.No', 'Product ID', 'Product Name', 'Total Quantity'];
+
+const buildProductQuantityCsvContent = (products, totals, countOptions = {}) => {
+  const countLabel = countOptions.countLabel ?? 'Total Orders';
+  const countValue = countOptions.countValue ?? totals?.totalOrders ?? totals?.totalReturns ?? '';
+
+  const lines = [DELIVERY_PRODUCT_CSV_HEADERS.map(escapeCsvCell).join(',')];
+  products.forEach((row, index) => {
+    lines.push([
+      index + 1,
+      row.productId,
+      row.name,
+      Number(row.totalQuantity ?? 0).toFixed(2),
+    ].map(escapeCsvCell).join(','));
+  });
+
+  if (totals) {
+    const totalQty = products.reduce((sum, row) => sum + (Number(row.totalQuantity) || 0), 0);
+    lines.push('');
+    lines.push(['', '', 'Total', totalQty.toFixed(2)].map(escapeCsvCell).join(','));
+    lines.push(['', '', countLabel, String(countValue)].map(escapeCsvCell).join(','));
+  }
+
+  return `\uFEFF${lines.join('\n')}`;
+};
+
+/**
+ * Load merged product snapshots for CSV export (single day or inclusive range).
+ */
+async function loadMergedProductSnapshotForExport(db, query, options) {
+  const {
+    collectionName,
+    mergeAcrossDays,
+    singleDayNotFoundMsg,
+    rangeNotFoundMsg,
+  } = options;
+  const date = firstQueryString(query.date);
+  const fromS = firstQueryString(query.from);
+  const toS = firstQueryString(query.to);
+  const hasFrom = fromS !== '';
+  const hasTo = toS !== '';
+
+  if (hasFrom || hasTo) {
+    if (!hasFrom || !hasTo) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: 'For a date range, both from and to are required (format: YYYY-MM-DD)',
+        },
+      };
+    }
+    if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'Invalid date format. Use YYYY-MM-DD for from and to' },
+      };
+    }
+    if (fromS > toS) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'from must be on or before to' },
+      };
+    }
+
+    const dayKeys = enumerateDateRangeInclusive(fromS, toS);
+    if (dayKeys.length > MAX_DELIVERY_QUERY_RANGE_DAYS) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: `Date range spans ${dayKeys.length} days; maximum allowed is ${MAX_DELIVERY_QUERY_RANGE_DAYS}`,
+        },
+      };
+    }
+
+    const snapshots = await Promise.all(
+      dayKeys.map((d) => db.collection(collectionName).doc(d).get()),
+    );
+    const foundDocsData = snapshots.filter((snap) => snap.exists).map((snap) => snap.data());
+    if (!foundDocsData.length) {
+      return {
+        ok: false,
+        status: 404,
+        body: {
+          success: false,
+          message: rangeNotFoundMsg(fromS, toS),
+        },
+      };
+    }
+
+    const { mergedProducts, totals } = mergeAcrossDays(foundDocsData);
+    return { ok: true, fromS, toS, mergedProducts, totals };
+  }
+
+  if (date) {
+    if (!YMD_DATE_REGEX.test(date)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: 'Invalid date format. Use YYYY-MM-DD' },
+      };
+    }
+
+    const doc = await db.collection(collectionName).doc(date).get();
+    if (!doc.exists) {
+      return {
+        ok: false,
+        status: 404,
+        body: { success: false, message: singleDayNotFoundMsg(date) },
+      };
+    }
+
+    const { mergedProducts, totals } = mergeAcrossDays([doc.data()]);
+    return { ok: true, fromS: date, toS: date, mergedProducts, totals };
+  }
+
+  return {
+    ok: false,
+    status: 400,
+    body: {
+      success: false,
+      error: 'Provide date=YYYY-MM-DD for a single day, or from=YYYY-MM-DD&to=YYYY-MM-DD for a range',
+    },
+  };
+}
+
+async function loadMergedDeliveryForExport(db, query) {
+  return loadMergedProductSnapshotForExport(db, query, {
+    collectionName: 'DailyProductDelivery',
+    mergeAcrossDays: mergeDeliveryProductsAcrossDays,
+    singleDayNotFoundMsg: (day) => `No product delivery record found for ${day}`,
+    rangeNotFoundMsg: (from, to) => `No DailyProductDelivery records in range ${from}–${to}`,
+  });
+}
+
+async function loadMergedReturnForExport(db, query) {
+  return loadMergedProductSnapshotForExport(db, query, {
+    collectionName: 'DailyProductReturn',
+    mergeAcrossDays: mergeReturnProductsAcrossDays,
+    singleDayNotFoundMsg: (day) => `No product return record found for ${day}`,
+    rangeNotFoundMsg: (from, to) => `No DailyProductReturn records in range ${from}–${to}`,
+  });
+}
+
 /**
  * List price is GST-inclusive. Discount % off list; tax split backed out from discounted inclusive total.
  * @param {boolean} interState — true: IGST only; false: CGST+SGST half each.
@@ -1453,6 +1609,39 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
 };
 
 /**
+ * GET /api/balance/daily-product-delivery/csv
+ *
+ * Single day: `?date=YYYY-MM-DD`
+ * Date range (inclusive): `?from=YYYY-MM-DD&to=YYYY-MM-DD`
+ * Returns merged product quantities as a CSV attachment (one DB read on the server).
+ */
+export const getDailyProductDeliveryCSV = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const result = await loadMergedDeliveryForExport(db, req.query);
+    if (!result.ok) return res.status(result.status).json(result.body);
+
+    const csv = buildProductQuantityCsvContent(result.mergedProducts, result.totals, {
+      countLabel: 'Total Orders',
+      countValue: result.totals?.totalOrders,
+    });
+    const filename = result.fromS === result.toS
+      ? `delivered-products-${result.fromS}.csv`
+      : `delivered-products-${result.fromS}-to-${result.toS}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csv);
+  } catch (error) {
+    console.error('❌ [Daily Product Delivery CSV] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
  * GET /api/balance/daily-product-return/xlsx
  *
  * Single day: `?date=…&…` — same columns/GST logic as delivery xlsx.
@@ -1476,6 +1665,38 @@ export const getDailyProductReturnXLSX = async (req, res) => {
     return res.status(200).send(Buffer.from(buf));
   } catch (error) {
     console.error('❌ [Daily Product Return XLSX] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/balance/daily-product-return/csv
+ *
+ * Single day: `?date=YYYY-MM-DD`
+ * Date range (inclusive): `?from=YYYY-MM-DD&to=YYYY-MM-DD`
+ */
+export const getDailyProductReturnCSV = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const result = await loadMergedReturnForExport(db, req.query);
+    if (!result.ok) return res.status(result.status).json(result.body);
+
+    const csv = buildProductQuantityCsvContent(result.mergedProducts, result.totals, {
+      countLabel: 'Total Returns',
+      countValue: result.totals?.totalReturns,
+    });
+    const filename = result.fromS === result.toS
+      ? `return-products-${result.fromS}.csv`
+      : `return-products-${result.fromS}-to-${result.toS}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csv);
+  } catch (error) {
+    console.error('❌ [Daily Product Return CSV] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
