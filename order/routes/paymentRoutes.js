@@ -17,6 +17,8 @@ import {
   cleanupOpeningBalancePayments,
   getPaymentsReport,
   recordCashPayment,
+  updatePaymentRecord,
+  deletePaymentRecord,
 } from '../controllers/paymentController.js';
 
 const router = express.Router();
@@ -42,6 +44,8 @@ router.get('/pending-outlets/:outletId', getPendingRequestsByOutlet); // GET /pa
 // Payment approval/rejection endpoints
 router.put('/request/:requestId/approve', approvePaymentRequest); // PUT /payments/request/:requestId/approve
 router.put('/request/:requestId/reject', rejectPaymentRequest); // PUT /payments/request/:requestId/reject
+router.put('/:id', updatePaymentRecord); // PUT /payments/:id
+router.delete('/:id', deletePaymentRecord); // DELETE /payments/:id
 
 // Outlet payment summary endpoints
 router.get('/outlet-summary/:outletId', getOutletPaymentSummary); // GET /payments/outlet-summary/:outletId
