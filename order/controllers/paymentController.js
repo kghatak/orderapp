@@ -612,6 +612,246 @@ export const recordCashPayment = async (req, res) => {
   }
 };
 
+const VALID_PAYMENT_MODES = ['Cash', 'Transfer by Bank', 'Cheque'];
+
+const recalculateOutletBalancesUpdate = (outletData, deltaPaid) => {
+  const totalAmount = outletData.totalAmount || 0;
+  const newPaidAmount = Math.max(0, (outletData.paidAmount || 0) + deltaPaid);
+  const newPendingAmount = Math.max(0, totalAmount - newPaidAmount);
+  return {
+    paidAmount: newPaidAmount,
+    pendingAmount: newPendingAmount,
+    paymentStatus: newPendingAmount === 0 ? 'paid' : newPaidAmount > 0 ? 'partial' : 'pending',
+  };
+};
+
+// Update an approved payment or a pending payment request
+export const updatePaymentRecord = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      amount,
+      paymentMode,
+      paymentDate,
+      remarks,
+      receivedAmount,
+      updatedBy = 'admin',
+    } = req.body;
+    const db = getFirestoreDB();
+
+    const paymentRef = db.collection('payments').doc(id);
+    const paymentDoc = await paymentRef.get();
+
+    if (paymentDoc.exists) {
+      const existing = paymentDoc.data();
+      if (existing.paymentType === 'opening_balance') {
+        return res.status(400).json({ error: 'Cannot edit opening balance payment' });
+      }
+      if (existing.status !== 'approved') {
+        return res.status(400).json({ error: 'Only approved payments can be edited' });
+      }
+
+      const oldAmount = Number(existing.receivedAmount ?? existing.amount) || 0;
+      const newAmount = amount !== undefined
+        ? parseFloat(amount)
+        : (receivedAmount !== undefined ? parseFloat(receivedAmount) : oldAmount);
+
+      if (Number.isNaN(newAmount) || newAmount <= 0) {
+        return res.status(400).json({ error: 'A valid amount greater than 0 is required' });
+      }
+
+      const newPaymentMode = paymentMode || existing.paymentMode;
+      if (paymentMode && !VALID_PAYMENT_MODES.includes(paymentMode)) {
+        return res.status(400).json({
+          error: `Invalid paymentMode. Must be one of: ${VALID_PAYMENT_MODES.join(', ')}`,
+        });
+      }
+
+      let newPaymentDateTs = existing.paymentDate;
+      if (paymentDate) {
+        const parsed = new Date(paymentDate);
+        if (Number.isNaN(parsed.getTime())) {
+          return res.status(400).json({ error: 'Invalid paymentDate provided' });
+        }
+        newPaymentDateTs = admin.firestore.Timestamp.fromDate(parsed);
+      }
+
+      const outletPaymentRef = db.collection('outlet_payments').doc(existing.outletId);
+      const delta = newAmount - oldAmount;
+      const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+
+      await db.runTransaction(async (transaction) => {
+        const outletSnap = await transaction.get(outletPaymentRef);
+        if (!outletSnap.exists) {
+          throw new Error('Outlet payment record not found for this outlet');
+        }
+
+        const balanceUpdate = recalculateOutletBalancesUpdate(outletSnap.data(), delta);
+        transaction.update(outletPaymentRef, {
+          ...balanceUpdate,
+          lastUpdated: serverTimestamp,
+        });
+
+        transaction.update(paymentRef, {
+          amount: newAmount,
+          receivedAmount: newAmount,
+          paymentMode: newPaymentMode,
+          paymentDate: newPaymentDateTs,
+          remarks: remarks !== undefined ? (remarks || null) : (existing.remarks ?? null),
+          updatedBy,
+          updatedAt: serverTimestamp,
+        });
+      });
+
+      const requestRef = db.collection('payment_requests').doc(id);
+      const requestDoc = await requestRef.get();
+      if (requestDoc.exists) {
+        await requestRef.update({
+          amount: newAmount,
+          paymentMode: newPaymentMode,
+          remarks: remarks !== undefined ? (remarks || '') : (requestDoc.data().remarks || ''),
+          paymentDate: newPaymentDateTs,
+        });
+      }
+
+      return res.status(200).json({
+        message: 'Payment updated successfully',
+        id,
+        amount: newAmount,
+      });
+    }
+
+    const requestRef = db.collection('payment_requests').doc(id);
+    const requestDoc = await requestRef.get();
+    if (!requestDoc.exists) {
+      return res.status(404).json({ error: 'Payment record not found' });
+    }
+
+    const requestData = requestDoc.data();
+    if (requestData.status !== 'pending') {
+      return res.status(400).json({ error: 'Only pending payment requests can be edited here' });
+    }
+
+    const updates = {};
+    if (amount !== undefined) {
+      const newAmount = parseFloat(amount);
+      if (Number.isNaN(newAmount) || newAmount <= 0) {
+        return res.status(400).json({ error: 'A valid amount greater than 0 is required' });
+      }
+      updates.amount = newAmount;
+    }
+    if (paymentMode) {
+      if (!VALID_PAYMENT_MODES.includes(paymentMode)) {
+        return res.status(400).json({
+          error: `Invalid paymentMode. Must be one of: ${VALID_PAYMENT_MODES.join(', ')}`,
+        });
+      }
+      updates.paymentMode = paymentMode;
+    }
+    if (remarks !== undefined) {
+      updates.remarks = remarks || '';
+    }
+    if (paymentDate) {
+      const parsed = new Date(paymentDate);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: 'Invalid paymentDate provided' });
+      }
+      updates.paymentDate = admin.firestore.Timestamp.fromDate(parsed);
+    }
+    updates.updatedBy = updatedBy;
+    updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+    await requestRef.update(updates);
+
+    return res.status(200).json({
+      message: 'Payment request updated successfully',
+      id,
+    });
+  } catch (err) {
+    console.error('Update payment record error:', err);
+    if (err.message?.includes('not found')) {
+      return res.status(400).json({ error: err.message });
+    }
+    res.status(500).json({ error: 'Failed to update payment record' });
+  }
+};
+
+// Delete an approved payment or a pending payment request
+export const deletePaymentRecord = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = getFirestoreDB();
+
+    const paymentRef = db.collection('payments').doc(id);
+    const paymentDoc = await paymentRef.get();
+
+    if (paymentDoc.exists) {
+      const existing = paymentDoc.data();
+      if (existing.paymentType === 'opening_balance') {
+        return res.status(400).json({ error: 'Cannot delete opening balance payment' });
+      }
+      if (existing.status !== 'approved') {
+        return res.status(400).json({ error: 'Only approved payments can be deleted' });
+      }
+
+      const oldAmount = Number(existing.receivedAmount ?? existing.amount) || 0;
+      const outletPaymentRef = db.collection('outlet_payments').doc(existing.outletId);
+      const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+
+      await db.runTransaction(async (transaction) => {
+        const outletSnap = await transaction.get(outletPaymentRef);
+        if (!outletSnap.exists) {
+          throw new Error('Outlet payment record not found for this outlet');
+        }
+
+        const balanceUpdate = recalculateOutletBalancesUpdate(outletSnap.data(), -oldAmount);
+        transaction.update(outletPaymentRef, {
+          ...balanceUpdate,
+          lastUpdated: serverTimestamp,
+        });
+        transaction.delete(paymentRef);
+      });
+
+      const requestRef = db.collection('payment_requests').doc(id);
+      const requestDoc = await requestRef.get();
+      if (requestDoc.exists) {
+        await requestRef.delete();
+      }
+
+      return res.status(200).json({
+        message: 'Payment deleted successfully',
+        id,
+      });
+    }
+
+    const requestRef = db.collection('payment_requests').doc(id);
+    const requestDoc = await requestRef.get();
+    if (!requestDoc.exists) {
+      return res.status(404).json({ error: 'Payment record not found' });
+    }
+
+    const requestData = requestDoc.data();
+    if (requestData.status !== 'pending') {
+      return res.status(400).json({
+        error: 'Processed payment requests cannot be deleted from here',
+      });
+    }
+
+    await requestRef.delete();
+
+    return res.status(200).json({
+      message: 'Payment request deleted successfully',
+      id,
+    });
+  } catch (err) {
+    console.error('Delete payment record error:', err);
+    if (err.message?.includes('not found')) {
+      return res.status(400).json({ error: err.message });
+    }
+    res.status(500).json({ error: 'Failed to delete payment record' });
+  }
+};
+
 
 // Reject Payment Request
 export const rejectPaymentRequest = async (req, res) => {
