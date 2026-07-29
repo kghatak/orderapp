@@ -6,6 +6,9 @@ import { getFirestoreDB } from '../../util/firebase.js';
 const JWT_SECRET = process.env.JWT_SECRET || 'milk-procurement-secret';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '7d';
 
+/** Order app profiles allowed to use milk procurement (Admin + StoreKeeper). */
+const MILK_ELIGIBLE_ORDER_PROFILES = ['Admin', 'StoreKeeper'];
+
 // Admin users come from Order app (Firestore). Only suppliers sign up here.
 export const signup = async (req, res) => {
   try {
@@ -99,8 +102,8 @@ export const login = async (req, res) => {
     // 1. Try MilkUser first
     let user = await MilkUser.findOne({ tenantId, phone });
     if (!user) {
-      // 2. Fallback: check Order app Admin (Firestore)
-      const orderAdmin = await validateOrderAdmin(phone, password);
+      // 2. Fallback: check Order app Admin / StoreKeeper (Firestore)
+      const orderAdmin = await validateOrderMilkUser(phone, password);
       if (orderAdmin) {
         user = await getOrCreateMilkAdmin(tenantId, orderAdmin);
       }
@@ -115,7 +118,7 @@ export const login = async (req, res) => {
 
     // Password check: suppliers use MilkUser; admin always validates against Order app
     if (user.role === 'admin') {
-      const orderAdmin = await validateOrderAdmin(phone, password);
+      const orderAdmin = await validateOrderMilkUser(phone, password);
       if (!orderAdmin) {
         return res.status(401).json({
           success: false,
@@ -168,8 +171,8 @@ export const login = async (req, res) => {
   }
 };
 
-/** Validate Order app Admin from Firestore. Returns admin data or null. */
-async function validateOrderAdmin(phone, password) {
+/** Validate Order app Admin / StoreKeeper from Firestore. Returns user data or null. */
+async function validateOrderMilkUser(phone, password) {
   try {
     const db = getFirestoreDB();
     // Single-field query (same as /auth/login) — avoids Firestore composite index on phoneNumber + userProfile
@@ -180,26 +183,32 @@ async function validateOrderAdmin(phone, password) {
     if (snapshot.empty) return null;
     const doc = snapshot.docs[0];
     const data = doc.data();
-    if (data.userProfile !== 'Admin') return null;
+    if (!MILK_ELIGIBLE_ORDER_PROFILES.includes(data.userProfile)) return null;
     if (data.password !== password) return null;
-    return { userId: doc.id, name: data.userId || data.name || 'Admin', phone: data.phoneNumber };
+    const defaultName = data.userProfile === 'StoreKeeper' ? 'StoreKeeper' : 'Admin';
+    return {
+      userId: doc.id,
+      name: data.userId || data.name || defaultName,
+      phone: data.phoneNumber,
+      userProfile: data.userProfile
+    };
   } catch (err) {
-    console.error('Order admin validation error:', err);
+    console.error('Order milk user validation error:', err);
     return null;
   }
 }
 
-/** Get or create MilkUser with admin role for Order app admin. */
-async function getOrCreateMilkAdmin(tenantId, orderAdmin) {
-  let user = await MilkUser.findOne({ tenantId, phone: orderAdmin.phone });
+/** Get or create MilkUser with admin role for Order app Admin / StoreKeeper. */
+async function getOrCreateMilkAdmin(tenantId, orderUser) {
+  let user = await MilkUser.findOne({ tenantId, phone: orderUser.phone });
   if (!user) {
     user = new MilkUser({
       tenantId,
       role: 'admin',
-      name: orderAdmin.name || 'Admin',
-      phone: orderAdmin.phone,
+      name: orderUser.name || 'Admin',
+      phone: orderUser.phone,
       email: '',
-      password: 'order-admin' // Placeholder; admin always validated via Order app
+      password: 'order-admin' // Placeholder; always validated via Order app
     });
     await user.save();
   }
@@ -207,12 +216,12 @@ async function getOrCreateMilkAdmin(tenantId, orderAdmin) {
 }
 
 /**
- * Get milk JWT for Order app Admin. Used when Order login includes tenantId.
+ * Get milk JWT for Order app Admin / StoreKeeper. Used when Order login includes tenantId.
  * Returns { token, tenantId, expiresIn } or null.
  */
 export async function getMilkTokenForOrderAdmin(tenantId, phone, password) {
   try {
-    const orderAdmin = await validateOrderAdmin(phone, password);
+    const orderAdmin = await validateOrderMilkUser(phone, password);
     if (!orderAdmin) return null;
     const user = await getOrCreateMilkAdmin(tenantId, orderAdmin);
     const token = jwt.sign(

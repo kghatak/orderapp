@@ -222,10 +222,11 @@ export const login = async (req, res) => {
       updatedAt: userData.updatedAt
     };
 
-    // If Admin and tenantId provided, include milk JWT (requires MongoDB + MilkUser)
-    if (userData.userProfile === 'Admin' && tenantId) {
+    // If Admin or StoreKeeper and tenantId provided, include milk JWT (requires MongoDB + MilkUser)
+    const milkEligibleProfiles = ['Admin', 'StoreKeeper'];
+    if (milkEligibleProfiles.includes(userData.userProfile) && tenantId) {
       if (!isMongoConnected()) {
-        console.warn('Admin login: milkToken skipped — MongoDB not connected (set MONGODB_URI).');
+        console.warn('Login: milkToken skipped — MongoDB not connected (set MONGODB_URI).');
       } else {
         try {
           const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
@@ -235,7 +236,7 @@ export const login = async (req, res) => {
             responseData.milkTokenExpiresIn = milkAuth.expiresIn;
           }
         } catch (err) {
-          console.error('Admin login: milk token failed (login still OK):', err.message);
+          console.error('Login: milk token failed (login still OK):', err.message);
         }
       }
     }

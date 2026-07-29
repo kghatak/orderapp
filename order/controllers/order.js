@@ -2,6 +2,7 @@
 import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
 import { getFirestoreDB } from '../../util/firebase.js';
+import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { isOutletPortalMongoConnected } from '../../outlet-portal/config/portalDb.js';
 import { getOutletProductsModel } from '../../outlet-portal/models/OutletProducts.js';
@@ -1606,9 +1607,8 @@ export const getOrdersReport = async (req, res) => {
       });
     }
 
-    // Convert dates to Firestore timestamps
-    const startTimestamp = admin.firestore.Timestamp.fromDate(new Date(startDate + 'T00:00:00.000Z'));
-    const endTimestamp = admin.firestore.Timestamp.fromDate(new Date(endDate + 'T23:59:59.999Z'));
+    // IST calendar day boundaries (matches opening/closing balance and ledger UI)
+    const { startTimestamp, endTimestamp } = getIstReportRangeTimestamps(startDate, endDate);
 
     // Build query - only include delivered orders filtered by deliveredDate
     let query = db.collection('orders')

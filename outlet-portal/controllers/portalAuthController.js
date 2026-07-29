@@ -138,6 +138,7 @@ export const login = async (req, res) => {
         userId: firestoreUserId,
         outletId: outletDocId,
         phoneNumber: userData.phoneNumber,
+        userProfile: userData.userProfile,
         name: responseName,
         outlet: {
           outletId: outletDocId,

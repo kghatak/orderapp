@@ -11,6 +11,11 @@ const MILK_TYPE_LABELS = {
   mixed: 'Mixed'
 };
 
+const SHIFT_LABELS = {
+  morning: 'Morning',
+  evening: 'Evening'
+};
+
 const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
   const entry = line || procurement;
   const milkType = line ? line.milkType : procurement.milkType;
@@ -20,6 +25,7 @@ const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
   return {
     supplier_name: supplier.name,
     milk_type: MILK_TYPE_LABELS[milkType] || milkType,
+    shift: SHIFT_LABELS[procurement.shift] || procurement.shift,
     date: new Date(procurement.date).toLocaleDateString('en-IN'),
     quantity: String(quantity),
     fat_percentage: String(entry.fat ?? 0),
@@ -192,7 +198,7 @@ const validateMixedLines = (lines) => {
 export const listProcurements = async (req, res) => {
   try {
     const { tenantId, user } = req;
-    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift } = req.query;
+    const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift, milkType } = req.query;
 
     const filter = { tenantId };
     if (user.role === 'supplier') {
@@ -205,6 +211,15 @@ export const listProcurements = async (req, res) => {
     if (toDate) filter.date = { ...filter.date, $lte: new Date(toDate) };
     if (paymentStatus) filter.paymentStatus = paymentStatus;
     if (shift) filter.shift = shift;
+    if (milkType) {
+      if (!MILK_TYPES.includes(milkType)) {
+        return res.status(400).json({
+          success: false,
+          message: "milkType must be 'cow', 'buffalo', or 'mixed'"
+        });
+      }
+      filter.milkType = milkType;
+    }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [procurements, total] = await Promise.all([
