@@ -10,7 +10,7 @@ import {
 } from '../services/dashboardSnapshotService.js';
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const MAX_RANGE_DAYS = 7;
+const MAX_RANGE_DAYS = 15;
 
 const countInclusiveDays = (startDate, endDate) => {
   const { start } = getIstDayBounds(startDate);
