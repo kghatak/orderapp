@@ -2,6 +2,17 @@ import { Supplier } from '../models/Supplier.js';
 import { Procurement } from '../models/Procurement.js';
 import { MilkPayment } from '../models/MilkPayment.js';
 
+const TDS_NATURE_VALUES = ['not_applicable', 'purchased_of_goods_194q'];
+
+const normalizeTdsNature = (value) => {
+  if (value == null || String(value).trim() === '') return 'not_applicable';
+  const normalized = String(value).trim();
+  if (!TDS_NATURE_VALUES.includes(normalized)) {
+    return null;
+  }
+  return normalized;
+};
+
 export const listSuppliers = async (req, res) => {
   try {
     const { tenantId } = req;
@@ -73,6 +84,7 @@ export const createSupplier = async (req, res) => {
       state,
       pinCode,
       gstNumber,
+      tdsNature,
       milkType,
       bankAccountNo,
       bankName,
@@ -102,6 +114,14 @@ export const createSupplier = async (req, res) => {
       resolvedBuffaloRate = resolvedRatePerFat;
     }
 
+    const resolvedTdsNature = normalizeTdsNature(tdsNature);
+    if (tdsNature !== undefined && tdsNature !== null && String(tdsNature).trim() !== '' && !resolvedTdsNature) {
+      return res.status(400).json({
+        success: false,
+        message: "tdsNature must be 'not_applicable' or 'purchased_of_goods_194q'",
+      });
+    }
+
     const supplier = new Supplier({
       tenantId,
       supplierCode,
@@ -112,6 +132,7 @@ export const createSupplier = async (req, res) => {
       state: state || '',
       pinCode: pinCode || '',
       gstNumber: gstNumber ? String(gstNumber).toUpperCase() : '',
+      tdsNature: resolvedTdsNature ?? 'not_applicable',
       milkType: resolvedMilkType,
       bankAccountNo: bankAccountNo || '',
       bankName: bankName || '',
@@ -147,6 +168,7 @@ export const updateSupplier = async (req, res) => {
       'state',
       'pinCode',
       'gstNumber',
+      'tdsNature',
       'milkType',
       'bankAccountNo',
       'bankName',
@@ -164,6 +186,16 @@ export const updateSupplier = async (req, res) => {
       toUpdate.gstNumber = toUpdate.gstNumber
         ? String(toUpdate.gstNumber).toUpperCase()
         : '';
+    }
+    if (toUpdate.tdsNature !== undefined) {
+      const resolvedTdsNature = normalizeTdsNature(toUpdate.tdsNature);
+      if (!resolvedTdsNature) {
+        return res.status(400).json({
+          success: false,
+          message: "tdsNature must be 'not_applicable' or 'purchased_of_goods_194q'",
+        });
+      }
+      toUpdate.tdsNature = resolvedTdsNature;
     }
     toUpdate.updatedAt = new Date();
 

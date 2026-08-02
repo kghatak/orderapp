@@ -13,6 +13,7 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
   'Pin Code',
   'Registration Type',
   'Registration Number',
+  'TDS Nature',
   'Item Name',
   'Billed Quantity',
   'Item Rate',
@@ -59,6 +60,62 @@ const formatVoucherDate = (dateValue) => {
 
 const itemLabel = (milkType) =>
   milkType === 'buffalo' ? 'Buffalo Milk' : 'Cow Milk';
+
+const formatFatForNarration = (fat) => {
+  if (fat == null || fat === '') return '';
+  return String(fat).trim();
+};
+
+const formatMeterForNarration = (fatMeterReading) => {
+  if (fatMeterReading == null || fatMeterReading === '') return '';
+  return String(fatMeterReading).trim();
+};
+
+const resolveNarrationMetrics = (procurement) => {
+  if (
+    procurement.milkType === 'mixed'
+    && Array.isArray(procurement.lines)
+    && procurement.lines.length > 0
+  ) {
+    const active = procurement.lines.filter((line) => (Number(line.quantity) || 0) > 0);
+    if (active.length === 1) {
+      return {
+        fat: active[0].fat,
+        fatMeterReading: active[0].fatMeterReading,
+      };
+    }
+    const meterLine = active.find(
+      (line) => line.fatMeterReading != null && line.fatMeterReading !== '',
+    );
+    return {
+      fat: procurement.fat,
+      fatMeterReading: meterLine?.fatMeterReading ?? procurement.fatMeterReading,
+    };
+  }
+
+  return {
+    fat: procurement.fat,
+    fatMeterReading: procurement.fatMeterReading,
+  };
+};
+
+const buildProcurementNarration = (procurement, supplierName) => {
+  const shiftLabel = procurement.shift === 'evening' ? 'Evening' : 'Morning';
+  let text = `Milk purchase from ${supplierName || 'supplier'} - ${shiftLabel} shift`;
+
+  const { fat, fatMeterReading } = resolveNarrationMetrics(procurement);
+  const fatLabel = formatFatForNarration(fat);
+  if (fatLabel !== '') {
+    text += ` Fat =${fatLabel}`;
+  }
+
+  const meterLabel = formatMeterForNarration(fatMeterReading);
+  if (meterLabel !== '') {
+    text += ` Metar ${meterLabel}`;
+  }
+
+  return text;
+};
 
 const getExportLines = (procurement) => {
   if (
@@ -239,7 +296,7 @@ const buildMilkTallyExportRows = async (req) => {
       ? procurement.supplierId
       : {};
     const gstNo = supplier.gstNumber ? String(supplier.gstNumber).trim() : '';
-    const registrationType = gstNo ? 'Registered' : 'Unregistered/Consumer';
+    const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
     const registrationNumber = gstNo || '';
     const address = supplier.address != null ? String(supplier.address).trim() : '';
     const state = supplier.state != null ? String(supplier.state).trim() : '';
@@ -250,8 +307,7 @@ const buildMilkTallyExportRows = async (req) => {
     const voucherNumber = startVoucherNumber + voucherOffset;
     voucherOffset += 1;
     const voucherDate = formatVoucherDate(procurement.date);
-    const shiftLabel = procurement.shift === 'evening' ? 'Evening' : 'Morning';
-    const narration = `Milk purchase from ${supplierName || 'supplier'} - ${shiftLabel} shift`;
+    const narration = buildProcurementNarration(procurement, supplierName);
 
     const lines = getExportLines(procurement);
     let isFirstRowOfGroup = true;
@@ -270,6 +326,8 @@ const buildMilkTallyExportRows = async (req) => {
       const rowPinCode = isFirstRowOfGroup && pinCodeRaw !== '' && /^\d+$/.test(pinCodeRaw)
         ? Number(pinCodeRaw)
         : (isFirstRowOfGroup ? pinCodeRaw : '');
+      const rowRegistrationType = isFirstRowOfGroup ? registrationType : '';
+      const rowRegistrationNumber = isFirstRowOfGroup ? registrationNumber : '';
       const rowNarration = isFirstRowOfGroup ? narration : '';
       isFirstRowOfGroup = false;
 
@@ -280,8 +338,9 @@ const buildMilkTallyExportRows = async (req) => {
         rowAddress,
         state,
         rowPinCode,
-        registrationType,
-        registrationNumber,
+        rowRegistrationType,
+        rowRegistrationNumber,
+        '',
         line.itemName,
         roundMoney2(line.quantity),
         line.rate,
