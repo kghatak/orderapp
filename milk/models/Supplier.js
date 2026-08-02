@@ -11,6 +11,11 @@ const supplierSchema = new mongoose.Schema({
   state: { type: String, default: '' },
   pinCode: { type: String, default: '' },
   gstNumber: { type: String, default: '' },
+  tdsNature: {
+    type: String,
+    enum: ['not_applicable', 'purchased_of_goods_194q'],
+    default: 'not_applicable',
+  },
   milkType: { type: String, enum: ['cow', 'buffalo', 'mixed'], default: 'cow' },
   bankAccountNo: { type: String, default: '' },
   bankName: { type: String, default: '' },
