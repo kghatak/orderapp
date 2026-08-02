@@ -1,8 +1,14 @@
 import express from 'express';
-import { getDashboard } from '../controllers/dashboardController.js';
+import {
+  createDashboardSnapshot,
+  getDashboard,
+  listDashboardSnapshotDates,
+} from '../controllers/dashboardController.js';
 
 const router = express.Router();
 
 router.get('/', getDashboard);
+router.get('/snapshots', listDashboardSnapshotDates);
+router.post('/snapshot', createDashboardSnapshot);
 
 export default router;

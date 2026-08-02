@@ -26,6 +26,7 @@ import expensesRoutes from './outlet-portal/routes/expensesRoutes.js';
 import outletProductsRoutes from './outlet-portal/routes/outletProductsRoutes.js';
 import wastageRoutes from './outlet-portal/routes/wastageRoutes.js';
 import dashboardRoutes from './outlet-portal/routes/dashboardRoutes.js';
+import { startDashboardSnapshotCron } from './outlet-portal/jobs/dashboardSnapshotCron.js';
 import chatRoutes from './order/routes/chatRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
@@ -230,3 +231,4 @@ const startServer = () => {
 };
 
 startServer();
+startDashboardSnapshotCron();
