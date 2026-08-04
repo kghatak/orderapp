@@ -86,8 +86,8 @@ const validateMixedLineRates = (supplier, lines) => {
   return null;
 };
 
-/** Flat ₹ deduction when fat meter reading is below 28 (e.g. 27→₹1, 26→₹2). */
-const fatMeterDeduction = (fatMeterReading, { ignoreZero = false } = {}) => {
+/** Per-kg ₹ deduction when fat meter reading is below 28 (e.g. 27→₹1/kg, 26→₹2/kg). */
+const fatMeterDeductionPerKg = (fatMeterReading, { ignoreZero = false } = {}) => {
   if (fatMeterReading == null || fatMeterReading === '') return 0;
   const reading = Number(fatMeterReading);
   if (ignoreZero && reading === 0) return 0;
@@ -97,10 +97,12 @@ const fatMeterDeduction = (fatMeterReading, { ignoreZero = false } = {}) => {
   return 0;
 };
 
-/** gross = qty × fat × ratePerFat; total = gross − fat-meter deduction */
+/** gross = qty × fat × ratePerFat; total = gross − (qty × per-kg fat-meter deduction) */
 const computeProcurementAmount = (quantity, fat, ratePerFat, fatMeterReading, options = {}) => {
-  const gross = (quantity || 0) * (fat || 0) * (ratePerFat || 0);
-  const deduction = fatMeterDeduction(fatMeterReading, options);
+  const qty = quantity || 0;
+  const gross = qty * (fat || 0) * (ratePerFat || 0);
+  const deductionPerKg = fatMeterDeductionPerKg(fatMeterReading, options);
+  const deduction = deductionPerKg * qty;
   const amount = Math.max(0, gross - deduction);
   return { gross, deduction, amount };
 };
