@@ -61,55 +61,30 @@ const formatVoucherDate = (dateValue) => {
 const itemLabel = (milkType) =>
   milkType === 'buffalo' ? 'Buffalo Milk' : 'Cow Milk';
 
-const formatFatForNarration = (fat) => {
-  if (fat == null || fat === '') return '';
-  return String(fat).trim();
+const formatMetricForNarration = (value) => {
+  if (value == null || value === '') return '';
+  return String(value).trim();
 };
 
-const formatMeterForNarration = (fatMeterReading) => {
-  if (fatMeterReading == null || fatMeterReading === '') return '';
-  return String(fatMeterReading).trim();
-};
-
-const resolveNarrationMetrics = (procurement) => {
-  if (
-    procurement.milkType === 'mixed'
-    && Array.isArray(procurement.lines)
-    && procurement.lines.length > 0
-  ) {
-    const active = procurement.lines.filter((line) => (Number(line.quantity) || 0) > 0);
-    if (active.length === 1) {
-      return {
-        fat: active[0].fat,
-        fatMeterReading: active[0].fatMeterReading,
-      };
-    }
-    const meterLine = active.find(
-      (line) => line.fatMeterReading != null && line.fatMeterReading !== '',
-    );
-    return {
-      fat: procurement.fat,
-      fatMeterReading: meterLine?.fatMeterReading ?? procurement.fatMeterReading,
-    };
-  }
-
-  return {
-    fat: procurement.fat,
-    fatMeterReading: procurement.fatMeterReading,
-  };
-};
-
-const buildProcurementNarration = (procurement, supplierName) => {
+const buildLineNarration = (procurement, supplierName, lineMetrics = null) => {
   const shiftLabel = procurement.shift === 'evening' ? 'Evening' : 'Morning';
   let text = `Milk purchase from ${supplierName || 'supplier'} - ${shiftLabel} shift`;
 
-  const { fat, fatMeterReading } = resolveNarrationMetrics(procurement);
-  const fatLabel = formatFatForNarration(fat);
+  const fat = lineMetrics?.fat ?? procurement.fat;
+  const snf = lineMetrics?.snf ?? procurement.snf;
+  const fatMeterReading = lineMetrics?.fatMeterReading ?? procurement.fatMeterReading;
+
+  const fatLabel = formatMetricForNarration(fat);
   if (fatLabel !== '') {
     text += ` Fat =${fatLabel}`;
   }
 
-  const meterLabel = formatMeterForNarration(fatMeterReading);
+  const snfLabel = formatMetricForNarration(snf);
+  if (snfLabel !== '' && snfLabel !== '0') {
+    text += ` SNF ${snfLabel}`;
+  }
+
+  const meterLabel = formatMetricForNarration(fatMeterReading);
   if (meterLabel !== '') {
     text += ` Metar ${meterLabel}`;
   }
@@ -133,6 +108,9 @@ const getExportLines = (procurement) => {
           quantity,
           amount,
           rate: quantity > 0 ? roundMoney2(amount / quantity) : 0,
+          fat: line.fat,
+          snf: line.snf,
+          fatMeterReading: line.fatMeterReading,
         };
       });
   }
@@ -144,6 +122,9 @@ const getExportLines = (procurement) => {
     quantity,
     amount,
     rate: quantity > 0 ? roundMoney2(amount / quantity) : 0,
+    fat: procurement.fat,
+    snf: procurement.snf,
+    fatMeterReading: procurement.fatMeterReading,
   }];
 };
 
@@ -307,7 +288,6 @@ const buildMilkTallyExportRows = async (req) => {
     const voucherNumber = startVoucherNumber + voucherOffset;
     voucherOffset += 1;
     const voucherDate = formatVoucherDate(procurement.date);
-    const narration = buildProcurementNarration(procurement, supplierName);
 
     const lines = getExportLines(procurement);
     let isFirstRowOfGroup = true;
@@ -328,7 +308,11 @@ const buildMilkTallyExportRows = async (req) => {
         : (isFirstRowOfGroup ? pinCodeRaw : '');
       const rowRegistrationType = isFirstRowOfGroup ? registrationType : '';
       const rowRegistrationNumber = isFirstRowOfGroup ? registrationNumber : '';
-      const rowNarration = isFirstRowOfGroup ? narration : '';
+      const rowNarration = buildLineNarration(procurement, supplierName, {
+        fat: line.fat,
+        snf: line.snf,
+        fatMeterReading: line.fatMeterReading,
+      });
       isFirstRowOfGroup = false;
 
       rows.push([
