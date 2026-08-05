@@ -22,11 +22,26 @@ const getNextOrderId = async (db) => {
   return `ORD-${newCounter.toString().padStart(8, '0')}`;
 };
 
+// HSN/SAC code mapping — keep in sync with iOrder FirestoreService.hsnCodeMapping
+const HSN_CODE_BY_ICON = {
+  milk: '0401',
+  sweet: '17049090',
+  ghee: '04059020',
+  sweet_box: '21069099',
+  namkeen: '19041090',
+};
+
+const getHsnCodeFromIcon = (icon) => {
+  if (!icon || typeof icon !== 'string') {
+    return '--';
+  }
+  return HSN_CODE_BY_ICON[icon.toLowerCase()] ?? '--';
+};
 
 // Helper function to build a plain order data object from the request
 const buildOrderData = async (req, res) => {
   const db = getFirestoreDB();
-  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate } = req.body; // items: [{ productId, quantity, discountPercentage }]
+  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion } = req.body; // items: [{ productId, quantity, discountPercentage }]
 
   if (!outletId || !items || !Array.isArray(items) || items.length === 0) {
     res.status(400).json({ error: 'Invalid request body: outletId and items array are required.' });
@@ -73,6 +88,8 @@ const buildOrderData = async (req, res) => {
       gst: product.gst || 0,
       discountPercentage: discountPercentage,
       discountAmount: discountAmount,
+      hsn_sac_code: itemData.hsn_sac_code || product.hsn_sac_code || getHsnCodeFromIcon(product.icon),
+      type: product.type || itemData.type || 'Non-Returnable',
     });
 
     totalAmount += (itemSubtotal - discountAmount);
@@ -87,13 +104,16 @@ const buildOrderData = async (req, res) => {
     'total amount': totalAmount,
     paidAmount: 0.0,
     pendingAmount: totalAmount,
+    totalPaymentAmount: totalAmount,
     status: 'pending',
     paymentStatus: 'pending',
+    'payment status': 'pending',
     'delivery address': deliveryAddress || outlet.address || '',
     vehicleNumber: vehicleNumber ? vehicleNumber.trim() : '',
     invoiceDate: invoiceDate ? admin.firestore.Timestamp.fromDate(new Date(invoiceDate)) : null,
     utensilsUsed: [],
     paymentId: '',
+    appVersion: appVersion || '2.0.7',
   };
 
   return orderData;
@@ -108,7 +128,7 @@ export const createOrder = async (req, res) => {
       return; // Error response was already sent
     }
 
-    // Generate a new unique order ID
+    // Generate a new unique order ID and use it as the document ID (matches mobile app)
     const parentOrderId = await getNextOrderId(db);
     orderData['parent orderId'] = parentOrderId;
     
@@ -116,7 +136,8 @@ export const createOrder = async (req, res) => {
     orderData['Created at'] = admin.firestore.FieldValue.serverTimestamp();
     orderData['updatedAt'] = admin.firestore.FieldValue.serverTimestamp();
 
-    const orderRef = await db.collection('orders').add(orderData);
+    const orderRef = db.collection('orders').doc(parentOrderId);
+    await orderRef.set(orderData);
     const orderDoc = await orderRef.get();
 
     if (!orderDoc.exists) {
