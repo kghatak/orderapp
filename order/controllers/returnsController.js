@@ -1,5 +1,6 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
+import { subtractCollectedReturnItemsFromOutletProducts } from '../../util/outletProductsStock.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
 import admin from 'firebase-admin';
 
@@ -182,6 +183,24 @@ export const updateReturn = async (req, res) => {
     }
 
     await db.collection('returns').doc(returnId).update(updatePayload);
+
+    if (status === 'collected' && prevStatus !== 'collected') {
+      try {
+        await subtractCollectedReturnItemsFromOutletProducts(
+          prevData.outletId,
+          prevData.items || []
+        );
+        await db.collection('returns').doc(returnId).update({
+          mongoCollectionSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+          mongoCollectionSyncStatus: 'synced'
+        });
+      } catch (mongoSyncError) {
+        console.error(
+          `Return ${returnId} collected but failed to sync Products stock:`,
+          mongoSyncError
+        );
+      }
+    }
 
     // Get updated document
     const updatedDoc = await db.collection('returns').doc(returnId).get();
