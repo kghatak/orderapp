@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "nodemon index.js",
-    "build": "echo 'No build step required'"
+    "build": "echo 'No build step required'",
+    "test": "node --test outlet-portal/util/salesListFilter.test.js"
   },
   "keywords": [],
   "author": "",

@@ -3,6 +3,7 @@ import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
+import { buildSalesListFilter } from '../util/salesListFilter.js';
 import { roundQty } from '../../util/quantities.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -437,14 +438,17 @@ const serializeSale = (doc) => {
 
 /**
  * GET /sales
- * Query: limit (default 10, max 100), skip (default 0),
- *   optional paymentMode=Cash|Card|UPI|Due|Split — e.g. Due returns only credit (due) sales.
+ * Query:
+ *   limit (default 10, max 100), skip (default 0)
+ *   paymentMode — Cash | Card | UPI | Due | Split
+ *   search — unified filter: saleId (# ok), customer.name, or customer.phone (OR)
+ *   saleId — explicit sale id partial match
+ *   customerName — explicit customer name partial match
+ *   customerPhone — explicit phone (exact last 10 digits when 10+ digits entered)
  */
 export const listSales = async (req, res) => {
   try {
     const auth = req.portalAuth;
-    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 100);
-    const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
 
     const pmRaw = req.query.paymentMode;
     const pmTrim =
@@ -456,12 +460,31 @@ export const listSales = async (req, res) => {
       });
     }
 
-    const Sale = getSaleModel();
-    const filter = { tenantId: auth.tenantId, outletId: auth.outletId };
-    if (pmTrim !== '') {
-      filter.paymentMode = pmTrim;
-    }
+    const searchRaw = req.query.search ?? req.query.q;
+    const hasSearchFilter = !!(
+      String(searchRaw ?? '').trim() ||
+      String(req.query.saleId ?? '').trim() ||
+      String(req.query.customerName ?? '').trim() ||
+      String(req.query.customerPhone ?? '').trim()
+    );
+    const maxLimit = hasSearchFilter ? 2000 : 100;
+    const limit = Math.min(
+      Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1),
+      maxLimit
+    );
+    const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
 
+    const filter = buildSalesListFilter({
+      tenantId: auth.tenantId,
+      outletId: auth.outletId,
+      paymentMode: pmTrim || undefined,
+      search: searchRaw,
+      saleId: req.query.saleId,
+      customerName: req.query.customerName,
+      customerPhone: req.query.customerPhone
+    });
+
+    const Sale = getSaleModel();
     const [rows, total] = await Promise.all([
       Sale.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       Sale.countDocuments(filter)

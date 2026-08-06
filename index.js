@@ -116,7 +116,7 @@ app.use('/outlet-portal/auth', portalAuthRoutes);
 app.use('/outlet-portal/dashboard', dashboardRoutes);
 
 // Outlet portal sales (MongoDB `sales` collection; requires portal JWT)
-app.use('/sales', (req, res, next) => {
+const salesMongoGate = (req, res, next) => {
   if (!isOutletPortalMongoConnected()) {
     return res.status(503).json({
       success: false,
@@ -124,8 +124,11 @@ app.use('/sales', (req, res, next) => {
     });
   }
   next();
-});
-app.use('/sales', salesRoutes);
+};
+for (const salesBase of ['/sales', '/Sales']) {
+  app.use(salesBase, salesMongoGate);
+  app.use(salesBase, salesRoutes);
+}
 
 // Outlet portal expenses (MongoDB; collection name `Expenses`; requires portal JWT)
 app.use('/expenses', (req, res, next) => {
