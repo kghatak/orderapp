@@ -1,6 +1,7 @@
 # OrderApp
 
-Independent server application forked from JBJApp master snapshot
+Independent server application forked from JBJApp master snapshot.
+This is a setup for OrderApp Backend.
 
 ## Setup
 
