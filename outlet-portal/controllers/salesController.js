@@ -1,10 +1,13 @@
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { getPortalConnection } from '../config/portalDb.js';
 import { getOutletProductsModel } from '../models/OutletProducts.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
 import { buildSalesListFilter } from '../util/salesListFilter.js';
 import { roundQty } from '../../util/quantities.js';
+import { fetchOutletPrintInfo } from '../util/outletFirestore.js';
+import { sendSaleBillWhatsApp, buildPublicBillUrl } from '../util/saleBillWhatsApp.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
@@ -567,9 +570,17 @@ export const createSale = async (req, res) => {
     const collectedAt = mode === 'Due' ? null : new Date();
 
     const saleId = await generateNextSaleId(auth.tenantId, auth.outletId);
+    const billToken = crypto.randomBytes(16).toString('hex');
+    const outletSnapshot = await fetchOutletPrintInfo(auth.outletId);
+    const cashierName =
+      req.body?.cashierName != null ? String(req.body.cashierName).trim() || undefined : undefined;
+
     const Sale = getSaleModel();
     const salePayload = {
       saleId,
+      billToken,
+      outletSnapshot,
+      cashierName,
       tenantId: auth.tenantId,
       outletId: auth.outletId,
       firestoreUserId: auth.userId,
@@ -630,10 +641,24 @@ export const createSale = async (req, res) => {
       session.endSession();
     }
 
+    const customerPhone = customerDoc?.phone?.replace(/\D/g, '') || '';
+    const whatsappBillQueued =
+      customerPhone.length >= 10 && Boolean(buildPublicBillUrl(billToken));
+    if (whatsappBillQueued) {
+      void sendSaleBillWhatsApp({
+        phone: customerPhone,
+        customerName: customerDoc.name,
+        saleId,
+        total: totalNum,
+        billToken
+      });
+    }
+
     res.status(201).json({
       success: true,
       message: 'Sale recorded',
-      data: serializeSale(sale)
+      data: serializeSale(sale),
+      whatsappBillQueued
     });
   } catch (err) {
     console.error('Create sale error:', err);
@@ -860,5 +885,76 @@ export const updateSale = async (req, res) => {
   } catch (err) {
     console.error('Update sale error:', err);
     res.status(500).json({ success: false, message: 'Failed to update sale' });
+  }
+};
+
+/**
+ * POST /sales/:id/send-bill
+ * Resend the public bill link on WhatsApp. id: MongoDB _id or business saleId.
+ */
+export const resendSaleBillWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const auth = req.portalAuth;
+    const Sale = getSaleModel();
+    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+
+    let saleDoc = null;
+    if (mongoose.isValidObjectId(id)) {
+      saleDoc = await Sale.findOne({ _id: id, ...scope });
+    }
+    if (!saleDoc && typeof id === 'string' && id.trim()) {
+      saleDoc = await Sale.findOne({ saleId: id.trim(), ...scope });
+    }
+    if (!saleDoc) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    const phone = String(saleDoc.customer?.phone || '').replace(/\D/g, '');
+    if (phone.length < 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer phone number is required to send bill on WhatsApp'
+      });
+    }
+
+    if (!saleDoc.billToken) {
+      saleDoc.billToken = crypto.randomBytes(16).toString('hex');
+    }
+    if (!saleDoc.outletSnapshot?.name) {
+      saleDoc.outletSnapshot = await fetchOutletPrintInfo(auth.outletId);
+    }
+    await saleDoc.save();
+
+    if (!buildPublicBillUrl(saleDoc.billToken)) {
+      return res.status(503).json({
+        success: false,
+        message: 'Bill links are not configured (PUBLIC_BILL_BASE_URL missing on server)'
+      });
+    }
+
+    const sent = await sendSaleBillWhatsApp({
+      phone,
+      customerName: saleDoc.customer?.name,
+      saleId: saleDoc.saleId,
+      total: saleDoc.total,
+      billToken: saleDoc.billToken
+    });
+
+    if (!sent) {
+      return res.status(502).json({
+        success: false,
+        message: 'Failed to send WhatsApp message. Check MSG91 configuration and template.'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Bill link sent on WhatsApp',
+      data: { saleId: saleDoc.saleId, whatsappBillSent: true }
+    });
+  } catch (err) {
+    console.error('resendSaleBillWhatsApp error:', err);
+    res.status(500).json({ success: false, message: 'Failed to send bill on WhatsApp' });
   }
 };

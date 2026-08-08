@@ -22,6 +22,7 @@ import { connectMongoDB, isMongoConnected } from './config/db.js';
 import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet-portal/config/portalDb.js';
 import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
 import salesRoutes from './outlet-portal/routes/salesRoutes.js';
+import billRoutes from './outlet-portal/routes/billRoutes.js';
 import expensesRoutes from './outlet-portal/routes/expensesRoutes.js';
 import outletProductsRoutes from './outlet-portal/routes/outletProductsRoutes.js';
 import wastageRoutes from './outlet-portal/routes/wastageRoutes.js';
@@ -129,6 +130,18 @@ for (const salesBase of ['/sales', '/Sales']) {
   app.use(salesBase, salesMongoGate);
   app.use(salesBase, salesRoutes);
 }
+
+// Public POS bill view / PDF (tokenized links sent via WhatsApp)
+app.use('/bill', (req, res, next) => {
+  if (!isOutletPortalMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Bill service unavailable. MongoDB not connected.'
+    });
+  }
+  next();
+});
+app.use('/bill', billRoutes);
 
 // Outlet portal expenses (MongoDB; collection name `Expenses`; requires portal JWT)
 app.use('/expenses', (req, res, next) => {
