@@ -3,6 +3,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import admin from 'firebase-admin';
+import ExcelJS from 'exceljs';
 
 const toFirestoreTimestamp = (val) => {
   if (val == null) return null;
@@ -614,6 +615,441 @@ export const recordCashPayment = async (req, res) => {
 
 const VALID_PAYMENT_MODES = ['Cash', 'Transfer by Bank', 'Cheque'];
 
+const normalizeHeader = (header) =>
+  String(header || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/_/g, '');
+
+const getExcelCellString = (cell) => {
+  if (!cell || cell.value == null && !cell.text) return '';
+  if (cell.text) {
+    return String(cell.text).replace(/^\uFEFF/, '').trim();
+  }
+  const value = cell.value;
+  if (typeof value === 'object') {
+    if (value.richText) {
+      return value.richText.map((part) => part.text || '').join('').trim();
+    }
+    if (value.result != null) return String(value.result).trim();
+    if (value.text != null) return String(value.text).trim();
+  }
+  return String(value).replace(/^\uFEFF/, '').trim();
+};
+
+const detectDelimiter = (line) => {
+  const commas = (line.match(/,/g) || []).length;
+  const semicolons = (line.match(/;/g) || []).length;
+  const tabs = (line.match(/\t/g) || []).length;
+  if (tabs >= commas && tabs >= semicolons && tabs > 0) return '\t';
+  if (semicolons > commas) return ';';
+  return ',';
+};
+
+const parseDelimitedLine = (line, delimiter = ',') => {
+  const values = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === delimiter && !inQuotes) {
+      values.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  values.push(current.trim());
+  return values.map((v) => v.replace(/^"|"$/g, '').trim());
+};
+
+const buildColumnMapFromHeaders = (headers) => {
+  const columnMap = {};
+  headers.forEach((header, index) => {
+    const normalized = normalizeHeader(header);
+    if (normalized === 'paymentdate' || normalized === 'date' || normalized === 'paydate') {
+      columnMap.paymentDate = index;
+    }
+    if (normalized === 'outletid' || normalized === 'outlet') columnMap.outletId = index;
+    if (normalized === 'amount' || normalized === 'amt') columnMap.amount = index;
+    if (normalized === 'paymentmode' || normalized === 'mode') columnMap.paymentMode = index;
+    if (normalized === 'narration' || normalized === 'remarks' || normalized === 'remark') {
+      columnMap.narration = index;
+    }
+  });
+
+  return applyPositionalColumnMapFallback(headers, columnMap);
+};
+
+const applyPositionalColumnMapFallback = (headers, columnMap) => {
+  const normalized = headers.map((h) => normalizeHeader(h));
+
+  // Standard template: paymentDate, OutletId, amount, paymentMode, narration
+  if (
+    !columnMap.paymentDate &&
+    normalized.length >= 4 &&
+    normalized[1] === 'outletid' &&
+    normalized[2] === 'amount' &&
+    normalized[3] === 'paymentmode'
+  ) {
+    columnMap.paymentDate = 0;
+    columnMap.outletId = columnMap.outletId ?? 1;
+    columnMap.amount = columnMap.amount ?? 2;
+    columnMap.paymentMode = columnMap.paymentMode ?? 3;
+    if (normalized.length >= 5 && !columnMap.narration) {
+      columnMap.narration = 4;
+    }
+  }
+
+  return columnMap;
+};
+
+const assertRequiredPaymentColumns = (columnMap) => {
+  const requiredColumns = ['paymentDate', 'outletId', 'amount', 'paymentMode'];
+  const missingColumns = requiredColumns.filter((col) => columnMap[col] == null);
+  if (missingColumns.length > 0) {
+    throw new Error(
+      `Missing required column(s): ${missingColumns.join(', ')}. Expected: paymentDate, OutletId, amount, paymentMode, narration`,
+    );
+  }
+};
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/** Calendar date YYYY-MM-DD in IST (avoids UTC shift on date-only values). */
+const formatCalendarDateIST = (date) => {
+  if (!date || Number.isNaN(date.getTime())) return '';
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  const y = ist.getUTCFullYear();
+  const m = String(ist.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(ist.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+/** Normalize any Date instant to UTC noon on its IST calendar day. */
+const toIstCalendarUtcNoon = (date) => {
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  return new Date(
+    Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), 12, 0, 0, 0),
+  );
+};
+
+const normalizePaymentMode = (mode) => {
+  const normalized = String(mode || '').trim().toLowerCase();
+  if (normalized === 'cash') return 'Cash';
+  if (
+    normalized === 'transfer by bank' ||
+    normalized === 'bank' ||
+    normalized === 'bank transfer' ||
+    normalized === 'transfer'
+  ) {
+    return 'Transfer by Bank';
+  }
+  if (normalized === 'cheque' || normalized === 'check') return 'Cheque';
+  return String(mode || '').trim();
+};
+
+const parseExcelCellDate = (value) => {
+  if (value == null || value === '') return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return toIstCalendarUtcNoon(value);
+  }
+  if (typeof value === 'object' && value.toDate && typeof value.toDate === 'function') {
+    return toIstCalendarUtcNoon(value.toDate());
+  }
+
+  const str = String(value).trim();
+
+  // YYYY-MM-DD (recommended)
+  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const d = new Date(
+      Date.UTC(
+        parseInt(isoMatch[1], 10),
+        parseInt(isoMatch[2], 10) - 1,
+        parseInt(isoMatch[3], 10),
+        12,
+        0,
+        0,
+        0,
+      ),
+    );
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  // DD-MM-YYYY or DD/MM/YYYY (common in India)
+  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmyMatch) {
+    const d = new Date(
+      Date.UTC(
+        parseInt(dmyMatch[3], 10),
+        parseInt(dmyMatch[2], 10) - 1,
+        parseInt(dmyMatch[1], 10),
+        12,
+        0,
+        0,
+        0,
+      ),
+    );
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : toIstCalendarUtcNoon(parsed);
+};
+
+const parseRowValues = (values, columnMap, rowNumber) => {
+  const paymentDateRaw = values[columnMap.paymentDate];
+  const outletIdRaw = values[columnMap.outletId];
+  const amountRaw = values[columnMap.amount];
+  const paymentModeRaw = values[columnMap.paymentMode];
+  const narrationRaw = columnMap.narration != null ? values[columnMap.narration] : '';
+
+  const isEmpty =
+    !paymentDateRaw &&
+    !outletIdRaw &&
+    !amountRaw &&
+    !paymentModeRaw &&
+    !narrationRaw;
+
+  if (isEmpty) return null;
+
+  const paymentDate = parseExcelCellDate(paymentDateRaw);
+  const outletId = outletIdRaw != null ? String(outletIdRaw).trim() : '';
+  const amount =
+    typeof amountRaw === 'number'
+      ? amountRaw
+      : parseFloat(String(amountRaw || '').replace(/,/g, ''));
+  const paymentMode = normalizePaymentMode(paymentModeRaw);
+  const narration = narrationRaw != null ? String(narrationRaw).trim() : '';
+
+  return {
+    row: rowNumber,
+    paymentDate,
+    outletId,
+    amount,
+    paymentMode,
+    narration,
+  };
+};
+
+const parsePaymentCsvBuffer = (buffer) => {
+  const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+
+  if (lines.length < 2) {
+    throw new Error('CSV file has no data rows');
+  }
+
+  const delimiter = detectDelimiter(lines[0]);
+  const headers = parseDelimitedLine(lines[0], delimiter);
+  const columnMap = buildColumnMapFromHeaders(headers);
+  assertRequiredPaymentColumns(columnMap);
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const values = parseDelimitedLine(lines[i], delimiter);
+    const row = parseRowValues(values, columnMap, i + 1);
+    if (row) rows.push(row);
+  }
+
+  return rows;
+};
+
+const isCsvFile = (filename = '', mimetype = '') => {
+  const lowerName = filename.toLowerCase();
+  return (
+    lowerName.endsWith('.csv') ||
+    mimetype === 'text/csv' ||
+    mimetype === 'application/csv'
+  );
+};
+
+const parsePaymentFileBuffer = async (buffer, filename = '', mimetype = '') => {
+  if (isCsvFile(filename, mimetype)) {
+    return parsePaymentCsvBuffer(buffer);
+  }
+  return parsePaymentExcelBuffer(buffer);
+};
+
+const parsePaymentExcelBuffer = async (buffer) => {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet) {
+    throw new Error('No worksheet found in the Excel file');
+  }
+
+  const headerRow = sheet.getRow(1);
+  const headers = [];
+  const cellCount = headerRow.cellCount || sheet.columnCount || 0;
+
+  for (let col = 1; col <= cellCount; col++) {
+    headers[col - 1] = getExcelCellString(headerRow.getCell(col));
+  }
+
+  const columnMap = buildColumnMapFromHeaders(headers);
+  assertRequiredPaymentColumns(columnMap);
+
+  const rows = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+
+    const values = [];
+    row.eachCell((cell, colNumber) => {
+      values[colNumber - 1] = cell.value;
+    });
+
+    const parsedRow = parseRowValues(values, columnMap, rowNumber);
+    if (parsedRow) rows.push(parsedRow);
+  });
+
+  return rows;
+};
+
+const validatePaymentRow = (row, { checkOutletExists = false, outletExistsSet = null } = {}) => {
+  const errors = [];
+  const data = {
+    paymentDate: row.paymentDate ? formatCalendarDateIST(row.paymentDate) : '',
+    outletId: row.outletId || '',
+    amount: row.amount,
+    paymentMode: row.paymentMode || '',
+    narration: row.narration || '',
+  };
+
+  if (!row.paymentDate) {
+    errors.push('Invalid or missing payment date');
+  }
+  if (!row.outletId) {
+    errors.push('OutletId is required');
+  }
+  if (row.amount === undefined || row.amount === null || Number.isNaN(row.amount)) {
+    errors.push('Amount must be a valid number');
+  } else if (row.amount <= 0) {
+    errors.push('Amount must be greater than 0');
+  }
+  if (!row.paymentMode) {
+    errors.push('Payment mode is required');
+  } else if (!VALID_PAYMENT_MODES.includes(row.paymentMode)) {
+    errors.push(`Invalid payment mode. Must be one of: ${VALID_PAYMENT_MODES.join(', ')}`);
+  }
+  if (checkOutletExists && row.outletId && outletExistsSet && !outletExistsSet.has(row.outletId)) {
+    errors.push('Outlet payment record not found for this outlet');
+  }
+
+  return {
+    row: row.row,
+    data,
+    isValid: errors.length === 0,
+    errors,
+  };
+};
+
+const recordPaymentForOutlet = async (db, {
+  outletId,
+  amount,
+  paymentMode,
+  remarks = '',
+  approvedBy = 'admin',
+  paymentDate,
+}) => {
+  const paymentAmount = parseFloat(amount);
+  if (!outletId) {
+    throw new Error('outletId is required');
+  }
+  if (Number.isNaN(paymentAmount) || paymentAmount <= 0) {
+    throw new Error('A valid amount greater than 0 is required');
+  }
+  if (!VALID_PAYMENT_MODES.includes(paymentMode)) {
+    throw new Error(`Invalid paymentMode. Must be one of: ${VALID_PAYMENT_MODES.join(', ')}`);
+  }
+
+  const outletPaymentRef = db.collection('outlet_payments').doc(outletId);
+  const outletPaymentDoc = await outletPaymentRef.get();
+  if (!outletPaymentDoc.exists) {
+    throw new Error('Outlet payment record not found for this outlet');
+  }
+
+  const outletPaymentData = outletPaymentDoc.data();
+  const outletName =
+    outletPaymentData.outletName ||
+    outletPaymentData.outlet ||
+    outletPaymentData.name ||
+    '';
+
+  const paymentId = await generatePaymentId(db);
+  const paymentDocRef = db.collection('payments').doc();
+
+  let paymentDateTimestamp = null;
+  if (paymentDate) {
+    const parsedPaymentDate =
+      paymentDate instanceof Date ? paymentDate : parseExcelCellDate(paymentDate);
+    if (!parsedPaymentDate || Number.isNaN(parsedPaymentDate.getTime())) {
+      throw new Error('Invalid paymentDate provided');
+    }
+    paymentDateTimestamp = admin.firestore.Timestamp.fromDate(parsedPaymentDate);
+  }
+
+  const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+  const paymentData = {
+    paymentId,
+    amount: paymentAmount,
+    paymentMode,
+    outletId,
+    outletName,
+    status: 'approved',
+    approvedBy,
+    approvedAt: serverTimestamp,
+    createdAt: serverTimestamp,
+    paymentDate: paymentDateTimestamp || serverTimestamp,
+    remarks: remarks || null,
+  };
+
+  await db.runTransaction(async (transaction) => {
+    const paymentSnapshot = await transaction.get(outletPaymentRef);
+    if (!paymentSnapshot.exists) {
+      throw new Error('Outlet payment record not found for this outlet');
+    }
+
+    const paymentSnapshotData = paymentSnapshot.data();
+    const totalAmount = paymentSnapshotData.totalAmount || 0;
+    const currentPaidAmount = paymentSnapshotData.paidAmount || 0;
+    const updatedPaidAmount = currentPaidAmount + paymentAmount;
+    const updatedPendingAmount = Math.max(0, totalAmount - updatedPaidAmount);
+
+    transaction.update(outletPaymentRef, {
+      paidAmount: updatedPaidAmount,
+      pendingAmount: updatedPendingAmount,
+      paymentStatus: updatedPendingAmount === 0 ? 'paid' : 'partial',
+      lastUpdated: serverTimestamp,
+      lastRequestAmount: paymentAmount,
+      lastRequestAt: serverTimestamp,
+    });
+
+    transaction.set(paymentDocRef, paymentData);
+  });
+
+  return {
+    paymentId,
+    paymentDocId: paymentDocRef.id,
+    outletId,
+    outletName,
+    amount: paymentAmount,
+  };
+};
+
 const recalculateOutletBalancesUpdate = (outletData, deltaPaid) => {
   const totalAmount = outletData.totalAmount || 0;
   const newPaidAmount = Math.max(0, (outletData.paidAmount || 0) + deltaPaid);
@@ -1142,6 +1578,149 @@ export const getPaymentsReport = async (req, res) => {
       success: false,
       message: 'Failed to generate payments report',
       error: error.message
+    });
+  }
+};
+
+// Preview bulk payments from Excel file
+export const previewBulkPayments = async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const parsedRows = await parsePaymentFileBuffer(
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype,
+    );
+    const db = getFirestoreDB();
+
+    const outletIds = [...new Set(parsedRows.map((r) => r.outletId).filter(Boolean))];
+    const outletExistsSet = new Set();
+
+    for (const outletId of outletIds) {
+      const doc = await db.collection('outlet_payments').doc(outletId).get();
+      if (doc.exists) {
+        outletExistsSet.add(outletId);
+      }
+    }
+
+    const rows = parsedRows.map((row) =>
+      validatePaymentRow(row, { checkOutletExists: true, outletExistsSet }),
+    );
+
+    res.status(200).json({
+      message: 'File parsed successfully',
+      rows,
+      summary: {
+        total: rows.length,
+        valid: rows.filter((r) => r.isValid).length,
+        invalid: rows.filter((r) => !r.isValid).length,
+      },
+    });
+  } catch (err) {
+    console.error('Preview bulk payments error:', err);
+    res.status(400).json({
+      error: err.message || 'Failed to parse file',
+    });
+  }
+};
+
+// Record bulk payments from JSON array
+export const bulkRecordPayments = async (req, res) => {
+  try {
+    const { payments, approvedBy = 'admin' } = req.body;
+
+    if (!payments || !Array.isArray(payments)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Request body must contain a "payments" array',
+      });
+    }
+
+    if (payments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payments array cannot be empty',
+      });
+    }
+
+    const db = getFirestoreDB();
+    const results = {
+      total: payments.length,
+      successful: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    for (let i = 0; i < payments.length; i++) {
+      const paymentData = payments[i];
+      const rowNumber = paymentData.row ?? i + 1;
+
+      try {
+        const paymentDate = paymentData.paymentDate
+          ? parseExcelCellDate(paymentData.paymentDate)
+          : null;
+        const outletId = String(paymentData.outletId || '').trim();
+        const amount = parseFloat(paymentData.amount);
+        const paymentMode = normalizePaymentMode(paymentData.paymentMode);
+        const narration = paymentData.narration || paymentData.remarks || '';
+
+        const validation = validatePaymentRow({
+          row: rowNumber,
+          paymentDate,
+          outletId,
+          amount,
+          paymentMode,
+          narration,
+        });
+
+        if (!validation.isValid) {
+          results.errors.push({
+            row: rowNumber,
+            outletId,
+            error: validation.errors.join('; '),
+          });
+          results.failed++;
+          continue;
+        }
+
+        await recordPaymentForOutlet(db, {
+          outletId,
+          amount,
+          paymentMode,
+          remarks: narration,
+          approvedBy,
+          paymentDate,
+        });
+
+        results.successful++;
+      } catch (rowError) {
+        results.errors.push({
+          row: rowNumber,
+          outletId: paymentData.outletId,
+          error: rowError.message || 'Failed to record payment',
+        });
+        results.failed++;
+      }
+    }
+
+    res.status(200).json({
+      message: `Bulk payment completed: ${results.successful} successful, ${results.failed} failed`,
+      summary: {
+        total: results.total,
+        successful: results.successful,
+        failed: results.failed,
+      },
+      errors: results.errors.length > 0 ? results.errors : undefined,
+    });
+  } catch (err) {
+    console.error('Bulk record payments error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process bulk payments',
+      error: err.message,
     });
   }
 };

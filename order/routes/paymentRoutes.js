@@ -1,5 +1,6 @@
 // routes/paymentRoutes.js
 import express from 'express';
+import multer from 'multer';
 import {
   createOutletPayment,
   createPaymentRequest,
@@ -19,15 +20,42 @@ import {
   recordCashPayment,
   updatePaymentRecord,
   deletePaymentRecord,
+  previewBulkPayments,
+  bulkRecordPayments,
 } from '../controllers/paymentController.js';
 
 const router = express.Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const lowerName = file.originalname.toLowerCase();
+    const allowed =
+      file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      file.mimetype === 'application/vnd.ms-excel' ||
+      file.mimetype === 'text/csv' ||
+      file.mimetype === 'application/csv' ||
+      lowerName.endsWith('.xlsx') ||
+      lowerName.endsWith('.xls') ||
+      lowerName.endsWith('.csv');
+    if (allowed) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only Excel (.xlsx, .xls) or CSV (.csv) files are allowed'));
+    }
+  },
+});
 
 // Payment records
 router.get('/', getAllPayments); // GET /payments
 router.get('/report', getPaymentsReport); // GET /payments/report
 router.post('/', createPayment); // POST /payments
 router.post('/cash', recordCashPayment); // POST /payments/cash (supports paymentMode: 'cash', 'Transfer by Bank', 'Cheque')
+
+// Bulk payment upload
+router.post('/bulk/preview', upload.single('file'), previewBulkPayments); // POST /payments/bulk/preview
+router.post('/bulk', bulkRecordPayments); // POST /payments/bulk
 
 // Outlet Payments
 router.post('/outlet-payment', createOutletPayment);
