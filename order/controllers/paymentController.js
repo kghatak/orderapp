@@ -1724,3 +1724,172 @@ export const bulkRecordPayments = async (req, res) => {
     });
   }
 };
+
+const MAX_PAYMENT_TALLY_RANGE_DAYS = 10;
+
+const PAYMENT_TALLY_HEADERS = [
+  'Date',
+  'Voucher Type',
+  'Voucher Number',
+  'Buyer/Supplier',
+  'Amount',
+  'Payment Mode',
+  'Narration',
+];
+
+const timestampToDate = (ts) => {
+  if (!ts) return null;
+  if (ts.toDate && typeof ts.toDate === 'function') return ts.toDate();
+  if (typeof ts === 'object' && ts._seconds != null) {
+    return new Date(ts._seconds * 1000);
+  }
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const formatTallyDisplayDate = (date) => {
+  if (!date || Number.isNaN(date.getTime())) return '';
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  const d = ist.getUTCDate();
+  const m = ist.getUTCMonth() + 1;
+  const y = ist.getUTCFullYear();
+  return `${String(d).padStart(2, '0')}-${String(m).padStart(2, '0')}-${y}`;
+};
+
+const getPaymentEffectiveDate = (data) => {
+  const paymentDate = timestampToDate(data.paymentDate);
+  if (paymentDate) return paymentDate;
+  return timestampToDate(data.createdAt);
+};
+
+const getPaymentTallyNarration = (data) => {
+  const remarks = data.remarks != null ? String(data.remarks).trim() : '';
+  if (remarks) return remarks;
+  const mode = String(data.paymentMode || '').toLowerCase();
+  if (mode === 'cash') return 'Being Amount Received In Cash by Driver';
+  if (mode.includes('bank') || mode.includes('transfer')) {
+    return 'Being Amount Received By Bank Transfer';
+  }
+  if (mode === 'cheque') return 'Being Amount Received By Cheque';
+  return 'Being Amount Received';
+};
+
+const enumerateYmdRangeInclusive = (fromYmd, toYmd) => {
+  const keys = [];
+  const cur = new Date(`${fromYmd}T12:00:00`);
+  const end = new Date(`${toYmd}T12:00:00`);
+  while (cur <= end) {
+    keys.push(cur.toISOString().slice(0, 10));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return keys;
+};
+
+// GET /payments/tally/xlsx — Receipt vouchers for Tally import
+export const getPaymentsTallyXLSX = async (req, res) => {
+  try {
+    const { from, to, startDate, endDate, counter } = req.query;
+    const fromStr = String(from || startDate || '').trim();
+    const toStr = String(to || endDate || '').trim();
+
+    if (!fromStr || !toStr) {
+      return res.status(400).json({ error: 'from and to (YYYY-MM-DD) are required' });
+    }
+
+    const dateKeys = enumerateYmdRangeInclusive(fromStr, toStr);
+    if (dateKeys.length > MAX_PAYMENT_TALLY_RANGE_DAYS) {
+      return res.status(400).json({
+        error: `Date range spans ${dateKeys.length} days; maximum is ${MAX_PAYMENT_TALLY_RANGE_DAYS}`,
+      });
+    }
+
+    const allowedDateKeys = new Set(dateKeys);
+    const db = getFirestoreDB();
+
+    const snapshot = await db.collection('payments')
+      .where('status', '==', 'approved')
+      .get();
+
+    const payments = snapshot.docs
+      .map((doc) => ({ id: doc.id, ...doc.data() }))
+      .filter((p) => p.paymentType !== 'opening_balance')
+      .map((p) => {
+        const effectiveDate = getPaymentEffectiveDate(p);
+        const dateKey = effectiveDate ? formatCalendarDateIST(effectiveDate) : '';
+        return { ...p, effectiveDate, dateKey };
+      })
+      .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey))
+      .sort((a, b) => {
+        const timeDiff = a.effectiveDate.getTime() - b.effectiveDate.getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return String(a.outletName || '').localeCompare(String(b.outletName || ''));
+      });
+
+    if (payments.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No approved payments found for the selected date range',
+      });
+    }
+
+    const voucherCounterRef = db.collection('counters').doc('paymentreceiptvouchercounter');
+    const counterParsed =
+      counter !== undefined && counter !== '' ? parseInt(String(counter), 10) : NaN;
+    const usePayloadCounter = Number.isFinite(counterParsed) && counterParsed >= 1;
+
+    let startVoucherNumber;
+    if (usePayloadCounter) {
+      startVoucherNumber = counterParsed;
+    } else {
+      startVoucherNumber = await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(voucherCounterRef);
+        const last = snap.exists ? Number(snap.data().count) : 0;
+        const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
+        const start = safeLast + 1;
+        transaction.set(
+          voucherCounterRef,
+          { count: safeLast + payments.length },
+          { merge: true },
+        );
+        return start;
+      });
+    }
+
+    const rows = payments.map((p, index) => [
+      formatTallyDisplayDate(p.effectiveDate),
+      'Receipt',
+      startVoucherNumber + index,
+      p.outletName || '',
+      Number(p.receivedAmount ?? p.amount) || 0,
+      p.paymentMode || '',
+      getPaymentTallyNarration(p),
+    ]);
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Receipts', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    const headerRow = sheet.addRow(PAYMENT_TALLY_HEADERS);
+    headerRow.font = { bold: true };
+    rows.forEach((row) => {
+      const dataRow = sheet.addRow(row);
+      dataRow.getCell(5).numFmt = '#,##0';
+    });
+
+    const buf = await workbook.xlsx.writeBuffer();
+    const filenameBase =
+      fromStr === toStr
+        ? `payment-tally-receipts-${fromStr}`
+        : `payment-tally-receipts-${fromStr}-to-${toStr}`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}.xlsx"`);
+    return res.status(200).send(Buffer.from(buf));
+  } catch (err) {
+    console.error('Payments Tally XLSX export error:', err);
+    return res.status(500).json({ error: 'Failed to export payments for Tally' });
+  }
+};

@@ -22,6 +22,7 @@ import {
   deletePaymentRecord,
   previewBulkPayments,
   bulkRecordPayments,
+  getPaymentsTallyXLSX,
 } from '../controllers/paymentController.js';
 
 const router = express.Router();
@@ -50,6 +51,7 @@ const upload = multer({
 // Payment records
 router.get('/', getAllPayments); // GET /payments
 router.get('/report', getPaymentsReport); // GET /payments/report
+router.get('/tally/xlsx', getPaymentsTallyXLSX); // GET /payments/tally/xlsx
 router.post('/', createPayment); // POST /payments
 router.post('/cash', recordCashPayment); // POST /payments/cash (supports paymentMode: 'cash', 'Transfer by Bank', 'Cheque')
 
