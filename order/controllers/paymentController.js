@@ -921,8 +921,13 @@ const parsePaymentExcelBuffer = async (buffer) => {
 
 const validatePaymentRow = (row, { checkOutletExists = false, outletExistsSet = null } = {}) => {
   const errors = [];
+  const enteredDateStr = row.paymentDate ? formatCalendarDateIST(row.paymentDate) : '';
+  const todayStr = formatCalendarDateIST(new Date());
   const data = {
-    paymentDate: row.paymentDate ? formatCalendarDateIST(row.paymentDate) : '',
+    // What will be stored on paymentDate (import day)
+    paymentDate: todayStr,
+    // What will be stored on actualpaymentdate (date from CSV)
+    actualpaymentdate: enteredDateStr,
     outletId: row.outletId || '',
     amount: row.amount,
     paymentMode: row.paymentMode || '',
@@ -964,6 +969,7 @@ const recordPaymentForOutlet = async (db, {
   remarks = '',
   approvedBy = 'admin',
   paymentDate,
+  storeActualPaymentDate = false,
 }) => {
   const paymentAmount = parseFloat(amount);
   if (!outletId) {
@@ -992,17 +998,20 @@ const recordPaymentForOutlet = async (db, {
   const paymentId = await generatePaymentId(db);
   const paymentDocRef = db.collection('payments').doc();
 
-  let paymentDateTimestamp = null;
+  let enteredDateTimestamp = null;
   if (paymentDate) {
     const parsedPaymentDate =
       paymentDate instanceof Date ? paymentDate : parseExcelCellDate(paymentDate);
     if (!parsedPaymentDate || Number.isNaN(parsedPaymentDate.getTime())) {
       throw new Error('Invalid paymentDate provided');
     }
-    paymentDateTimestamp = admin.firestore.Timestamp.fromDate(parsedPaymentDate);
+    enteredDateTimestamp = admin.firestore.Timestamp.fromDate(parsedPaymentDate);
   }
 
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  // Bulk import: paymentDate = today (import day); actualpaymentdate = date from CSV
+  // Single/manual: paymentDate = entered date (or server time if missing)
   const paymentData = {
     paymentId,
     amount: paymentAmount,
@@ -1013,9 +1022,15 @@ const recordPaymentForOutlet = async (db, {
     approvedBy,
     approvedAt: serverTimestamp,
     createdAt: serverTimestamp,
-    paymentDate: paymentDateTimestamp || serverTimestamp,
+    paymentDate: storeActualPaymentDate
+      ? serverTimestamp
+      : (enteredDateTimestamp || serverTimestamp),
     remarks: remarks || null,
   };
+
+  if (storeActualPaymentDate && enteredDateTimestamp) {
+    paymentData.actualpaymentdate = enteredDateTimestamp;
+  }
 
   await db.runTransaction(async (transaction) => {
     const paymentSnapshot = await transaction.get(outletPaymentRef);
@@ -1659,8 +1674,11 @@ export const bulkRecordPayments = async (req, res) => {
       const rowNumber = paymentData.row ?? i + 1;
 
       try {
-        const paymentDate = paymentData.paymentDate
-          ? parseExcelCellDate(paymentData.paymentDate)
+        // CSV / entered date is sent as actualpaymentdate; paymentDate in preview is today
+        const enteredDateRaw =
+          paymentData.actualpaymentdate || paymentData.paymentDate || null;
+        const paymentDate = enteredDateRaw
+          ? parseExcelCellDate(enteredDateRaw)
           : null;
         const outletId = String(paymentData.outletId || '').trim();
         const amount = parseFloat(paymentData.amount);
@@ -1693,6 +1711,7 @@ export const bulkRecordPayments = async (req, res) => {
           remarks: narration,
           approvedBy,
           paymentDate,
+          storeActualPaymentDate: true,
         });
 
         results.successful++;
