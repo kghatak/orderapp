@@ -683,6 +683,14 @@ const buildColumnMapFromHeaders = (headers) => {
       columnMap.paymentDate = index;
     }
     if (normalized === 'outletid' || normalized === 'outlet') columnMap.outletId = index;
+    if (
+      normalized === 'outletname' ||
+      normalized === 'buyer' ||
+      normalized === 'buyersupplier' ||
+      normalized === 'name'
+    ) {
+      columnMap.outletName = index;
+    }
     if (normalized === 'amount' || normalized === 'amt') columnMap.amount = index;
     if (normalized === 'paymentmode' || normalized === 'mode') columnMap.paymentMode = index;
     if (normalized === 'narration' || normalized === 'remarks' || normalized === 'remark') {
@@ -696,7 +704,27 @@ const buildColumnMapFromHeaders = (headers) => {
 const applyPositionalColumnMapFallback = (headers, columnMap) => {
   const normalized = headers.map((h) => normalizeHeader(h));
 
-  // Standard template: paymentDate, OutletId, amount, paymentMode, narration
+  // Template with outlet name: paymentDate, OutletId, OutletName, amount, paymentMode, narration
+  if (
+    !columnMap.paymentDate &&
+    normalized.length >= 5 &&
+    normalized[1] === 'outletid' &&
+    (normalized[2] === 'outletname' || normalized[2] === 'name') &&
+    normalized[3] === 'amount' &&
+    normalized[4] === 'paymentmode'
+  ) {
+    columnMap.paymentDate = 0;
+    columnMap.outletId = columnMap.outletId ?? 1;
+    columnMap.outletName = columnMap.outletName ?? 2;
+    columnMap.amount = columnMap.amount ?? 3;
+    columnMap.paymentMode = columnMap.paymentMode ?? 4;
+    if (normalized.length >= 6 && !columnMap.narration) {
+      columnMap.narration = 5;
+    }
+    return columnMap;
+  }
+
+  // Older template: paymentDate, OutletId, amount, paymentMode, narration
   if (
     !columnMap.paymentDate &&
     normalized.length >= 4 &&
@@ -813,6 +841,8 @@ const parseExcelCellDate = (value) => {
 const parseRowValues = (values, columnMap, rowNumber) => {
   const paymentDateRaw = values[columnMap.paymentDate];
   const outletIdRaw = values[columnMap.outletId];
+  const outletNameRaw =
+    columnMap.outletName != null ? values[columnMap.outletName] : '';
   const amountRaw = values[columnMap.amount];
   const paymentModeRaw = values[columnMap.paymentMode];
   const narrationRaw = columnMap.narration != null ? values[columnMap.narration] : '';
@@ -820,6 +850,7 @@ const parseRowValues = (values, columnMap, rowNumber) => {
   const isEmpty =
     !paymentDateRaw &&
     !outletIdRaw &&
+    !outletNameRaw &&
     !amountRaw &&
     !paymentModeRaw &&
     !narrationRaw;
@@ -828,10 +859,18 @@ const parseRowValues = (values, columnMap, rowNumber) => {
 
   const paymentDate = parseExcelCellDate(paymentDateRaw);
   const outletId = outletIdRaw != null ? String(outletIdRaw).trim() : '';
+  const outletName = outletNameRaw != null ? String(outletNameRaw).trim() : '';
+  const amountRawStr = amountRaw == null ? '' : String(amountRaw).trim();
+  // Skip template rows where amount was left blank
+  if (!amountRawStr) return null;
+
   const amount =
     typeof amountRaw === 'number'
       ? amountRaw
-      : parseFloat(String(amountRaw || '').replace(/,/g, ''));
+      : parseFloat(amountRawStr.replace(/,/g, ''));
+  // Skip rows with zero / invalid amount (same as blank)
+  if (Number.isNaN(amount) || amount <= 0) return null;
+
   const paymentMode = normalizePaymentMode(paymentModeRaw);
   const narration = narrationRaw != null ? String(narrationRaw).trim() : '';
 
@@ -839,6 +878,7 @@ const parseRowValues = (values, columnMap, rowNumber) => {
     row: rowNumber,
     paymentDate,
     outletId,
+    outletName,
     amount,
     paymentMode,
     narration,
@@ -929,6 +969,7 @@ const validatePaymentRow = (row, { checkOutletExists = false, outletExistsSet = 
     // What will be stored on actualpaymentdate (date from CSV)
     actualpaymentdate: enteredDateStr,
     outletId: row.outletId || '',
+    outletName: row.outletName || '',
     amount: row.amount,
     paymentMode: row.paymentMode || '',
     narration: row.narration || '',
