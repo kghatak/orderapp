@@ -34,6 +34,45 @@ const generatePaymentId = async (db) => {
   return `PAY${nextCount.toString().padStart(4, '0')}`;
 };
 
+const PAYMENT_AUDIT_COLLECTION = 'payment_audit_logs';
+
+const resolvePaymentActor = (source = {}) => {
+  const performedBy =
+    source.performedBy ||
+    source.approvedBy ||
+    source.updatedBy ||
+    source.admin ||
+    'admin';
+  return {
+    performedBy: String(performedBy),
+    performedById: String(source.performedById || source.userId || ''),
+    userProfile: String(source.userProfile || ''),
+  };
+};
+
+const writePaymentAuditLog = async (payload = {}) => {
+  try {
+    const db = getFirestoreDB();
+    const actor = resolvePaymentActor(payload);
+    await db.collection(PAYMENT_AUDIT_COLLECTION).add({
+      action: payload.action || 'unknown',
+      summary: payload.summary || '',
+      performedBy: actor.performedBy,
+      performedById: actor.performedById || null,
+      userProfile: actor.userProfile || null,
+      outletId: payload.outletId || null,
+      outletName: payload.outletName || null,
+      paymentId: payload.paymentId || null,
+      paymentDocId: payload.paymentDocId || null,
+      amount: payload.amount != null ? Number(payload.amount) : null,
+      details: payload.details || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (err) {
+    console.error('Payment audit log write failed:', err);
+  }
+};
+
 // Create or Update Outlet Payment
 export const createOutletPayment = async (req, res) => {
   try {
@@ -440,6 +479,21 @@ export const approvePaymentRequest = async (req, res) => {
       });
     }
     
+    await writePaymentAuditLog({
+      action: 'approve',
+      summary: `Approved payment request ${requestId} for ${requestData.outletName || requestData.outletId}`,
+      admin,
+      performedBy: admin,
+      performedById: req.body.performedById,
+      userProfile: req.body.userProfile,
+      outletId: requestData.outletId,
+      outletName: requestData.outletName,
+      paymentId,
+      paymentDocId: requestId,
+      amount: requestData.amount,
+      details: { requestId, paymentMode: requestData.paymentMode, remarks },
+    });
+
     res.status(200).json({ 
       message: 'Payment request approved successfully',
       requestId: requestId,
@@ -587,6 +641,21 @@ export const recordCashPayment = async (req, res) => {
       'Transfer by Bank': 'Bank transfer payment recorded successfully',
       'Cheque': 'Cheque payment recorded successfully'
     };
+
+    await writePaymentAuditLog({
+      action: 'cash_payment',
+      summary: `Recorded ${paymentMode} payment of ₹${paymentAmount} for ${outletName || outletId}`,
+      approvedBy,
+      performedBy: approvedBy,
+      performedById: req.body.performedById,
+      userProfile: req.body.userProfile,
+      outletId,
+      outletName,
+      paymentId: savedPayment?.paymentId || paymentId,
+      paymentDocId: paymentDocRef.id,
+      amount: paymentAmount,
+      details: { paymentMode, paymentDate: paymentDateIso, remarks: remarks || null },
+    });
 
     res.status(201).json({
       message: paymentModeMessages[paymentMode] || 'Payment recorded successfully',
@@ -1206,6 +1275,25 @@ export const updatePaymentRecord = async (req, res) => {
         });
       }
 
+      await writePaymentAuditLog({
+        action: 'update',
+        summary: `Updated payment ${id} for ${existing.outletName || existing.outletId}`,
+        updatedBy,
+        performedBy: updatedBy,
+        performedById: req.body.performedById,
+        userProfile: req.body.userProfile,
+        outletId: existing.outletId,
+        outletName: existing.outletName,
+        paymentId: existing.paymentId,
+        paymentDocId: id,
+        amount: newAmount,
+        details: {
+          oldAmount,
+          newAmount,
+          paymentMode: newPaymentMode,
+        },
+      });
+
       return res.status(200).json({
         message: 'Payment updated successfully',
         id,
@@ -1254,6 +1342,20 @@ export const updatePaymentRecord = async (req, res) => {
     updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
     await requestRef.update(updates);
+
+    await writePaymentAuditLog({
+      action: 'update',
+      summary: `Updated pending payment request ${id}`,
+      updatedBy,
+      performedBy: updatedBy,
+      performedById: req.body.performedById,
+      userProfile: req.body.userProfile,
+      outletId: requestData.outletId,
+      outletName: requestData.outletName,
+      paymentDocId: id,
+      amount: updates.amount ?? requestData.amount,
+      details: updates,
+    });
 
     return res.status(200).json({
       message: 'Payment request updated successfully',
@@ -1310,6 +1412,19 @@ export const deletePaymentRecord = async (req, res) => {
         await requestRef.delete();
       }
 
+      await writePaymentAuditLog({
+        action: 'delete',
+        summary: `Deleted payment ${id} for ${existing.outletName || existing.outletId}`,
+        performedBy: req.body?.performedBy || req.query?.performedBy || 'admin',
+        performedById: req.body?.performedById || req.query?.performedById,
+        userProfile: req.body?.userProfile || req.query?.userProfile,
+        outletId: existing.outletId,
+        outletName: existing.outletName,
+        paymentId: existing.paymentId,
+        paymentDocId: id,
+        amount: oldAmount,
+      });
+
       return res.status(200).json({
         message: 'Payment deleted successfully',
         id,
@@ -1330,6 +1445,18 @@ export const deletePaymentRecord = async (req, res) => {
     }
 
     await requestRef.delete();
+
+    await writePaymentAuditLog({
+      action: 'delete',
+      summary: `Deleted pending payment request ${id}`,
+      performedBy: req.body?.performedBy || req.query?.performedBy || 'admin',
+      performedById: req.body?.performedById || req.query?.performedById,
+      userProfile: req.body?.userProfile || req.query?.userProfile,
+      outletId: requestData.outletId,
+      outletName: requestData.outletName,
+      paymentDocId: id,
+      amount: requestData.amount,
+    });
 
     return res.status(200).json({
       message: 'Payment request deleted successfully',
@@ -1442,6 +1569,21 @@ export const rejectPaymentRequest = async (req, res) => {
       });
     }
     
+    await writePaymentAuditLog({
+      action: 'reject',
+      summary: `Rejected payment request ${requestId} for ${requestData.outletName || requestData.outletId}`,
+      admin,
+      performedBy: admin,
+      performedById: req.body.performedById,
+      userProfile: req.body.userProfile,
+      outletId: requestData.outletId,
+      outletName: requestData.outletName,
+      paymentId,
+      paymentDocId: requestId,
+      amount: requestData.amount,
+      details: { requestId, remarks },
+    });
+
     res.status(200).json({ 
       message: 'Payment request rejected successfully',
       requestId: requestId,
@@ -1766,6 +1908,21 @@ export const bulkRecordPayments = async (req, res) => {
       }
     }
 
+    await writePaymentAuditLog({
+      action: 'bulk_import',
+      summary: `Bulk payment import: ${results.successful} successful, ${results.failed} failed (of ${results.total})`,
+      approvedBy,
+      performedBy: approvedBy,
+      performedById: req.body.performedById,
+      userProfile: req.body.userProfile,
+      details: {
+        total: results.total,
+        successful: results.successful,
+        failed: results.failed,
+        errors: results.errors.slice(0, 50),
+      },
+    });
+
     res.status(200).json({
       message: `Bulk payment completed: ${results.successful} successful, ${results.failed} failed`,
       summary: {
@@ -1942,6 +2099,21 @@ export const getPaymentsTallyXLSX = async (req, res) => {
         ? `payment-tally-receipts-${fromStr}`
         : `payment-tally-receipts-${fromStr}-to-${toStr}`;
 
+    await writePaymentAuditLog({
+      action: 'tally_export',
+      summary: `Exported ${payments.length} payment receipt(s) for Tally (${fromStr} to ${toStr})`,
+      performedBy: req.query.performedBy || 'admin',
+      performedById: req.query.performedById,
+      userProfile: req.query.userProfile,
+      details: {
+        from: fromStr,
+        to: toStr,
+        rowCount: payments.length,
+        startVoucherNumber,
+        counter: usePayloadCounter ? counterParsed : null,
+      },
+    });
+
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1951,5 +2123,60 @@ export const getPaymentsTallyXLSX = async (req, res) => {
   } catch (err) {
     console.error('Payments Tally XLSX export error:', err);
     return res.status(500).json({ error: 'Failed to export payments for Tally' });
+  }
+};
+
+// GET /payments/audit-logs
+export const getPaymentAuditLogs = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const action = req.query.action ? String(req.query.action).trim() : '';
+
+    let snapshot;
+    try {
+      let query = db.collection(PAYMENT_AUDIT_COLLECTION).orderBy('createdAt', 'desc').limit(limit);
+      if (action) {
+        query = db
+          .collection(PAYMENT_AUDIT_COLLECTION)
+          .where('action', '==', action)
+          .orderBy('createdAt', 'desc')
+          .limit(limit);
+      }
+      snapshot = await query.get();
+    } catch (indexErr) {
+      console.warn('Payment audit logs indexed query failed, falling back:', indexErr.message);
+      const fallback = await db.collection(PAYMENT_AUDIT_COLLECTION).limit(500).get();
+      let docs = fallback.docs;
+      if (action) {
+        docs = docs.filter((d) => d.data().action === action);
+      }
+      docs.sort((a, b) => {
+        const aTime = a.data().createdAt?.toMillis?.() || 0;
+        const bTime = b.data().createdAt?.toMillis?.() || 0;
+        return bTime - aTime;
+      });
+      snapshot = { docs: docs.slice(0, limit) };
+    }
+    const logs = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      const createdAt =
+        data.createdAt && typeof data.createdAt.toDate === 'function'
+          ? data.createdAt.toDate().toISOString()
+          : null;
+      return {
+        id: doc.id,
+        ...data,
+        createdAt,
+      };
+    });
+
+    res.status(200).json({
+      logs,
+      summary: { total: logs.length },
+    });
+  } catch (err) {
+    console.error('Fetch payment audit logs error:', err);
+    res.status(500).json({ error: 'Failed to fetch payment audit logs' });
   }
 };
