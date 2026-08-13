@@ -15,13 +15,31 @@ const outletPosRowSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const breakdownItemSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    value: { type: Number, default: 0 },
+  },
+  { _id: false },
+);
+
 const dashboardDailySnapshotSchema = new mongoose.Schema(
   {
     businessDate: { type: String, required: true },
     tenantId: { type: String, default: '' },
     dailyRevenueTotal: { type: Number, default: 0 },
     dailyTransactionsTotal: { type: Number, default: 0 },
-    newPosOutletsTotal: { type: Number, default: 0 },
+    /** Delivery / outlet KPIs (Firestore) — stored same as POS totals */
+    totalSales: { type: Number, default: 0 },
+    totalOrders: { type: Number, default: 0 },
+    totalOutlets: { type: Number, default: 0 },
+    totalOutletsActive: { type: Number, default: 0 },
+    totalOutletsInactive: { type: Number, default: 0 },
+    totalReturnOrders: { type: Number, default: 0 },
+    totalReturnAmount: { type: Number, default: 0 },
+    paymentSummaryItems: { type: [breakdownItemSchema], default: [] },
+    orderStatusItems: { type: [breakdownItemSchema], default: [] },
     posByOutlet: { type: [outletPosRowSchema], default: [] },
     topOutlets: { type: [mongoose.Schema.Types.Mixed], default: [] },
     topProducts: { type: [mongoose.Schema.Types.Mixed], default: [] },
