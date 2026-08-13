@@ -70,6 +70,29 @@ export const getDashboard = async (req, res) => {
     const { tenantId } = parsed;
 
     if (parsed.mode === 'range') {
+      // Same day selected via start/end — use previous-day trend like single-date mode
+      if (parsed.startDate === parsed.endDate) {
+        const businessDate = parsed.startDate;
+        const [snapshot, previousSnapshot] = await Promise.all([
+          getSnapshotForDate(businessDate, tenantId),
+          getSnapshotForDate(getPreviousDateKey(businessDate), tenantId),
+        ]);
+
+        if (!snapshot) {
+          return res.status(404).json({
+            success: false,
+            message: `No dashboard snapshot found for ${businessDate}. Snapshots are created at end of day.`,
+          });
+        }
+
+        const data = snapshotToDashboardResponse(
+          snapshot,
+          previousSnapshot,
+          businessDate,
+        );
+        return res.json({ success: true, data });
+      }
+
       const snapshots = await getSnapshotsInRange(
         parsed.startDate,
         parsed.endDate,
@@ -146,6 +169,10 @@ export const createDashboardSnapshot = async (req, res) => {
       data: {
         businessDate: saved.businessDate,
         outletCount: saved.posByOutlet?.length ?? 0,
+        totalOrders: saved.totalOrders ?? 0,
+        totalSales: saved.totalSales ?? 0,
+        totalReturnOrders: saved.totalReturnOrders ?? 0,
+        totalReturnAmount: saved.totalReturnAmount ?? 0,
       },
     });
   } catch (err) {

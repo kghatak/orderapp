@@ -1,6 +1,7 @@
 import { getSaleModel } from '../models/Sale.js';
 import { getDashboardDailySnapshotModel } from '../models/DashboardDailySnapshot.js';
 import { getFirestoreDB } from '../../util/firebase.js';
+import { getIstBoundariesForCalendarDate } from '../../util/istDateBoundaries.js';
 
 export const TZ = 'Asia/Kolkata';
 
@@ -27,6 +28,16 @@ const computeTrend = (currentTotal, previousTotal) => {
   return roundMoney(((currentTotal - previousTotal) / previousTotal) * 100);
 };
 
+const formatCompareLabel = (dateKey) => {
+  if (!dateKey) return undefined;
+  const { start } = getIstDayBounds(dateKey);
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ,
+    day: '2-digit',
+    month: 'short',
+  }).format(start);
+};
+
 const buildMatch = (start, end, tenantId) => {
   const match = {
     createdAt: { $gte: start, $lte: end },
@@ -46,6 +57,77 @@ const splitPaymentSum = (modes) => ({
     },
   },
 });
+
+const PAYMENT_SUMMARY_KEYS = [
+  { key: 'cash', label: 'Cash', modes: ['cash'] },
+  { key: 'net-banking', label: 'Net Banking', modes: ['transfer by bank', 'bank', 'net banking', 'upi'] },
+  { key: 'cheque', label: 'Cheque', modes: ['cheque', 'check'] },
+];
+
+const ORDER_STATUS_ORDER = [
+  'pending',
+  'accepted',
+  'processing',
+  'dispatched',
+  'delivered',
+  'cancelled',
+];
+
+const formatStatusLabel = (status) => {
+  const normalized = String(status || '')
+    .trim()
+    .toLowerCase();
+  if (!normalized) return 'Unknown';
+  return normalized
+    .split(/[\s_]+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+};
+
+const mapOutletPaymentMode = (paymentMode) => {
+  const normalized = String(paymentMode || '')
+    .trim()
+    .toLowerCase();
+
+  for (const item of PAYMENT_SUMMARY_KEYS) {
+    if (item.modes.some((mode) => normalized === mode || normalized.includes(mode))) {
+      return item;
+    }
+  }
+
+  return null;
+};
+
+const toBreakdownWithPercent = (items) => {
+  const total = roundMoney(items.reduce((sum, row) => sum + (row.value || 0), 0));
+  return {
+    total,
+    items: items.map((row) => ({
+      ...row,
+      value: roundMoney(row.value || 0),
+      percent: total > 0 ? roundMoney(((row.value || 0) / total) * 100) : 0,
+    })),
+  };
+};
+
+const mergeBreakdownItems = (snapshots, field) => {
+  const map = new Map();
+  for (const snapshot of snapshots) {
+    for (const row of snapshot[field] ?? []) {
+      const existing = map.get(row.key);
+      if (existing) {
+        existing.value = roundMoney(existing.value + (row.value || 0));
+      } else {
+        map.set(row.key, {
+          key: row.key,
+          label: row.label,
+          value: roundMoney(row.value || 0),
+        });
+      }
+    }
+  }
+  return [...map.values()];
+};
 
 export const aggregatePosByOutlet = async (Sale, match) => {
   const rows = await Sale.aggregate([
@@ -190,6 +272,165 @@ const aggregateNewPosOutletsTotal = async (Sale, start, end, tenantId) => {
   return rows[0]?.value ?? 0;
 };
 
+/**
+ * Outlet payments breakdown for Payment Summary donut
+ * (Firestore `payments`: Cash / Transfer by Bank / Cheque).
+ */
+const aggregatePaymentSummaryItems = async (businessDate) => {
+  const empty = PAYMENT_SUMMARY_KEYS.map(({ key, label }) => ({
+    key,
+    label,
+    value: 0,
+  }));
+
+  try {
+    const db = getFirestoreDB();
+    const { dayStartTimestamp, dayEndTimestamp } =
+      getIstBoundariesForCalendarDate(businessDate);
+
+    const countedIds = new Set();
+    const totals = Object.fromEntries(PAYMENT_SUMMARY_KEYS.map(({ key }) => [key, 0]));
+
+    const addPayment = (doc) => {
+      if (countedIds.has(doc.id)) return;
+      const data = doc.data() || {};
+      if (data.paymentType === 'opening_balance') return;
+      if (String(data.status || '').toLowerCase() !== 'approved') return;
+
+      countedIds.add(doc.id);
+      const mapped = mapOutletPaymentMode(data.paymentMode);
+      if (!mapped) return;
+
+      totals[mapped.key] += parseFloat(data.amount || 0);
+    };
+
+    // Business paymentDate only (same as ledger / opening-closing)
+    const byPaymentDate = await db
+      .collection('payments')
+      .where('status', '==', 'approved')
+      .where('paymentDate', '>=', dayStartTimestamp)
+      .where('paymentDate', '<=', dayEndTimestamp)
+      .get();
+    byPaymentDate.forEach(addPayment);
+
+    return PAYMENT_SUMMARY_KEYS.map(({ key, label }) => ({
+      key,
+      label,
+      value: roundMoney(totals[key] || 0),
+    }));
+  } catch (err) {
+    console.error(
+      `[Dashboard EOD] Outlet payment summary failed for ${businessDate}:`,
+      err.message || err,
+    );
+    return empty;
+  }
+};
+
+/**
+ * Delivery KPIs + order-status overview from Firestore
+ * (same sources as opening/closing balance EOD jobs).
+ */
+const aggregateDeliveryAndOutletSummary = async (businessDate) => {
+  const db = getFirestoreDB();
+  const { dayStartTimestamp, dayEndTimestamp } =
+    getIstBoundariesForCalendarDate(businessDate);
+
+  const emptyStatusItems = ORDER_STATUS_ORDER.map((status) => ({
+    key: status,
+    label: formatStatusLabel(status),
+    value: 0,
+  }));
+
+  const empty = {
+    totalSales: 0,
+    totalOrders: 0,
+    totalOutlets: 0,
+    totalOutletsActive: 0,
+    totalOutletsInactive: 0,
+    totalReturnOrders: 0,
+    totalReturnAmount: 0,
+    orderStatusItems: emptyStatusItems,
+  };
+
+  try {
+    const [outletsSnap, deliveredSnap, returnsSnap, createdOrdersSnap] =
+      await Promise.all([
+        db.collection('outlets').get(),
+        db
+          .collection('orders')
+          .where('status', '==', 'delivered')
+          .where('deliveredDate', '>=', dayStartTimestamp)
+          .where('deliveredDate', '<=', dayEndTimestamp)
+          .get(),
+        db
+          .collection('returns')
+          .where('status', '==', 'collected')
+          .where('collectedDate', '>=', dayStartTimestamp)
+          .where('collectedDate', '<=', dayEndTimestamp)
+          .get(),
+        db
+          .collection('orders')
+          .where('Created at', '>=', dayStartTimestamp)
+          .where('Created at', '<=', dayEndTimestamp)
+          .get(),
+      ]);
+
+    let active = 0;
+    let inactive = 0;
+    outletsSnap.forEach((doc) => {
+      if (doc.data()?.active === false) inactive += 1;
+      else active += 1;
+    });
+
+    let totalSales = 0;
+    deliveredSnap.forEach((doc) => {
+      const data = doc.data() || {};
+      totalSales += parseFloat(data['total amount'] || data.totalAmount || 0);
+    });
+
+    let totalReturnAmount = 0;
+    returnsSnap.forEach((doc) => {
+      totalReturnAmount += parseFloat(doc.data()?.totalAmount || 0);
+    });
+
+    const statusTotals = {};
+    createdOrdersSnap.forEach((doc) => {
+      const status = String(doc.data()?.status || 'pending')
+        .trim()
+        .toLowerCase() || 'pending';
+      statusTotals[status] = (statusTotals[status] || 0) + 1;
+    });
+
+    // Always include known statuses so the donut legend stays stable day-to-day
+    const allKeys = [
+      ...ORDER_STATUS_ORDER,
+      ...Object.keys(statusTotals).filter((status) => !ORDER_STATUS_ORDER.includes(status)),
+    ];
+
+    return {
+      totalSales: roundMoney(totalSales),
+      totalOrders: deliveredSnap.size,
+      totalOutlets: outletsSnap.size,
+      totalOutletsActive: active,
+      totalOutletsInactive: inactive,
+      totalReturnOrders: returnsSnap.size,
+      totalReturnAmount: roundMoney(totalReturnAmount),
+      orderStatusItems: allKeys.map((status) => ({
+        key: status,
+        label: formatStatusLabel(status),
+        value: statusTotals[status] || 0,
+      })),
+    };
+  } catch (err) {
+    console.error(
+      `[Dashboard EOD] Firestore summary failed for ${businessDate}:`,
+      err.message || err,
+    );
+    return empty;
+  }
+};
+
 const resolveOutletNames = async (outletIds) => {
   const uniqueIds = [...new Set(outletIds.filter(Boolean))];
   if (!uniqueIds.length) return {};
@@ -235,6 +476,8 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
     topOutlets,
     posByOutlet,
     topProducts,
+    paymentSummaryItems,
+    deliverySummary,
   ] = await Promise.all([
     Sale.aggregate([
       { $match: match },
@@ -248,6 +491,8 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
     aggregateTopOutlets(Sale, match),
     aggregatePosByOutlet(Sale, match),
     aggregateTopProducts(Sale, match),
+    aggregatePaymentSummaryItems(businessDate),
+    aggregateDeliveryAndOutletSummary(businessDate),
   ]);
 
   const outletNames = await resolveOutletNames([
@@ -261,6 +506,15 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
     dailyRevenueTotal: roundMoney(revenueAgg[0]?.total ?? 0),
     dailyTransactionsTotal: transactionAgg[0]?.total ?? 0,
     newPosOutletsTotal,
+    totalSales: deliverySummary.totalSales,
+    totalOrders: deliverySummary.totalOrders,
+    totalOutlets: deliverySummary.totalOutlets,
+    totalOutletsActive: deliverySummary.totalOutletsActive,
+    totalOutletsInactive: deliverySummary.totalOutletsInactive,
+    totalReturnOrders: deliverySummary.totalReturnOrders,
+    totalReturnAmount: deliverySummary.totalReturnAmount,
+    paymentSummaryItems,
+    orderStatusItems: deliverySummary.orderStatusItems,
     posByOutlet: attachOutletNames(posByOutlet, outletNames),
     topOutlets: attachOutletNames(topOutlets, outletNames),
     topProducts,
@@ -302,6 +556,46 @@ const singleDayMetric = (dateKey, value, previousValue) => ({
   trend: computeTrend(value, previousValue),
 });
 
+const buildSummaryResponse = (snapshot, previousSnapshot, previousDateKey) => {
+  const hasPrevious = Boolean(previousSnapshot);
+  const compareLabel = hasPrevious ? formatCompareLabel(previousDateKey) : undefined;
+
+  const withTrend = (current, previous) => {
+    if (!hasPrevious) {
+      return { value: current };
+    }
+    return {
+      value: current,
+      trend: computeTrend(current, previous ?? 0),
+      compareLabel,
+    };
+  };
+
+  return {
+    totalSales: withTrend(
+      roundMoney(snapshot.totalSales ?? 0),
+      previousSnapshot?.totalSales ?? 0,
+    ),
+    totalOrders: withTrend(
+      snapshot.totalOrders ?? 0,
+      previousSnapshot?.totalOrders ?? 0,
+    ),
+    totalOutlets: {
+      value: snapshot.totalOutlets ?? 0,
+      active: snapshot.totalOutletsActive ?? 0,
+      inactive: snapshot.totalOutletsInactive ?? 0,
+    },
+    totalReturnOrders: withTrend(
+      snapshot.totalReturnOrders ?? 0,
+      previousSnapshot?.totalReturnOrders ?? 0,
+    ),
+    totalReturnAmount: withTrend(
+      roundMoney(snapshot.totalReturnAmount ?? 0),
+      previousSnapshot?.totalReturnAmount ?? 0,
+    ),
+  };
+};
+
 export const snapshotToDashboardResponse = (
   snapshot,
   previousSnapshot,
@@ -310,6 +604,7 @@ export const snapshotToDashboardResponse = (
   const prevRevenue = previousSnapshot?.dailyRevenueTotal ?? 0;
   const prevTransactions = previousSnapshot?.dailyTransactionsTotal ?? 0;
   const prevNewPos = previousSnapshot?.newPosOutletsTotal ?? 0;
+  const previousDateKey = previousSnapshot?.businessDate;
 
   const { start, end } = getIstDayBounds(businessDate);
 
@@ -320,6 +615,9 @@ export const snapshotToDashboardResponse = (
       end: end.toISOString(),
       businessDate,
     },
+    summary: buildSummaryResponse(snapshot, previousSnapshot, previousDateKey),
+    paymentSummary: toBreakdownWithPercent(snapshot.paymentSummaryItems ?? []),
+    orderStatusOverview: toBreakdownWithPercent(snapshot.orderStatusItems ?? []),
     dailyRevenue: singleDayMetric(
       businessDate,
       snapshot.dailyRevenueTotal,
@@ -363,6 +661,23 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
     0,
   );
 
+  const totalSales = roundMoney(
+    snapshots.reduce((sum, row) => sum + (row.totalSales || 0), 0),
+  );
+  const totalOrders = snapshots.reduce(
+    (sum, row) => sum + (row.totalOrders || 0),
+    0,
+  );
+  const totalReturnOrders = snapshots.reduce(
+    (sum, row) => sum + (row.totalReturnOrders || 0),
+    0,
+  );
+  const totalReturnAmount = roundMoney(
+    snapshots.reduce((sum, row) => sum + (row.totalReturnAmount || 0), 0),
+  );
+
+  const latestSnapshot = snapshots[snapshots.length - 1];
+
   const posByOutletMap = new Map();
   for (const snapshot of snapshots) {
     for (const row of snapshot.posByOutlet ?? []) {
@@ -384,7 +699,12 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
     (a, b) => b.revenue - a.revenue,
   );
 
-  const latestSnapshot = snapshots[snapshots.length - 1];
+  const paymentSummary = toBreakdownWithPercent(
+    mergeBreakdownItems(snapshots, 'paymentSummaryItems'),
+  );
+  const orderStatusOverview = toBreakdownWithPercent(
+    mergeBreakdownItems(snapshots, 'orderStatusItems'),
+  );
 
   return {
     source: 'snapshot',
@@ -393,6 +713,19 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
       end: end.toISOString(),
       businessDate: lastDate,
     },
+    summary: {
+      totalSales: { value: totalSales },
+      totalOrders: { value: totalOrders },
+      totalOutlets: {
+        value: latestSnapshot.totalOutlets ?? 0,
+        active: latestSnapshot.totalOutletsActive ?? 0,
+        inactive: latestSnapshot.totalOutletsInactive ?? 0,
+      },
+      totalReturnOrders: { value: totalReturnOrders },
+      totalReturnAmount: { value: totalReturnAmount },
+    },
+    paymentSummary,
+    orderStatusOverview,
     dailyRevenue: {
       data: snapshots.map((row) => ({
         date: row.businessDate,
@@ -428,7 +761,7 @@ export const runEodDashboardSnapshot = async (businessDate) => {
   console.log(`[Dashboard EOD] Building snapshot for ${dateKey}`);
   const saved = await saveDashboardSnapshot(dateKey);
   console.log(
-    `[Dashboard EOD] Saved snapshot for ${dateKey} (${saved.posByOutlet?.length ?? 0} outlets)`,
+    `[Dashboard EOD] Saved snapshot for ${dateKey} (${saved.posByOutlet?.length ?? 0} outlets, ${saved.totalOrders ?? 0} delivered orders)`,
   );
   return saved;
 };
