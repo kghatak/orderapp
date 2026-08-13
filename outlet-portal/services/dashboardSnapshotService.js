@@ -246,32 +246,6 @@ const aggregateTopProducts = async (Sale, match) => {
   return rows;
 };
 
-const aggregateNewPosOutletsTotal = async (Sale, start, end, tenantId) => {
-  const pipeline = [
-    {
-      $group: {
-        _id: { tenantId: '$tenantId', outletId: '$outletId' },
-        firstSaleAt: { $min: '$createdAt' },
-      },
-    },
-    {
-      $match: {
-        firstSaleAt: { $gte: start, $lte: end },
-      },
-    },
-    {
-      $count: 'value',
-    },
-  ];
-
-  if (tenantId) {
-    pipeline.unshift({ $match: { tenantId } });
-  }
-
-  const rows = await Sale.aggregate(pipeline);
-  return rows[0]?.value ?? 0;
-};
-
 /**
  * Outlet payments breakdown for Payment Summary donut
  * (Firestore `payments`: Cash / Transfer by Bank / Cheque).
@@ -472,7 +446,6 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
   const [
     revenueAgg,
     transactionAgg,
-    newPosOutletsTotal,
     topOutlets,
     posByOutlet,
     topProducts,
@@ -487,7 +460,6 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
       { $match: match },
       { $count: 'total' },
     ]),
-    aggregateNewPosOutletsTotal(Sale, start, end, tenantId || null),
     aggregateTopOutlets(Sale, match),
     aggregatePosByOutlet(Sale, match),
     aggregateTopProducts(Sale, match),
@@ -505,7 +477,6 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
     tenantId: tenantId || '',
     dailyRevenueTotal: roundMoney(revenueAgg[0]?.total ?? 0),
     dailyTransactionsTotal: transactionAgg[0]?.total ?? 0,
-    newPosOutletsTotal,
     totalSales: deliverySummary.totalSales,
     totalOrders: deliverySummary.totalOrders,
     totalOutlets: deliverySummary.totalOutlets,
@@ -528,7 +499,7 @@ export const saveDashboardSnapshot = async (businessDate, tenantId = '') => {
 
   const doc = await Snapshot.findOneAndUpdate(
     { businessDate, tenantId: tenantId || '' },
-    { $set: payload, $unset: { recentSales: '' } },
+    { $set: payload, $unset: { recentSales: '', newPosOutletsTotal: '' } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 
@@ -603,7 +574,6 @@ export const snapshotToDashboardResponse = (
 ) => {
   const prevRevenue = previousSnapshot?.dailyRevenueTotal ?? 0;
   const prevTransactions = previousSnapshot?.dailyTransactionsTotal ?? 0;
-  const prevNewPos = previousSnapshot?.newPosOutletsTotal ?? 0;
   const previousDateKey = previousSnapshot?.businessDate;
 
   const { start, end } = getIstDayBounds(businessDate);
@@ -628,11 +598,6 @@ export const snapshotToDashboardResponse = (
       snapshot.dailyTransactionsTotal,
       prevTransactions,
     ),
-    newPosOutlets: singleDayMetric(
-      businessDate,
-      snapshot.newPosOutletsTotal,
-      prevNewPos,
-    ),
     topOutlets: snapshot.topOutlets ?? [],
     posByOutlet: snapshot.posByOutlet ?? [],
     topProducts: snapshot.topProducts ?? [],
@@ -654,10 +619,6 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
   );
   const transactionsTotal = snapshots.reduce(
     (sum, row) => sum + (row.dailyTransactionsTotal || 0),
-    0,
-  );
-  const newPosTotal = snapshots.reduce(
-    (sum, row) => sum + (row.newPosOutletsTotal || 0),
     0,
   );
 
@@ -740,14 +701,6 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
         value: row.dailyTransactionsTotal,
       })),
       total: transactionsTotal,
-      trend: 0,
-    },
-    newPosOutlets: {
-      data: snapshots.map((row) => ({
-        date: row.businessDate,
-        value: row.newPosOutletsTotal,
-      })),
-      total: newPosTotal,
       trend: 0,
     },
     topOutlets: latestSnapshot.topOutlets ?? [],

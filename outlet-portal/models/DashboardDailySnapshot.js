@@ -30,7 +30,6 @@ const dashboardDailySnapshotSchema = new mongoose.Schema(
     tenantId: { type: String, default: '' },
     dailyRevenueTotal: { type: Number, default: 0 },
     dailyTransactionsTotal: { type: Number, default: 0 },
-    newPosOutletsTotal: { type: Number, default: 0 },
     /** Delivery / outlet KPIs (Firestore) — stored same as POS totals */
     totalSales: { type: Number, default: 0 },
     totalOrders: { type: Number, default: 0 },
