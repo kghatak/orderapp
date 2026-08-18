@@ -292,6 +292,22 @@ export const updateOutlet = async (req, res) => {
         const newOpeningBalance = updateData.openingBalance || 0;
         
         await outletRef.update(updateData);
+
+        const updatedName = updateData.name ?? currentOutletData.name;
+        if (updatedName && updatedName !== currentOutletData.name) {
+          try {
+            const outletPaymentRef = db.collection('outlet_payments').doc(outletId);
+            const outletPaymentDoc = await outletPaymentRef.get();
+            if (outletPaymentDoc.exists) {
+              await outletPaymentRef.update({
+                outletName: updatedName,
+                lastUpdated: new Date(),
+              });
+            }
+          } catch (nameSyncError) {
+            console.error('Error syncing outlet name to outlet_payments:', nameSyncError);
+          }
+        }
         
         // Handle opening balance changes (no payment requests needed)
         if (newOpeningBalance !== currentOpeningBalance) {
@@ -315,7 +331,7 @@ export const updateOutlet = async (req, res) => {
               // Create new outlet_payments document
               await outletPaymentRef.set({
                 outletId: outletId,
-                outletName: currentOutletData.name,
+                outletName: updatedName || currentOutletData.name,
                 pendingAmount: newOpeningBalance,
                 totalAmount: newOpeningBalance,
                 paidAmount: 0,
