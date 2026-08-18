@@ -34,6 +34,33 @@ const generatePaymentId = async (db) => {
   return `PAY${nextCount.toString().padStart(4, '0')}`;
 };
 
+const getCurrentOutletName = (data, fallbackId) =>
+  data?.name || data?.outletName || fallbackId || '';
+
+/** Live names from `outlets` (not the denormalized copy on outlet_payments). */
+const resolveCurrentOutletNames = async (db, outletIds) => {
+  const uniqueIds = [...new Set((outletIds || []).filter(Boolean))];
+  const names = {};
+  if (!uniqueIds.length) return names;
+
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+    const batch = uniqueIds.slice(i, i + BATCH_SIZE);
+    const refs = batch.map((id) => db.collection('outlets').doc(id));
+    const docs = await db.getAll(...refs);
+    for (const doc of docs) {
+      if (!doc.exists) continue;
+      names[doc.id] = getCurrentOutletName(doc.data(), doc.id);
+    }
+  }
+
+  for (const id of uniqueIds) {
+    if (!names[id]) names[id] = id;
+  }
+
+  return names;
+};
+
 // Create or Update Outlet Payment
 export const createOutletPayment = async (req, res) => {
   try {
@@ -1526,11 +1553,14 @@ export const getOutletsWithPendingPayments = async (req, res) => {
       .where('pendingAmount', '>', 0)
       .get();
     
+    const outletIds = snapshot.docs.map((doc) => doc.id);
+    const outletNames = await resolveCurrentOutletNames(db, outletIds);
+
     const outletsWithPendingPayments = snapshot.docs.map(doc => {
       const data = doc.data();
       return {
         outletId: doc.id,
-        outletName: data.outletName,
+        outletName: outletNames[doc.id] || data.outletName,
         pendingAmount: data.pendingAmount || 0,
         paidAmount: data.paidAmount || 0,
         totalAmount: data.totalAmount || 0,
@@ -1607,8 +1637,7 @@ export const getPaymentsReport = async (req, res) => {
     const paginatedQuery = query.offset(offset).limit(parseInt(limit));
     const snapshot = await paginatedQuery.get();
 
-    // Process payments data
-    const payments = snapshot.docs.map(doc => {
+    const rawPayments = snapshot.docs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -1623,6 +1652,16 @@ export const getPaymentsReport = async (req, res) => {
         createdAt: data.createdAt
       };
     });
+
+    const outletNames = await resolveCurrentOutletNames(
+      db,
+      rawPayments.map((p) => p.outletId),
+    );
+
+    const payments = rawPayments.map((p) => ({
+      ...p,
+      outletName: outletNames[p.outletId] || p.outletName || p.outletId,
+    }));
 
     res.status(200).json({
       success: true,
@@ -1878,7 +1917,7 @@ export const getPaymentsTallyXLSX = async (req, res) => {
       .where('status', '==', 'approved')
       .get();
 
-    const payments = snapshot.docs
+    const filteredPayments = snapshot.docs
       .map((doc) => ({ id: doc.id, ...doc.data() }))
       .filter((p) => p.paymentType !== 'opening_balance')
       .map((p) => {
@@ -1886,7 +1925,18 @@ export const getPaymentsTallyXLSX = async (req, res) => {
         const dateKey = effectiveDate ? formatCalendarDateIST(effectiveDate) : '';
         return { ...p, effectiveDate, dateKey };
       })
-      .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey))
+      .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey));
+
+    const outletNames = await resolveCurrentOutletNames(
+      db,
+      filteredPayments.map((p) => p.outletId),
+    );
+
+    const payments = filteredPayments
+      .map((p) => ({
+        ...p,
+        outletName: outletNames[p.outletId] || p.outletName || p.outletId,
+      }))
       .sort((a, b) => {
         const timeDiff = a.effectiveDate.getTime() - b.effectiveDate.getTime();
         if (timeDiff !== 0) return timeDiff;
