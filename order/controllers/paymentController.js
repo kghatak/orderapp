@@ -2,6 +2,10 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
+import {
+  markOutletClosingBalanceRecalcPending,
+  toIstDateKeyFromValue,
+} from '../services/closingBalanceRecalc.js';
 import admin from 'firebase-admin';
 import ExcelJS from 'exceljs';
 
@@ -13,6 +17,17 @@ const toFirestoreTimestamp = (val) => {
   }
   const d = new Date(val);
   return Number.isNaN(d.getTime()) ? null : admin.firestore.Timestamp.fromDate(d);
+};
+
+const flagBackdatedClosingBalance = async (db, outletId, ...dateValues) => {
+  const keys = dateValues.map(toIstDateKeyFromValue).filter(Boolean);
+  if (!outletId || !keys.length) return;
+  const oldest = keys.sort()[0];
+  try {
+    await markOutletClosingBalanceRecalcPending(db, outletId, oldest);
+  } catch (err) {
+    console.error('Failed to mark closing-balance recast pending:', err.message || err);
+  }
 };
 
 // Helper to generate sequential payment IDs (PAY0001, PAY0002, ...)
@@ -468,6 +483,12 @@ export const approvePaymentRequest = async (req, res) => {
     }
     
 
+    await flagBackdatedClosingBalance(
+      db,
+      requestData.outletId,
+      paymentData.paymentDate,
+    );
+
     res.status(200).json({ 
       message: 'Payment request approved successfully',
       requestId: requestId,
@@ -616,6 +637,12 @@ export const recordCashPayment = async (req, res) => {
       'Cheque': 'Cheque payment recorded successfully'
     };
 
+
+    await flagBackdatedClosingBalance(
+      db,
+      outletId,
+      savedPayment?.paymentDate || paymentDateTimestamp,
+    );
 
     res.status(201).json({
       message: paymentModeMessages[paymentMode] || 'Payment recorded successfully',
@@ -1236,6 +1263,13 @@ export const updatePaymentRecord = async (req, res) => {
       }
 
 
+      await flagBackdatedClosingBalance(
+        db,
+        existing.outletId,
+        existing.paymentDate,
+        newPaymentDateTs,
+      );
+
       return res.status(200).json({
         message: 'Payment updated successfully',
         id,
@@ -1341,6 +1375,12 @@ export const deletePaymentRecord = async (req, res) => {
         await requestRef.delete();
       }
 
+
+      await flagBackdatedClosingBalance(
+        db,
+        existing.outletId,
+        existing.paymentDate,
+      );
 
       return res.status(200).json({
         message: 'Payment deleted successfully',
