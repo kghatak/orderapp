@@ -1872,7 +1872,7 @@ export const bulkRecordPayments = async (req, res) => {
   }
 };
 
-const MAX_PAYMENT_TALLY_RANGE_DAYS = 10;
+const MAX_PAYMENT_TALLY_RANGE_DAYS = 31;
 
 const PAYMENT_TALLY_HEADERS = [
   'Date',

@@ -14,7 +14,7 @@ const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 /** Shared cap for GET range on daily-product-delivery / daily-product-return. */
 const MAX_DELIVERY_QUERY_RANGE_DAYS = 93;
 /** GET daily-product-* /xlsx: max inclusive calendar days when using from & to query params */
-const MAX_XLSX_VOUCHER_RANGE_DAYS = 10;
+const MAX_XLSX_VOUCHER_RANGE_DAYS = 31;
 /** Firestore batch write limit — stay under 500 when writing parent + many outlet subdocs */
 const FIRESTORE_BATCH_SET_LIMIT = 450;
 
@@ -610,7 +610,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
       status: 400,
       body: {
         success: false,
-        error: 'Provide date=YYYY-MM-DD or from and to (inclusive range, maximum 10 days)',
+        error: `Provide date=YYYY-MM-DD or from and to (inclusive range, maximum ${MAX_XLSX_VOUCHER_RANGE_DAYS} days)`,
       },
     };
   }
@@ -1595,7 +1595,7 @@ export const calculateDailyProductReturn = async (req, res) => {
  * GET /api/balance/daily-product-delivery/xlsx
  *
  * Single day: `?date=2026-03-17&interState=false&defaultGst=5&counter=1`
- * Date range (inclusive, max 10 days): `?from=2026-03-17&to=2026-03-20&…`
+ * Date range (inclusive, max 31 days): `?from=2026-03-17&to=2026-03-20&…`
  * Days with no `DailyProductDelivery` snapshot (or no outlets) are skipped; 404 if none of the requested days have data.
  *
  * Voucher-style Excel (GST-inclusive list price, discount %, tax backed out).
@@ -1664,7 +1664,7 @@ export const getDailyProductDeliveryCSV = async (req, res) => {
  * GET /api/balance/daily-product-return/xlsx
  *
  * Single day: `?date=…&…` — same columns/GST logic as delivery xlsx.
- * Date range (inclusive, max 10 days): `?from=…&to=…` — skips days without return snapshots.
+ * Date range (inclusive, max 31 days): `?from=…&to=…` — skips days without return snapshots.
  * Optional `counter` as for delivery; else `counters/returnvouchercounter`.
  */
 export const getDailyProductReturnXLSX = async (req, res) => {
