@@ -12,6 +12,9 @@ serviceAccountKey.json
 # production
 /build
 
+# Generated public milk report PDFs
+/uploads/milk-reports/
+
 # misc
 .DS_Store
 .claude/

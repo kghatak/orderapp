@@ -36,6 +36,7 @@ import milkReportRoutes from './milk/routes/milkReportRoutes.js';
 import customInvoiceRoutes from './order/routes/customInvoiceRoutes.js';
 //import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
 import outletOpeningClosingBalanceRoutes from './order/routes/outletOpeningClosingBalanceRoutes.js';
+import { downloadPublicMilkReport } from './milk/controllers/milkTenDayReportController.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -178,6 +179,14 @@ app.use('/milk/suppliers', supplierRoutes);
 app.use('/milk/procurements', procurementRoutes);
 app.use('/milk/payments', milkPaymentRoutes);
 app.use('/milk/reports', milkReportRoutes);
+
+// Public milk 10-day PDF downloads (no auth — used in WhatsApp links)
+app.get('/public/milk-reports/:token', (req, res, next) => {
+  if (!isMongoConnected()) {
+    return res.status(503).json({ success: false, message: 'Service unavailable' });
+  }
+  return downloadPublicMilkReport(req, res, next);
+});
 
 // Health check
 app.get('/', (req, res) => {
