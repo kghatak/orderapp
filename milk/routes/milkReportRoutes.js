@@ -3,6 +3,7 @@ import { milkAuthMiddleware, requireRole } from '../../middleware/milkAuthMiddle
 import { milkTenantMiddleware } from '../../middleware/milkTenantMiddleware.js';
 import { dailySummary, supplierSummary, periodSummary } from '../controllers/milkReportController.js';
 import { getMilkTallyXLSX } from '../controllers/milkTallyExportController.js';
+import { sendTenDayReport } from '../controllers/milkTenDayReportController.js';
 
 const router = express.Router();
 
@@ -13,5 +14,6 @@ router.get('/daily', requireRole('admin'), dailySummary);
 router.get('/summary', requireRole('admin'), periodSummary);
 router.get('/supplier', supplierSummary);
 router.get('/tally/xlsx', requireRole('admin'), getMilkTallyXLSX);
+router.post('/send-10day', requireRole('admin'), sendTenDayReport);
 
 export default router;

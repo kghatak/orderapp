@@ -29,27 +29,37 @@ function normalizePhone(phone) {
  * Build the components object expected by the MSG91 bulk API.
  * Named params: { quantity: '5 Kg', amount: '₹100' } → body_quantity, body_amount, ...
  * Legacy array: ['a', 'b'] → body_1, body_2 (for older templates without parameter_name).
+ * Optional Visit-website button suffix → button_1 (appended to template base URL).
  *
  * @param {Record<string, string|number>|string[]} bodyParams
- * @returns {Record<string, { type: string, value: string, parameter_name?: string }>}
+ * @param {{ urlButtonSuffix?: string }} [options]
  */
-function buildComponents(bodyParams) {
+function buildComponents(bodyParams, options = {}) {
   const components = {};
 
   if (Array.isArray(bodyParams)) {
     bodyParams.forEach((value, i) => {
       components[`body_${i + 1}`] = { type: 'text', value: String(value) };
     });
-    return components;
+  } else {
+    for (const [paramName, value] of Object.entries(bodyParams)) {
+      components[`body_${paramName}`] = {
+        type: 'text',
+        value: String(value),
+        parameter_name: paramName,
+      };
+    }
   }
 
-  for (const [paramName, value] of Object.entries(bodyParams)) {
-    components[`body_${paramName}`] = {
+  // Dynamic suffix for "Visit website" CTA (index 0 / MSG91 button_1)
+  if (options.urlButtonSuffix) {
+    components.button_1 = {
+      subtype: 'url',
       type: 'text',
-      value: String(value),
-      parameter_name: paramName,
+      value: String(options.urlButtonSuffix),
     };
   }
+
   return components;
 }
 
@@ -101,9 +111,10 @@ export async function sendWhatsAppText(toPhone, body) {
  * @param {string} templateName - Approved template name in MSG91 dashboard
  * @param {Record<string, string|number>|string[]} bodyParams - Named template params or legacy positional values
  * @param {string} [languageCode='en'] - Template language code
+ * @param {{ urlButtonSuffix?: string }} [options] - Dynamic Visit-website URL suffix
  */
-export async function sendWhatsAppTemplate(toPhone, templateName, bodyParams = [], languageCode = 'en') {
-  return sendWhatsAppTemplateBulk([toPhone], templateName, bodyParams, languageCode);
+export async function sendWhatsAppTemplate(toPhone, templateName, bodyParams = [], languageCode = 'en', options = {}) {
+  return sendWhatsAppTemplateBulk([toPhone], templateName, bodyParams, languageCode, options);
 }
 
 /**
@@ -114,16 +125,17 @@ export async function sendWhatsAppTemplate(toPhone, templateName, bodyParams = [
  * @param {string} templateName - Approved template name in MSG91 dashboard
  * @param {Record<string, string|number>|string[]} bodyParams - Named template params or legacy positional values
  * @param {string} [languageCode='en'] - Template language code
+ * @param {{ urlButtonSuffix?: string }} [options] - Dynamic Visit-website URL suffix
  */
-export async function sendWhatsAppTemplateBulk(toPhones, templateName, bodyParams = [], languageCode = 'en') {
+export async function sendWhatsAppTemplateBulk(toPhones, templateName, bodyParams = [], languageCode = 'en', options = {}) {
   const { authKey, number } = getCredentials();
   if (!authKey || !number) {
     console.warn('WhatsApp: MSG91_AUTH_KEY or MSG91_WHATSAPP_NUMBER not configured, skipping');
-    return;
+    return { ok: false, error: 'WhatsApp not configured' };
   }
 
   const normalizedNumbers = toPhones.map(normalizePhone);
-  const components = buildComponents(bodyParams);
+  const components = buildComponents(bodyParams, options);
 
   try {
     const response = await axios.post(
@@ -155,7 +167,9 @@ export async function sendWhatsAppTemplateBulk(toPhones, templateName, bodyParam
       }
     );
     console.log(`WhatsApp template "${templateName}" sent to ${normalizedNumbers.length} recipient(s):`, response.data);
+    return { ok: true, data: response.data };
   } catch (err) {
     console.error(`WhatsApp template "${templateName}" bulk send failed:`, err.response?.data || err.message);
+    return { ok: false, error: err.response?.data || err.message };
   }
 }
