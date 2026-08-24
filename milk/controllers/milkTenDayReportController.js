@@ -110,7 +110,6 @@ export const sendTenDayReport = async (req, res) => {
         to_date: report.toDateLabel,
         total_qty: String(report.totalQty),
         total_amount: String(Math.round(report.totalAmount)),
-        report_url: reportUrl
       },
       'en',
       // Visit website button: base URL + this token
