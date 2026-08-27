@@ -1018,11 +1018,9 @@ const parsePaymentExcelBuffer = async (buffer) => {
 const validatePaymentRow = (row, { checkOutletExists = false, outletExistsSet = null } = {}) => {
   const errors = [];
   const enteredDateStr = row.paymentDate ? formatCalendarDateIST(row.paymentDate) : '';
-  const todayStr = formatCalendarDateIST(new Date());
   const data = {
-    // What will be stored on paymentDate (import day)
-    paymentDate: todayStr,
-    // What will be stored on actualpaymentdate (date from CSV)
+    // CSV / entered date is stored on both paymentDate and actualpaymentdate
+    paymentDate: enteredDateStr,
     actualpaymentdate: enteredDateStr,
     outletId: row.outletId || '',
     outletName: row.outletName || '',
@@ -1107,8 +1105,8 @@ const recordPaymentForOutlet = async (db, {
 
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
-  // Bulk import: paymentDate = today (import day); actualpaymentdate = date from CSV
-  // Single/manual: paymentDate = entered date (or server time if missing)
+  // paymentDate = date entered in CSV / form (or server time if missing)
+  // Bulk import also copies that same entered date to actualpaymentdate
   const paymentData = {
     paymentId,
     amount: paymentAmount,
@@ -1119,9 +1117,7 @@ const recordPaymentForOutlet = async (db, {
     approvedBy,
     approvedAt: serverTimestamp,
     createdAt: serverTimestamp,
-    paymentDate: storeActualPaymentDate
-      ? serverTimestamp
-      : (enteredDateTimestamp || serverTimestamp),
+    paymentDate: enteredDateTimestamp || serverTimestamp,
     remarks: remarks || null,
   };
 
@@ -1152,6 +1148,8 @@ const recordPaymentForOutlet = async (db, {
 
     transaction.set(paymentDocRef, paymentData);
   });
+
+  await flagBackdatedClosingBalance(db, outletId, enteredDateTimestamp);
 
   return {
     paymentId,
@@ -1801,9 +1799,8 @@ export const bulkRecordPayments = async (req, res) => {
       const rowNumber = paymentData.row ?? i + 1;
 
       try {
-        // CSV / entered date is sent as actualpaymentdate; paymentDate in preview is today
         const enteredDateRaw =
-          paymentData.actualpaymentdate || paymentData.paymentDate || null;
+          paymentData.paymentDate || paymentData.actualpaymentdate || null;
         const paymentDate = enteredDateRaw
           ? parseExcelCellDate(enteredDateRaw)
           : null;
