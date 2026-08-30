@@ -118,6 +118,7 @@ export const getProductById = async (req, res) => {
 // Get All Products with advanced filtering
 export const getAllProducts = async (req, res) => {
   try {
+    console.log('📥 GET /products', req.query);
     const db = getFirestoreDB();
     const { filters, name_like, _start, _end, page, limit } = req.query; // Get all query parameters
     

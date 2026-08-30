@@ -41,7 +41,7 @@ const getHsnCodeFromIcon = (icon) => {
 // Helper function to build a plain order data object from the request
 const buildOrderData = async (req, res) => {
   const db = getFirestoreDB();
-  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion } = req.body; // items: [{ productId, quantity, discountPercentage }]
+  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion, remarks } = req.body; // items: [{ productId, quantity, discountPercentage }]
 
   if (!outletId || !items || !Array.isArray(items) || items.length === 0) {
     res.status(400).json({ error: 'Invalid request body: outletId and items array are required.' });
@@ -114,6 +114,7 @@ const buildOrderData = async (req, res) => {
     utensilsUsed: [],
     paymentId: '',
     appVersion: appVersion || '2.0.7',
+    remarks: remarks != null ? String(remarks) : '',
   };
 
   return orderData;
@@ -122,10 +123,24 @@ const buildOrderData = async (req, res) => {
 // Create a new order
 export const createOrder = async (req, res) => {
   try {
+    console.log('📥 POST /orders from app:', JSON.stringify(req.body));
+    console.log('📝 remarks in POST body:', req.body?.remarks ?? '(not sent)');
+    const itemsForLog = Array.isArray(req.body?.items) ? req.body.items : [];
+    for (const item of itemsForLog) {
+      console.log(
+        `📦 quantity in POST body: productId=${item.productId} quantity=${item.quantity}`,
+      );
+    }
     const db = getFirestoreDB();
     let orderData = await buildOrderData(req, res);
     if (!orderData) {
       return; // Error response was already sent
+    }
+    console.log('📝 remarks saved on order:', orderData.remarks ?? '');
+    for (const item of orderData.items || []) {
+      console.log(
+        `📦 quantity saved on order: productId=${item.productId} name=${item.name} quantity=${item.quantity}`,
+      );
     }
 
     // Generate a new unique order ID and use it as the document ID (matches mobile app)
@@ -198,7 +213,29 @@ export const createOrder = async (req, res) => {
         // Don't fail order creation if outlet_payments update fails
       }
     }
+
+    // Same as old Flutter submitOrder: reduce product availableQuantity.
+    // Optional for existing clients: they keep working if this step fails.
+    try {
+      const stockBatch = db.batch();
+      for (const item of orderData.items || []) {
+        const productId = item.productId;
+        const quantity = Number(item.quantity) || 0;
+        if (!productId || quantity === 0) continue;
+        stockBatch.update(db.collection('products').doc(productId), {
+          availableQuantity: admin.firestore.FieldValue.increment(-quantity),
+        });
+        console.log(
+          `📉 availableQuantity decrement: productId=${productId} minus=${quantity}`,
+        );
+      }
+      await stockBatch.commit();
+      console.log(`Updated availableQuantity for order ${parentOrderId}`);
+    } catch (stockError) {
+      console.error('Error updating availableQuantity when creating order:', stockError);
+    }
     
+    console.log(`✅ Order created via API: ${parentOrderId}`);
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
 
   } catch (error) {
@@ -682,16 +719,39 @@ export const removeProductsFromOrder = async (req, res) => {
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
   try {
+    console.log('📥 GET /orders', req.query);
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10, outletId } = req.query;
+    let { _start = 0, _end = 10, outletId, from, to } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
+    const limit = Math.max(0, _end - _start);
 
     let baseQuery = db.collection('orders');
 
     if (outletId) {
       baseQuery = baseQuery.where('outletId', '==', outletId);
+    }
+
+    // Optional date range — website does not send these; existing calls unchanged.
+    if (from) {
+      const fromDate = new Date(from);
+      if (!isNaN(fromDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '>=',
+          admin.firestore.Timestamp.fromDate(fromDate),
+        );
+      }
+    }
+    if (to) {
+      const toDate = new Date(to);
+      if (!isNaN(toDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '<=',
+          admin.firestore.Timestamp.fromDate(toDate),
+        );
+      }
     }
 
     // Get total count for the X-Total-Count header
@@ -702,7 +762,7 @@ export const getAllOrders = async (req, res) => {
     const ordersRef = baseQuery
       .orderBy('Created at', 'desc')
       .offset(_start)
-      .limit(limit);
+      .limit(limit || 10);
 
     const snapshot = await ordersRef.get();
 
@@ -715,10 +775,13 @@ export const getAllOrders = async (req, res) => {
     res.set('X-Total-Count', totalCount.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
 
+    console.log(
+      `🟢 GET /orders OK page=${orders.length} total=${totalCount} outletId=${outletId || 'ALL'} from=${from || '-'} to=${to || '-'}`,
+    );
     res.status(200).json(orders);
 
   } catch (error) {
-    console.error('Error fetching paginated orders:', error);
+    console.error('🔴 GET /orders FAIL', error);
     res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
   }
 };
