@@ -123,24 +123,10 @@ const buildOrderData = async (req, res) => {
 // Create a new order
 export const createOrder = async (req, res) => {
   try {
-    console.log('📥 POST /orders from app:', JSON.stringify(req.body));
-    console.log('📝 remarks in POST body:', req.body?.remarks ?? '(not sent)');
-    const itemsForLog = Array.isArray(req.body?.items) ? req.body.items : [];
-    for (const item of itemsForLog) {
-      console.log(
-        `📦 quantity in POST body: productId=${item.productId} quantity=${item.quantity}`,
-      );
-    }
     const db = getFirestoreDB();
     let orderData = await buildOrderData(req, res);
     if (!orderData) {
       return; // Error response was already sent
-    }
-    console.log('📝 remarks saved on order:', orderData.remarks ?? '');
-    for (const item of orderData.items || []) {
-      console.log(
-        `📦 quantity saved on order: productId=${item.productId} name=${item.name} quantity=${item.quantity}`,
-      );
     }
 
     // Generate a new unique order ID and use it as the document ID (matches mobile app)
@@ -225,17 +211,12 @@ export const createOrder = async (req, res) => {
         stockBatch.update(db.collection('products').doc(productId), {
           availableQuantity: admin.firestore.FieldValue.increment(-quantity),
         });
-        console.log(
-          `📉 availableQuantity decrement: productId=${productId} minus=${quantity}`,
-        );
       }
       await stockBatch.commit();
-      console.log(`Updated availableQuantity for order ${parentOrderId}`);
     } catch (stockError) {
       console.error('Error updating availableQuantity when creating order:', stockError);
     }
     
-    console.log(`✅ Order created via API: ${parentOrderId}`);
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
 
   } catch (error) {
@@ -719,7 +700,6 @@ export const removeProductsFromOrder = async (req, res) => {
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
   try {
-    console.log('📥 GET /orders', req.query);
     const db = getFirestoreDB();
     let { _start = 0, _end = 10, outletId, from, to } = req.query;
     _start = parseInt(_start);
@@ -775,13 +755,10 @@ export const getAllOrders = async (req, res) => {
     res.set('X-Total-Count', totalCount.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
 
-    console.log(
-      `🟢 GET /orders OK page=${orders.length} total=${totalCount} outletId=${outletId || 'ALL'} from=${from || '-'} to=${to || '-'}`,
-    );
     res.status(200).json(orders);
 
   } catch (error) {
-    console.error('🔴 GET /orders FAIL', error);
+    console.error('Error fetching paginated orders:', error);
     res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
   }
 };
