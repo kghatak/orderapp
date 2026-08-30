@@ -41,7 +41,7 @@ const getHsnCodeFromIcon = (icon) => {
 // Helper function to build a plain order data object from the request
 const buildOrderData = async (req, res) => {
   const db = getFirestoreDB();
-  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion } = req.body; // items: [{ productId, quantity, discountPercentage }]
+  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion, remarks } = req.body; // items: [{ productId, quantity, discountPercentage }]
 
   if (!outletId || !items || !Array.isArray(items) || items.length === 0) {
     res.status(400).json({ error: 'Invalid request body: outletId and items array are required.' });
@@ -114,6 +114,7 @@ const buildOrderData = async (req, res) => {
     utensilsUsed: [],
     paymentId: '',
     appVersion: appVersion || '2.0.7',
+    remarks: remarks != null ? String(remarks) : '',
   };
 
   return orderData;
@@ -197,6 +198,23 @@ export const createOrder = async (req, res) => {
         console.error('Error updating outlet_payments when creating order:', paymentError);
         // Don't fail order creation if outlet_payments update fails
       }
+    }
+
+    // Same as old Flutter submitOrder: reduce product availableQuantity.
+    // Optional for existing clients: they keep working if this step fails.
+    try {
+      const stockBatch = db.batch();
+      for (const item of orderData.items || []) {
+        const productId = item.productId;
+        const quantity = Number(item.quantity) || 0;
+        if (!productId || quantity === 0) continue;
+        stockBatch.update(db.collection('products').doc(productId), {
+          availableQuantity: admin.firestore.FieldValue.increment(-quantity),
+        });
+      }
+      await stockBatch.commit();
+    } catch (stockError) {
+      console.error('Error updating availableQuantity when creating order:', stockError);
     }
     
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
@@ -683,15 +701,37 @@ export const removeProductsFromOrder = async (req, res) => {
 export const getAllOrders = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10, outletId } = req.query;
+    let { _start = 0, _end = 10, outletId, from, to } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
+    const limit = Math.max(0, _end - _start);
 
     let baseQuery = db.collection('orders');
 
     if (outletId) {
       baseQuery = baseQuery.where('outletId', '==', outletId);
+    }
+
+    // Optional date range — website does not send these; existing calls unchanged.
+    if (from) {
+      const fromDate = new Date(from);
+      if (!isNaN(fromDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '>=',
+          admin.firestore.Timestamp.fromDate(fromDate),
+        );
+      }
+    }
+    if (to) {
+      const toDate = new Date(to);
+      if (!isNaN(toDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '<=',
+          admin.firestore.Timestamp.fromDate(toDate),
+        );
+      }
     }
 
     // Get total count for the X-Total-Count header
@@ -702,7 +742,7 @@ export const getAllOrders = async (req, res) => {
     const ordersRef = baseQuery
       .orderBy('Created at', 'desc')
       .offset(_start)
-      .limit(limit);
+      .limit(limit || 10);
 
     const snapshot = await ordersRef.get();
 
