@@ -6,8 +6,7 @@ export const connectMongoDB = async () => {
   try {
     const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/orderapp';
     await mongoose.connect(uri);
-    console.log('✅ MongoDB connected');
-    return true;
+        return true;
   } catch (err) {
     console.warn('⚠️ MongoDB not connected – skipping. Order app will work; Milk module will be unavailable.', err.message);
     return false;

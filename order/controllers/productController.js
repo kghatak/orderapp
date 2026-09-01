@@ -242,8 +242,6 @@ export const getAllProducts = async (req, res) => {
       }
     }
     
-    console.log(`Final result: ${paginatedProducts.length} products (total available: ${products.length})`);
-    
     // Set headers that Refine framework expects for pagination
     res.set('X-Total-Count', products.length.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');

@@ -195,6 +195,13 @@ export const cleanupOpeningBalancePayments = async (req, res) => {
 };
 
 // Get Outlets with Pending Payment Requests
+async function markPaymentRequestProcessed(db, requestId, extra = {}) {
+  await db.collection('payment_requests').doc(requestId).update({
+    ...extra,
+    updatedAt: new Date(),
+  });
+}
+
 export const getOutletsWithPendingRequests = async (req, res) => {
   try {
     const db = getFirestoreDB();
@@ -203,8 +210,34 @@ export const getOutletsWithPendingRequests = async (req, res) => {
     const requestsSnapshot = await db.collection('payment_requests')
       .where('status', '==', 'pending')
       .get();
-    
-    const paymentRequests = requestsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // Approve/reject copies to `payments` with the same id. Older calls left
+    // payment_requests.status as pending — hide those so Pending lists match.
+    const paymentRequests = [];
+    const docs = requestsSnapshot.docs;
+    for (let i = 0; i < docs.length; i += 100) {
+      const chunk = docs.slice(i, i + 100);
+      const snaps = await db.getAll(
+        ...chunk.map((doc) => db.collection('payments').doc(doc.id)),
+      );
+      snaps.forEach((paymentSnap, index) => {
+        const requestDoc = chunk[index];
+        if (paymentSnap.exists) {
+          const payment = paymentSnap.data() || {};
+          markPaymentRequestProcessed(db, requestDoc.id, {
+            status: payment.status || 'approved',
+            approvedBy: payment.approvedBy,
+            approvedAt: payment.approvedAt,
+            rejectedBy: payment.rejectedBy,
+            rejectedAt: payment.rejectedAt,
+          }).catch((error) => {
+            console.log('Error syncing payment request status:', error);
+          });
+          return;
+        }
+        paymentRequests.push({ id: requestDoc.id, ...requestDoc.data() });
+      });
+    }
     
     // Group by outlet
     const outletMap = new Map();
@@ -390,6 +423,26 @@ export const approvePaymentRequest = async (req, res) => {
     }
     
     const requestData = requestDoc.data();
+
+    const alreadyCopied = await db.collection('payments').doc(requestId).get();
+    if (
+      (requestData.status && requestData.status !== 'pending') ||
+      alreadyCopied.exists
+    ) {
+      const copied = alreadyCopied.exists ? alreadyCopied.data() : {};
+      if (requestData.status === 'pending' || !requestData.status) {
+        await markPaymentRequestProcessed(db, requestId, {
+          status: copied.status || 'approved',
+          approvedBy: copied.approvedBy,
+          approvedAt: copied.approvedAt,
+        });
+      }
+      return res.status(200).json({
+        message: 'Payment request already processed',
+        requestId,
+        paymentId: copied.paymentId || null,
+      });
+    }
     
     // Check if this outlet already has a paymentId assigned
     const existingPayment = await db.collection('payments')
@@ -438,6 +491,13 @@ export const approvePaymentRequest = async (req, res) => {
     
     // Use the original request ID as the document ID in payments collection
     await db.collection('payments').doc(requestId).set(paymentData);
+
+    await markPaymentRequestProcessed(db, requestId, {
+      status: 'approved',
+      approvedBy: admin,
+      approvedAt: paymentData.approvedAt,
+      remarks: remarks || requestData.remarks,
+    });
     
     // Update outlet_payments collection
     const outletPaymentRef = db.collection('outlet_payments').doc(requestData.outletId);
@@ -1432,6 +1492,26 @@ export const rejectPaymentRequest = async (req, res) => {
     }
     
     const requestData = requestDoc.data();
+
+    const alreadyCopied = await db.collection('payments').doc(requestId).get();
+    if (
+      (requestData.status && requestData.status !== 'pending') ||
+      alreadyCopied.exists
+    ) {
+      const copied = alreadyCopied.exists ? alreadyCopied.data() : {};
+      if (requestData.status === 'pending' || !requestData.status) {
+        await markPaymentRequestProcessed(db, requestId, {
+          status: copied.status || 'rejected',
+          rejectedBy: copied.rejectedBy,
+          rejectedAt: copied.rejectedAt,
+        });
+      }
+      return res.status(200).json({
+        message: 'Payment request already processed',
+        requestId,
+        paymentId: copied.paymentId || null,
+      });
+    }
     
     // Check if this outlet already has a paymentId assigned
     const existingPayment = await db.collection('payments')
@@ -1477,6 +1557,13 @@ export const rejectPaymentRequest = async (req, res) => {
     
     // Use the original request ID as the document ID in payments collection
     await db.collection('payments').doc(requestId).set(paymentData);
+
+    await markPaymentRequestProcessed(db, requestId, {
+      status: 'rejected',
+      rejectedBy: admin,
+      rejectedAt: paymentData.rejectedAt,
+      remarks: remarks || requestData.remarks,
+    });
     
     // Update outlet_payments collection
     const outletPaymentRef = db.collection('outlet_payments').doc(requestData.outletId);

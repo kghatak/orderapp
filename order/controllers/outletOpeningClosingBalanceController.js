@@ -845,9 +845,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     const db = getFirestoreDB();
     const { triggeredAt, timeZone, source } = req.body;
 
-    console.log(`📊 [Balance Calculation] Started at ${executionStart.toISOString()}`);
-    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
-
+        
     // ──────────────────────────────────────────────
     // Step 1 — Cleanup old records (older than 1 month)
     // ──────────────────────────────────────────────
@@ -855,8 +853,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
     const oneMonthAgoTimestamp = admin.firestore.Timestamp.fromDate(oneMonthAgo);
 
-    console.log(`🧹 [Step 1] Cleaning up records older than ${oneMonthAgo.toISOString()}`);
-
+    
     const oldRecordsSnapshot = await db
       .collection('OutletOpeningClosingBalance')
       .where('timestamp', '<', oneMonthAgoTimestamp)
@@ -874,21 +871,18 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
       oldRecordsDeleted = oldDocs.length;
     }
 
-    console.log(`🧹 [Step 1] Deleted ${oldRecordsDeleted} old records`);
-
+    
     // ──────────────────────────────────────────────
     // Step 2 — Query all active outlets
     // ──────────────────────────────────────────────
-    console.log('🏪 [Step 2] Querying all active outlets...');
-
+    
     const outletsSnapshot = await db
       .collection('outlets')
       .where('active', '==', true)
       .get();
 
     if (outletsSnapshot.empty) {
-      console.log('🏪 [Step 2] No active outlets found');
-      return res.status(200).json({
+            return res.status(200).json({
         success: true,
         message: 'No active outlets found. Nothing to process.',
         summary: {
@@ -916,25 +910,20 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
       });
     });
 
-    console.log(`🏪 [Step 2] Found ${activeOutlets.length} active outlets`);
-
+    
     // ──────────────────────────────────────────────
     // Compute date boundaries for the triggered date (in IST)
     // ──────────────────────────────────────────────
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
     const { dateStr: targetDateStr, dayStartTimestamp, dayEndTimestamp } = getIstDayBoundaries(triggeredDate);
 
-    console.log(`📅 Target date (IST): ${targetDateStr}`);
-
+    
     // ──────────────────────────────────────────────
     // Step 3 & 4 — Create balance records & mark as success
     // Process all outlets in parallel using Promise.allSettled
     // ──────────────────────────────────────────────
     const dailyOutlets = activeOutlets.filter((outlet) => !pendingOutletIds.has(outlet.id));
-    console.log(
-      `📝 [Step 3 & 4] Creating balance records for ${dailyOutlets.length} outlets (${pendingOutletIds.size} pending recast)`,
-    );
-
+    
     const results = await Promise.allSettled(
       dailyOutlets.map(async (outlet) => {
         try {
@@ -1044,14 +1033,9 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     const successful = results.filter((r) => r.status === 'fulfilled').length;
     const failed = results.filter((r) => r.status === 'rejected').length;
 
-    console.log(`🔁 [Step 4b] Recasting pending backdated-payment outlets through ${targetDateStr}...`);
-    const pendingRecalc = await processPendingClosingBalanceRecalcs(db, targetDateStr);
-    console.log(
-      `🔁 [Step 4b] Pending recast — success: ${pendingRecalc.successful}, failed: ${pendingRecalc.failed}`,
-    );
-
-    console.log(`✅ [Step 5] Completed — Success: ${successful}, Failed: ${failed}`);
-
+        const pendingRecalc = await processPendingClosingBalanceRecalcs(db, targetDateStr);
+    
+    
     return res.status(200).json({
       success: true,
       message: 'Opening/Closing balance calculation completed',
@@ -1104,9 +1088,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     const { triggeredAt, timeZone, source } = req.body;
     const executionStart = new Date();
 
-    console.log(`📦 [Daily Product Delivery] Started at ${executionStart.toISOString()}`);
-    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
-
+        
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
     const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
@@ -1121,8 +1103,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
     const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
 
-    console.log(`📅 Target date (IST): ${dateStr}`);
-
+    
     const [outletsSnapshot, ordersSnapshot] = await Promise.all([
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('orders')
@@ -1144,9 +1125,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     const outletMap = new Map();
     outletsSnapshot.forEach((doc) => outletMap.set(doc.id, readOutlet(doc.data())));
 
-    console.log(`🏪 Found ${outletMap.size} active outlets`);
-    console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
-
+        
     const outletDataMap = new Map();
     const globalProductMap = new Map();
     let totalOrders = 0;
@@ -1299,8 +1278,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
     }
 
     await commitBatchedDocumentSets(db, batchWrites);
-    console.log(`✅ Stored ${globalProducts.length} products from ${totalOrders} orders across ${outletDataMap.size} outlets for ${dateStr}`);
-
+    
     return res.status(200).json({
       success: true,
       message: `Daily product delivery recorded for ${dateStr}`,
@@ -1355,9 +1333,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     const { triggeredAt, timeZone, source } = req.body;
     const executionStart = new Date();
 
-    console.log(`📦 [Daily Product Return] Started at ${executionStart.toISOString()}`);
-    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
-
+        
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
     const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
@@ -1372,8 +1348,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
     const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
 
-    console.log(`📅 Target date (IST): ${dateStr}`);
-
+    
     const [outletsSnapshot, returnsSnapshot] = await Promise.all([
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('returns')
@@ -1548,8 +1523,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     }
 
     await commitBatchedDocumentSets(db, batchWrites);
-    console.log(`✅ Stored ${globalProducts.length} return products from ${totalReturns} returns across ${outletDataMap.size} outlets for ${dateStr}`);
-
+    
     return res.status(200).json({
       success: true,
       message: `Daily product return recorded for ${dateStr}`,

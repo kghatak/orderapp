@@ -310,8 +310,7 @@ export const updateReturnItems = async (req, res) => {
 
       // If quantity is 0, skip this item (effectively removing it)
       if (quantity === 0) {
-        console.log(`Removing item ${productId} from return order ${returnId} due to zero quantity`);
-        continue;
+                continue;
       }
 
       // Update item with new quantity, preserving all other fields including existing discountPercentage

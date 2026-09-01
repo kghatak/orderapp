@@ -11,8 +11,7 @@ export const connectOutletPortalMongo = async () => {
   const dbName = process.env.OUTLET_PORTAL_DB_NAME || 'outlet_portal';
   try {
     portalConn = await mongoose.createConnection(uri, { dbName }).asPromise();
-    console.log('✅ Outlet portal MongoDB connected:', dbName);
-    return true;
+        return true;
   } catch (err) {
     console.warn('⚠️ Outlet portal MongoDB not connected:', err.message);
     portalConn = null;

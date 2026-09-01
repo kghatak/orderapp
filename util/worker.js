@@ -6,8 +6,7 @@ process.on('message', (data) => {
     process.send({ status: 'stopped' });
     process.exit(0);
   } else {
-    console.log('Worker received initial data:', data);
-    startProcessing(data);
+        startProcessing(data);
   }
 });
 
@@ -15,13 +14,11 @@ function startProcessing(initialData) {
   setInterval(async () => {
     if (!isRunning) return;
 
-    console.log('Worker processing data:', initialData);
-
+    
     // Perform your batch processing here
     await processStudentData(initialData);
 
-    console.log('Batch job completed');
-    process.send({ status: 'completed' });
+        process.send({ status: 'completed' });
 
     // Continue processing if still running
     if (isRunning) {
@@ -34,8 +31,7 @@ async function processStudentData(data) {
   // Simulate a long-running task
   return new Promise((resolve) => {
     setTimeout(() => {
-      console.log('Processed student data:', data);
-      resolve();
+            resolve();
     }, 5000); // Simulate a 5-second processing time
   });
 }
