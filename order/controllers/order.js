@@ -1,7 +1,7 @@
 // controllers/orderController.js
 import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
-import { getFirestoreDB } from '../../util/firebase.js';
+import { getFirestoreDB, createInboxNotification } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
@@ -216,6 +216,15 @@ export const createOrder = async (req, res) => {
     } catch (stockError) {
       console.error('Error updating availableQuantity when creating order:', stockError);
     }
+
+    await createInboxNotification({
+      userId: 'admin',
+      title: 'New Order',
+      body: `New order ${parentOrderId} from ${orderData.outlet || orderData.outletId}`,
+      type: 'order',
+      orderId: parentOrderId,
+      outletId: orderData.outletId,
+    });
     
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
 
@@ -422,6 +431,17 @@ export const patchOrder = async (req, res) => {
           mongoSyncError
         );
       }
+    }
+
+    if (newStatus && orderDataBefore.outletId) {
+      await createInboxNotification({
+        userId: orderDataBefore.outletId,
+        title: 'Order Update',
+        body: `Order ${orderId} status updated to ${newStatus}`,
+        type: 'order',
+        orderId,
+        outletId: orderDataBefore.outletId,
+      });
     }
 
     res.status(200).json({ 
@@ -697,14 +717,47 @@ export const removeProductsFromOrder = async (req, res) => {
   }
 };
 
+export const archiveOrders = async (req, res) => {
+  try {
+    const { orderIds } = req.body;
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ error: 'orderIds array is required' });
+    }
+
+    const db = getFirestoreDB();
+    const chunks = [];
+    for (let i = 0; i < orderIds.length; i += 450) {
+      chunks.push(orderIds.slice(i, i + 450));
+    }
+
+    for (const chunk of chunks) {
+      const batch = db.batch();
+      chunk.forEach((orderId) => {
+        batch.update(db.collection('orders').doc(orderId), { archived: true });
+      });
+      await batch.commit();
+    }
+
+    res.status(200).json({
+      message: 'Orders archived successfully',
+      count: orderIds.length,
+    });
+    console.log('[API] POST /orders/archive count=' + orderIds.length);
+  } catch (error) {
+    console.error('Error archiving orders:', error);
+    res.status(500).json({ error: 'Failed to archive orders' });
+  }
+};
+
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10, outletId, from, to } = req.query;
+    let { _start = 0, _end = 10, outletId, from, to, excludeArchived } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
     const limit = Math.max(0, _end - _start);
+    const shouldExcludeArchived = excludeArchived === 'true';
 
     let baseQuery = db.collection('orders');
 
@@ -732,6 +785,19 @@ export const getAllOrders = async (req, res) => {
           admin.firestore.Timestamp.fromDate(toDate),
         );
       }
+    }
+
+    if (shouldExcludeArchived) {
+      const snapshot = await baseQuery.orderBy('Created at', 'desc').get();
+      let orders = snapshot.docs
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((order) => order.archived !== true);
+      const totalCount = orders.length;
+      orders = orders.slice(_start, _end);
+      console.log('[API] GET /orders excludeArchived=true total=' + totalCount + ' page=' + orders.length);
+      res.set('X-Total-Count', totalCount.toString());
+      res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+      return res.status(200).json(orders);
     }
 
     // Get total count for the X-Total-Count header

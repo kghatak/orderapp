@@ -22,6 +22,35 @@ export const getFirestoreDB = () => {
     return db;
 }
 
+export async function createInboxNotification({
+    userId,
+    title,
+    body,
+    type = 'order',
+    orderId = '',
+    outletId = '',
+    returnId = '',
+}) {
+    if (!userId) return;
+    try {
+        const firestore = getFirestoreDB();
+        await firestore.collection('notifications').add({
+            userId,
+            title,
+            body,
+            type,
+            orderId: String(orderId || ''),
+            returnId: String(returnId || ''),
+            outletId: String(outletId || ''),
+            isRead: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log('[API] inbox notification userId=' + userId + ' type=' + type + ' title=' + title);
+    } catch (err) {
+        console.error('[API] inbox notification failed:', err);
+    }
+}
+
 
 export async function sendPushNotification(messageBody) {
     const db = getFirestoreDB();
@@ -59,7 +88,7 @@ export async function sendPushNotification(messageBody) {
 
     try {
         const response = await admin.messaging().sendEachForMulticast(multicastMessage);
-        console.log("Successfully sent:", response.successCount);
+        console.log('[API] FCM sent success=' + response.successCount + ' fail=' + response.failureCount + ' outletId=' + messageBody.outletId);
         if (response.failureCount > 0) {
             const deadCodes = new Set([
               'messaging/registration-token-not-registered',
