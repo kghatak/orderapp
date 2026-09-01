@@ -5,6 +5,7 @@ import {
   recalculateOutletClosingBalancesRange,
   markOutletClosingBalanceRecalcDone,
   processPendingClosingBalanceRecalcs,
+  fetchOrdersForClosingBalanceDay,
 } from '../services/closingBalanceRecalc.js';
 import admin from 'firebase-admin';
 
@@ -953,19 +954,13 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             previousDayClosingBalance = parseFloat(prevData.totalClosingBalance || 0);
           }
 
-          // Query delivered orders for this outlet on the triggered date
-          const ordersSnapshot = await db.collection('orders')
-            .where('outletId', '==', outlet.id)
-            .where('status', '==', 'delivered')
-            .where('deliveredDate', '>=', dayStartTimestamp)
-            .where('deliveredDate', '<=', dayEndTimestamp)
-            .get();
-
-          let closingBalanceOrder = 0;
-          ordersSnapshot.forEach((doc) => {
-            const data = doc.data();
-            closingBalanceOrder += parseFloat(data['total amount'] || data.totalAmount || 0);
-          });
+          // Query accepted (or later) orders for this outlet on the triggered date
+          const { closingBalanceOrder } = await fetchOrdersForClosingBalanceDay(
+            db,
+            outlet.id,
+            dayStartTimestamp,
+            dayEndTimestamp
+          );
 
           // Approved payments: paymentDate (business date), or createdAt when paymentDate is missing
           const { total: closingBalancePayment } = await fetchApprovedPaymentsForDay(
