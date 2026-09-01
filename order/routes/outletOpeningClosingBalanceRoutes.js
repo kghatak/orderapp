@@ -13,6 +13,8 @@ import {
   getDailyProductReturn,
   getDailyProductReturnXLSX,
   getDailyProductReturnCSV,
+  getPendingClosingBalanceRecalcs,
+  runPendingClosingBalanceRecalcs,
 } from '../controllers/outletOpeningClosingBalanceController.js';
 
 const router = express.Router();
@@ -37,6 +39,10 @@ router.post('/calculate', calculateClosingBalances);
 
 // Daily Opening/Closing Balance calculation for all active outlets
 router.post('/calculate-opening-closing', calculateDailyOpeningClosingBalance);
+
+// Manual trigger for midnight backdated-payment recast
+router.get('/recalculate-pending', getPendingClosingBalanceRecalcs);
+router.post('/recalculate-pending', runPendingClosingBalanceRecalcs);
 
 // Get a specific OutletOpeningClosingBalance record by ID (keep last — wildcard)
 router.get('/:id', getOutletOpeningClosingBalanceById);

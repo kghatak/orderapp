@@ -2279,4 +2279,63 @@ export const calculateClosingBalances = async (req, res) => {
   }
 };
 
+/** List outlets waiting for the night closing-balance recast. */
+export const getPendingClosingBalanceRecalcs = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const snapshot = await db
+      .collection('outlets')
+      .where('recalculate', '==', 'pending')
+      .get();
+
+    const outlets = snapshot.docs.map((doc) => {
+      const data = doc.data() || {};
+      return {
+        outletId: doc.id,
+        outletName: data.name || data.outletName || doc.id,
+        recalculateFromDate: data.recalculateFromDate || null,
+      };
+    });
+
+    res.status(200).json({
+      total: outlets.length,
+      outlets,
+    });
+  } catch (error) {
+    console.error('Error fetching pending closing-balance recasts:', error);
+    res.status(500).json({
+      error: 'Failed to fetch pending recasts',
+      details: error.message,
+    });
+  }
+};
+
+/**
+ * Manually run the same recast the midnight job runs for outlets with
+ * recalculate === 'pending' (backdated payments).
+ */
+export const runPendingClosingBalanceRecalcs = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+    const throughDate = getIstDayBoundaries(new Date()).dateStr;
+    const summary = await processPendingClosingBalanceRecalcs(db, throughDate);
+
+    res.status(200).json({
+      success: true,
+      message:
+        summary.total === 0
+          ? 'No outlets are pending recast'
+          : `Recast completed: ${summary.successful} successful, ${summary.failed} failed`,
+      throughDate,
+      summary,
+    });
+  } catch (error) {
+    console.error('Error running pending closing-balance recasts:', error);
+    res.status(500).json({
+      error: 'Failed to run pending recasts',
+      details: error.message,
+    });
+  }
+};
+
 
