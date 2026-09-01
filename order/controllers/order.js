@@ -5,6 +5,32 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
+import { REPORT_ORDER_STATUSES } from '../constants/reportOrderStatuses.js';
+
+function firestoreTimeToMillis(value) {
+  if (!value && value !== 0) return 0;
+  if (typeof value.toDate === 'function') return value.toDate().getTime();
+  if (typeof value._seconds === 'number') return value._seconds * 1000;
+  if (typeof value.seconds === 'number') return value.seconds * 1000;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function resolveAcceptedDateFromOrder(orderData) {
+  if (orderData?.acceptedDate) return orderData.acceptedDate;
+  const history = Array.isArray(orderData?.statusHistory) ? orderData.statusHistory : [];
+  const acceptedEntry = history.find(
+    (entry) => entry.to === 'accepted' || entry.to === 'partial accepted',
+  );
+  if (acceptedEntry?.changedAt) return acceptedEntry.changedAt;
+  return (
+    orderData?.['Created at'] ||
+    orderData?.createdAt ||
+    orderData?.deliveredDate ||
+    orderData?.updatedAt ||
+    null
+  );
+}
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {
@@ -41,7 +67,7 @@ const getHsnCodeFromIcon = (icon) => {
 // Helper function to build a plain order data object from the request
 const buildOrderData = async (req, res) => {
   const db = getFirestoreDB();
-  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion } = req.body; // items: [{ productId, quantity, discountPercentage }]
+  const { outletId, items, deliveryAddress, vehicleNumber, invoiceDate, appVersion, remarks } = req.body; // items: [{ productId, quantity, discountPercentage }]
 
   if (!outletId || !items || !Array.isArray(items) || items.length === 0) {
     res.status(400).json({ error: 'Invalid request body: outletId and items array are required.' });
@@ -114,6 +140,7 @@ const buildOrderData = async (req, res) => {
     utensilsUsed: [],
     paymentId: '',
     appVersion: appVersion || '2.0.7',
+    remarks: remarks != null ? String(remarks) : '',
   };
 
   return orderData;
@@ -197,6 +224,23 @@ export const createOrder = async (req, res) => {
         console.error('Error updating outlet_payments when creating order:', paymentError);
         // Don't fail order creation if outlet_payments update fails
       }
+    }
+
+    // Same as old Flutter submitOrder: reduce product availableQuantity.
+    // Optional for existing clients: they keep working if this step fails.
+    try {
+      const stockBatch = db.batch();
+      for (const item of orderData.items || []) {
+        const productId = item.productId;
+        const quantity = Number(item.quantity) || 0;
+        if (!productId || quantity === 0) continue;
+        stockBatch.update(db.collection('products').doc(productId), {
+          availableQuantity: admin.firestore.FieldValue.increment(-quantity),
+        });
+      }
+      await stockBatch.commit();
+    } catch (stockError) {
+      console.error('Error updating availableQuantity when creating order:', stockError);
     }
     
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
@@ -318,6 +362,13 @@ export const patchOrder = async (req, res) => {
         updateData.status = newStatus;
         updateData.statusHistory = updatedHistory;
         
+        if (
+          (newStatus === 'accepted' || newStatus === 'partial accepted') &&
+          !orderData.acceptedDate
+        ) {
+          updateData.acceptedDate = statusChangeTimestamp;
+        }
+
         // If status is changing to 'delivered', set deliveredDate
         if (newStatus === 'delivered') {
           updateData.deliveredDate = statusChangeTimestamp;
@@ -683,15 +734,37 @@ export const removeProductsFromOrder = async (req, res) => {
 export const getAllOrders = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10, outletId } = req.query;
+    let { _start = 0, _end = 10, outletId, from, to } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
+    const limit = Math.max(0, _end - _start);
 
     let baseQuery = db.collection('orders');
 
     if (outletId) {
       baseQuery = baseQuery.where('outletId', '==', outletId);
+    }
+
+    // Optional date range — website does not send these; existing calls unchanged.
+    if (from) {
+      const fromDate = new Date(from);
+      if (!isNaN(fromDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '>=',
+          admin.firestore.Timestamp.fromDate(fromDate),
+        );
+      }
+    }
+    if (to) {
+      const toDate = new Date(to);
+      if (!isNaN(toDate.getTime())) {
+        baseQuery = baseQuery.where(
+          'Created at',
+          '<=',
+          admin.firestore.Timestamp.fromDate(toDate),
+        );
+      }
     }
 
     // Get total count for the X-Total-Count header
@@ -702,7 +775,7 @@ export const getAllOrders = async (req, res) => {
     const ordersRef = baseQuery
       .orderBy('Created at', 'desc')
       .offset(_start)
-      .limit(limit);
+      .limit(limit || 10);
 
     const snapshot = await ordersRef.get();
 
@@ -1485,7 +1558,7 @@ export const removeUtensilFromOrder = async (req, res) => {
   }
 };
 
-// Orders Report API
+// Orders Report API — accepted (or later) orders, dated by acceptedDate
 export const getOrdersReport = async (req, res) => {
   try {
     const db = getFirestoreDB();
@@ -1508,30 +1581,48 @@ export const getOrdersReport = async (req, res) => {
     // IST calendar day boundaries (matches opening/closing balance and ledger UI)
     const { startTimestamp, endTimestamp } = getIstReportRangeTimestamps(startDate, endDate);
 
-    // Build query - only include delivered orders filtered by deliveredDate
-    let query = db.collection('orders')
-      .where('status', '==', 'delivered')
-      .where('deliveredDate', '>=', startTimestamp)
-      .where('deliveredDate', '<=', endTimestamp)
-      .orderBy('deliveredDate', 'desc');
+    const applyOutletFilter = (query) =>
+      outletId ? query.where('outletId', '==', outletId) : query;
 
-    // Add outlet filter if provided
-    if (outletId) {
-      query = query.where('outletId', '==', outletId);
-    }
+    const byAcceptedDate = await applyOutletFilter(
+      db
+        .collection('orders')
+        .where('status', 'in', REPORT_ORDER_STATUSES)
+        .where('acceptedDate', '>=', startTimestamp)
+        .where('acceptedDate', '<=', endTimestamp),
+    ).get();
 
-    // Get total count for pagination
-    const totalSnapshot = await query.get();
-    const total = totalSnapshot.size;
-    const totalPages = Math.ceil(total / parseInt(limit));
+    const byCreatedAt = await applyOutletFilter(
+      db
+        .collection('orders')
+        .where('status', 'in', REPORT_ORDER_STATUSES)
+        .where('Created at', '>=', startTimestamp)
+        .where('Created at', '<=', endTimestamp),
+    ).get();
 
-    // Apply pagination
+    const docsById = new Map();
+    byAcceptedDate.forEach((doc) => docsById.set(doc.id, doc));
+    byCreatedAt.forEach((doc) => {
+      if (docsById.has(doc.id)) return;
+      if (doc.data().acceptedDate != null) return;
+      docsById.set(doc.id, doc);
+    });
+
+    const sortedDocs = Array.from(docsById.values()).sort((a, b) => {
+      const aData = a.data();
+      const bData = b.data();
+      return (
+        firestoreTimeToMillis(bData.acceptedDate || bData['Created at']) -
+        firestoreTimeToMillis(aData.acceptedDate || aData['Created at'])
+      );
+    });
+
+    const total = sortedDocs.length;
+    const totalPages = Math.ceil(total / parseInt(limit)) || 1;
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedQuery = query.offset(offset).limit(parseInt(limit));
-    const snapshot = await paginatedQuery.get();
+    const pageDocs = sortedDocs.slice(offset, offset + parseInt(limit));
 
-    // Process orders data
-    const orders = snapshot.docs.map(doc => {
+    const orders = pageDocs.map((doc) => {
       const data = doc.data();
       
       // Calculate actual order amount from items (after discounts)
@@ -1572,7 +1663,8 @@ export const getOrdersReport = async (req, res) => {
         status: data.status,
         "total amount": orderAmount, // Use calculated amount after discounts
         "Created at": data["Created at"],
-        "deliveredDate": data.deliveredDate || null, // Delivery date when status is 'delivered'
+        acceptedDate: data.acceptedDate || null,
+        deliveredDate: data.deliveredDate || null,
         "payment status": data["payment status"] || data.paymentStatus
       };
     });
@@ -1925,6 +2017,73 @@ export const backfillDeliveredDate = async (req, res) => {
       success: false,
       message: 'Failed to backfill deliveredDate',
       error: error.message
+    });
+  }
+};
+
+// Migration: Backfill acceptedDate for existing accepted (or later) orders
+export const backfillAcceptedDate = async (req, res) => {
+  try {
+    const db = getFirestoreDB();
+
+    const snapshot = await db
+      .collection('orders')
+      .where('status', 'in', REPORT_ORDER_STATUSES)
+      .get();
+
+    const ordersToUpdate = [];
+    snapshot.forEach((doc) => {
+      const orderData = doc.data();
+      if (orderData.acceptedDate) return;
+      const acceptedDate = resolveAcceptedDateFromOrder(orderData);
+      if (!acceptedDate) return;
+      ordersToUpdate.push({
+        docRef: doc.ref,
+        orderId: doc.id,
+        acceptedDate,
+      });
+    });
+
+    if (ordersToUpdate.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No orders need to be updated. All matching orders already have acceptedDate.',
+        updatedCount: 0,
+      });
+    }
+
+    const batchSize = 500;
+    let updatedCount = 0;
+    const errors = [];
+
+    for (let i = 0; i < ordersToUpdate.length; i += batchSize) {
+      const batch = db.batch();
+      const currentBatch = ordersToUpdate.slice(i, i + batchSize);
+      currentBatch.forEach(({ docRef, acceptedDate }) => {
+        batch.update(docRef, { acceptedDate });
+      });
+
+      try {
+        await batch.commit();
+        updatedCount += currentBatch.length;
+      } catch (error) {
+        errors.push({ batch: Math.floor(i / batchSize) + 1, error: error.message });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Migration completed. Updated ${updatedCount} orders with acceptedDate.`,
+      updatedCount,
+      totalFound: snapshot.size,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error('Error backfilling acceptedDate:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to backfill acceptedDate',
+      error: error.message,
     });
   }
 };
