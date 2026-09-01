@@ -3,6 +3,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
+import { DEFAULT_TENANT_ID, isValidTenantId, docTenantId } from '../../util/tenant.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -117,7 +118,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: tenantId || '',
+      tenantId: (tenantId && isValidTenantId(tenantId)) ? String(tenantId).trim() : DEFAULT_TENANT_ID,
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
@@ -132,7 +133,7 @@ export const signup = async (req, res) => {
         phoneNumber: user.phoneNumber,
         userProfile: user.userProfile,
         outletId: user.outletId,
-        tenantId: user.tenantId || '',
+        tenantId: user.tenantId || DEFAULT_TENANT_ID,
         enableNotification: user.enableNotification,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
@@ -209,7 +210,7 @@ export const login = async (req, res) => {
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
-      tenantId: userData.tenantId ?? '',
+      tenantId: docTenantId(userData.tenantId),
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {
@@ -282,7 +283,6 @@ export const outletStorekeeperLogin = async (req, res) => {
     });
 
     if (!matched) {
-      console.log('[API] POST /auth/outlet-storekeeper/login failed phone=' + phoneNumber);
       return res.status(401).json({
         success: false,
         message: 'Invalid phone number or password',
@@ -299,11 +299,11 @@ export const outletStorekeeperLogin = async (req, res) => {
         outletId: matched.outletId,
         outletName: matched.outletName,
         userProfile: 'OutletStorekeeper',
+        tenantId: docTenantId(matched.tenantId),
         createdAt: matched.createdAt,
         updatedAt: matched.updatedAt,
       },
     });
-    console.log('[API] POST /auth/outlet-storekeeper/login ok id=' + matched.id);
   } catch (err) {
     console.error('Outlet storekeeper login error:', err);
     res.status(500).json({
@@ -379,6 +379,7 @@ export const outletStorekeeperSignup = async (req, res) => {
       outletId: storekeeperData.outletId,
       outletName: storekeeperData.outletName,
       name: storekeeperData.name,
+      tenantId: storekeeperData.tenantId || DEFAULT_TENANT_ID,
       enableNotification: true,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -396,7 +397,6 @@ export const outletStorekeeperSignup = async (req, res) => {
       message: 'User created successfully',
       data: { userId },
     });
-    console.log('[API] POST /auth/outlet-storekeeper/signup ok userId=' + userId + ' sk=' + storekeeperDoc.id);
   } catch (err) {
     console.error('Outlet storekeeper signup error:', err);
     res.status(500).json({

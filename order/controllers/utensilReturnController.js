@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import admin from 'firebase-admin';
 
 const VALID_STATUSES = [
@@ -36,10 +37,10 @@ export const createUtensilReturn = async (req, res) => {
       outlet,
       outletId,
       isArchived: false,
+      tenantId: req.tenantId || 'nannu_milk',
     };
 
     const docRef = await db.collection('utensilReturnRequests').add(returnRequest);
-    console.log('[API] POST /utensil-returns created id=' + docRef.id + ' returnId=' + returnId + ' outletId=' + outletId);
     res.status(201).json({ message: 'Utensil return created successfully', id: docRef.id, returnId });
   } catch (error) {
     console.error('Error creating utensil return:', error);
@@ -56,6 +57,7 @@ export const getAllUtensilReturns = async (req, res) => {
 
     const snapshot = await db.collection('utensilReturnRequests').get();
     let returns = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    returns = filterByTenant(returns, req.tenantId);
 
     if (outletId) {
       returns = returns.filter((item) => item.outletId === outletId);
@@ -80,8 +82,6 @@ export const getAllUtensilReturns = async (req, res) => {
 
     const total = returns.length;
     const paginated = returns.slice(start, end);
-
-    console.log('[API] GET /utensil-returns outletId=' + (outletId || 'admin') + ' total=' + total + ' page=' + paginated.length);
 
     res.setHeader('X-Total-Count', total.toString());
     res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count');
@@ -113,6 +113,9 @@ export const updateUtensilReturnStatus = async (req, res) => {
     }
 
     const prevData = doc.data();
+    if (!matchesTenant(prevData?.tenantId, req.tenantId)) {
+      return res.status(404).json({ error: 'Utensil return not found' });
+    }
     const prevStatus = (prevData.status || '').toLowerCase();
 
     if (newStatus === 'collected' && prevStatus !== 'collected') {
@@ -136,7 +139,6 @@ export const updateUtensilReturnStatus = async (req, res) => {
     });
 
     const updated = await docRef.get();
-    console.log('[API] PUT /utensil-returns/' + id + '/status ' + prevStatus + ' -> ' + newStatus);
     res.status(200).json({
       message: 'Utensil return status updated successfully',
       data: { id: updated.id, ...updated.data() },
@@ -155,7 +157,6 @@ export const archiveUtensilReturn = async (req, res) => {
       isArchived: true,
       archivedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    console.log('[API] DELETE /utensil-returns/' + id + ' archived');
     res.status(200).json({ message: 'Utensil return archived successfully' });
   } catch (error) {
     console.error('Error archiving utensil return:', error);

@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import admin from 'firebase-admin';
 
 const getNextStorekeeperId = async (db) => {
@@ -28,6 +29,7 @@ export const getOutletStorekeepers = async (req, res) => {
     const storekeepers = snapshot.docs
       .map((doc) => ({ id: doc.id, ...doc.data() }))
       .filter((item) => item.isActive === true)
+      .filter((item) => matchesTenant(item.tenantId, req.tenantId))
       .sort((a, b) => {
         const aTime = a.createdAt?.toDate?.()?.getTime?.() || a.createdAt?._seconds || 0;
         const bTime = b.createdAt?.toDate?.()?.getTime?.() || b.createdAt?._seconds || 0;
@@ -35,7 +37,6 @@ export const getOutletStorekeepers = async (req, res) => {
       });
 
     res.status(200).json(storekeepers);
-    console.log('[API] GET /outlet-storekeepers outletId=' + outletId + ' count=' + storekeepers.length);
   } catch (error) {
     console.error('Error fetching outlet storekeepers:', error);
     res.status(500).json({ error: 'Failed to fetch outlet storekeepers' });
@@ -68,12 +69,12 @@ export const createOutletStorekeeper = async (req, res) => {
       outletName,
       isActive: true,
       needsSignup: true,
+      tenantId: req.tenantId || 'nannu_milk',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     res.status(201).json({ message: 'Storekeeper created', id: storekeeperId });
-    console.log('[API] POST /outlet-storekeepers created id=' + storekeeperId + ' phone=' + phoneNumber + ' outletId=' + outletId);
   } catch (error) {
     console.error('Error creating outlet storekeeper:', error);
     res.status(500).json({ error: 'Failed to create outlet storekeeper' });
@@ -115,7 +116,6 @@ export const deleteOutletStorekeeper = async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     res.status(200).json({ message: 'Storekeeper deleted' });
-    console.log('[API] DELETE /outlet-storekeepers/' + id + ' deactivated');
   } catch (error) {
     console.error('Error deleting outlet storekeeper:', error);
     res.status(500).json({ error: 'Failed to delete outlet storekeeper' });

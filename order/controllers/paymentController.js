@@ -1,5 +1,6 @@
 // controllers/paymentController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant } from '../../util/tenant.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import {
@@ -81,7 +82,10 @@ export const createOutletPayment = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const outletPayment = new OutletPayment(req.body);
-    await db.collection('outlet_payments').doc(outletPayment.outletId).set({ ...outletPayment });
+    await db.collection('outlet_payments').doc(outletPayment.outletId).set({
+      ...outletPayment,
+      tenantId: req.tenantId || 'nannu_milk',
+    });
     res.status(201).json({ message: 'Outlet payment created/updated' });
   } catch (err) {
     console.error('Create outlet payment error:', err);
@@ -94,7 +98,10 @@ export const createPaymentRequest = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const paymentRequest = new PaymentRequest(req.body);
-    const ref = await db.collection('payment_requests').add({ ...paymentRequest });
+    const ref = await db.collection('payment_requests').add({
+      ...paymentRequest,
+      tenantId: req.tenantId || 'nannu_milk',
+    });
     res.status(201).json({ message: 'Payment request submitted', id: ref.id });
   } catch (err) {
     console.error('Create payment request error:', err);
@@ -107,7 +114,10 @@ export const createPayment = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const payment = new Payment(req.body);
-    await db.collection('payments').doc(payment.paymentId).set({ ...payment });
+    await db.collection('payments').doc(payment.paymentId).set({
+      ...payment,
+      tenantId: req.tenantId || 'nannu_milk',
+    });
     res.status(201).json({ message: 'Payment recorded' });
   } catch (err) {
     console.error('Create payment error:', err);
@@ -120,7 +130,10 @@ export const getAllOutletPayments = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('outlet_payments').get();
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const data = filterByTenant(
+      snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      req.tenantId,
+    );
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch outlet payments error:', err);
@@ -133,7 +146,10 @@ export const getAllPaymentRequests = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('payment_requests').get();
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const data = filterByTenant(
+      snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      req.tenantId,
+    );
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch payment requests error:', err);
@@ -146,9 +162,12 @@ export const getAllPayments = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('payments').get();
-    const data = snapshot.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(payment => payment.paymentType !== 'opening_balance'); // Exclude opening balance payments
+    const data = filterByTenant(
+      snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter(payment => payment.paymentType !== 'opening_balance'),
+      req.tenantId,
+    );
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch payments error:', err);
@@ -238,11 +257,12 @@ export const getOutletsWithPendingRequests = async (req, res) => {
         paymentRequests.push({ id: requestDoc.id, ...requestDoc.data() });
       });
     }
+    const tenantPaymentRequests = filterByTenant(paymentRequests, req.tenantId);
     
     // Group by outlet
     const outletMap = new Map();
     
-    paymentRequests.forEach(request => {
+    tenantPaymentRequests.forEach(request => {
       const outletId = request.outletId;
       if (!outletMap.has(outletId)) {
         outletMap.set(outletId, {
@@ -1658,10 +1678,13 @@ export const getAllOutletPaymentSummaries = async (req, res) => {
     
     // Get all outlet payment summaries
     const snapshot = await db.collection('outlet_payments').get();
-    const outletSummaries = snapshot.docs.map(doc => ({
-      outletId: doc.id,
-      ...doc.data()
-    }));
+    const outletSummaries = filterByTenant(
+      snapshot.docs.map(doc => ({
+        outletId: doc.id,
+        ...doc.data()
+      })),
+      req.tenantId,
+    );
     
     res.status(200).json(outletSummaries);
   } catch (err) {

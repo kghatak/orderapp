@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
 import fs from 'fs';
+import { docTenantId, matchesTenant } from './tenant.js';
 
 
 let db = null;
@@ -30,6 +31,7 @@ export async function createInboxNotification({
     orderId = '',
     outletId = '',
     returnId = '',
+    tenantId = '',
 }) {
     if (!userId) return;
     try {
@@ -42,12 +44,12 @@ export async function createInboxNotification({
             orderId: String(orderId || ''),
             returnId: String(returnId || ''),
             outletId: String(outletId || ''),
+            tenantId: String(tenantId || ''),
             isRead: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log('[API] inbox notification userId=' + userId + ' type=' + type + ' title=' + title);
     } catch (err) {
-        console.error('[API] inbox notification failed:', err);
+        console.error('inbox notification failed:', err);
     }
 }
 
@@ -59,9 +61,12 @@ export async function sendPushNotification(messageBody) {
       .where('outletId', '==', messageBody.outletId)
       .get();
 
+    const orderTenant = docTenantId(messageBody.tenantId);
     const tokenUsers = [];
     userSnapshot.forEach((user) => {
-      const token = user.data()?.fcmToken;
+      const data = user.data() || {};
+      if (!matchesTenant(data.tenantId, orderTenant)) return;
+      const token = data.fcmToken;
       if (token) {
         tokenUsers.push({ ref: user.ref, token });
       }
@@ -88,7 +93,6 @@ export async function sendPushNotification(messageBody) {
 
     try {
         const response = await admin.messaging().sendEachForMulticast(multicastMessage);
-        console.log('[API] FCM sent success=' + response.successCount + ' fail=' + response.failureCount + ' outletId=' + messageBody.outletId);
         if (response.failureCount > 0) {
             const deadCodes = new Set([
               'messaging/registration-token-not-registered',

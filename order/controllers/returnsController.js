@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { subtractCollectedReturnItemsFromOutletProducts } from '../../util/outletProductsStock.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
@@ -47,7 +48,10 @@ export const createReturn = async (req, res) => {
       notes,
     });
 
-    await db.collection('returns').doc(returnId).set({ ...returnOrder });
+    await db.collection('returns').doc(returnId).set({
+      ...returnOrder,
+      tenantId: req.tenantId || 'nannu_milk',
+    });
     res.status(201).json({ message: 'Return order created successfully', id: returnId });
   } catch (error) {
     console.error('Error creating return order:', error);
@@ -75,6 +79,7 @@ export const getAllReturns = async (req, res) => {
       id: doc.id,
       ...doc.data()
     }));
+    returns = filterByTenant(returns, req.tenantId);
 
     // Filter out archived returns
     returns = returns.filter(returnOrder => !returnOrder.archived);
@@ -129,6 +134,9 @@ export const getReturnById = async (req, res) => {
     const doc = await db.collection('returns').doc(returnId).get();
 
     if (!doc.exists) {
+      return res.status(404).json({ error: 'Return order not found' });
+    }
+    if (!matchesTenant(doc.data()?.tenantId, req.tenantId)) {
       return res.status(404).json({ error: 'Return order not found' });
     }
 
@@ -244,8 +252,8 @@ export const getReturnsByStatus = async (req, res) => {
     const snapshot = await db.collection('returns').where('status', '==', status).get();
     const returns = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(returnOrder => !returnOrder.archived); // Filter out archived returns
-    res.status(200).json(returns);
+      .filter(returnOrder => !returnOrder.archived);
+    res.status(200).json(filterByTenant(returns, req.tenantId));
   } catch (error) {
     console.error('Error filtering return orders:', error);
     res.status(500).json({ error: 'Failed to filter return orders' });

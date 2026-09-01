@@ -1,5 +1,6 @@
 // controllers/utensilController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import admin from 'firebase-admin';
 
 // Generate Utensil ID in format UTEN-00001
@@ -41,6 +42,7 @@ export const createUtensil = async (req, res) => {
       type,
       quantity,
       actualQuantity: actualQuantity || quantity, // Use provided actualQuantity or default to quantity
+      tenantId: req.tenantId || 'nannu_milk',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
@@ -66,6 +68,9 @@ export const getUtensilById = async (req, res) => {
     if (!doc.exists) {
       return res.status(404).json({ error: 'Utensil not found' });
     }
+    if (!matchesTenant(doc.data()?.tenantId, req.tenantId)) {
+      return res.status(404).json({ error: 'Utensil not found' });
+    }
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (err) {
     console.error('Get utensil error:', err);
@@ -80,24 +85,15 @@ export const getAllUtensils = async (req, res) => {
     let { _start = 0, _end = 10 } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
 
-    // Get total count for the X-Total-Count header
     const totalSnapshot = await db.collection('utensils').get();
-    const totalCount = totalSnapshot.size;
-
-    // Query for the paginated data
-    const utensilsRef = db.collection('utensils')
-      .orderBy('createdAt', 'desc')
-      .offset(_start)
-      .limit(limit);
-      
-    const snapshot = await utensilsRef.get();
-    
-    const utensils = snapshot.docs.map((doc) => ({
+    let utensils = totalSnapshot.docs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
+    utensils = filterByTenant(utensils, req.tenantId);
+    const totalCount = utensils.length;
+    utensils = utensils.slice(_start, _end);
 
     // Set headers that Refine expects
     res.set('X-Total-Count', totalCount.toString());

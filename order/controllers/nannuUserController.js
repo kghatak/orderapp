@@ -1,5 +1,6 @@
 // controllers/nannuUserController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant, docTenantId, DEFAULT_TENANT_ID } from '../../util/tenant.js';
 import { NannuUser } from '../models/NannuUser.js';
 
 // Create Nannu User
@@ -50,7 +51,7 @@ export const createNannuUser = async (req, res) => {
       password,
       outletId: outletId || '',
       userProfile: userProfile || 'Outlet',
-      tenantId: tenantId || '',
+      tenantId: req.tenantId || DEFAULT_TENANT_ID,
       enableNotification: enableNotification !== undefined ? enableNotification : true,
       fcmToken: fcmToken || ''
     });
@@ -90,7 +91,6 @@ export const getAllNannuUsers = async (req, res) => {
 
     const start = parseInt(_start);
     const end = parseInt(_end);
-    const limit = end - start;
     
     // Apply filters
     if (outletId) {
@@ -101,18 +101,8 @@ export const getAllNannuUsers = async (req, res) => {
       query = query.where('userProfile', '==', userProfile);
     }
     
-    // Get total count for the X-Total-Count header (with filters applied)
     const totalSnapshot = await query.get();
-    const totalCount = totalSnapshot.size;
-    
-    // Apply pagination using Refine framework pattern
-    query = query
-      .orderBy('createdAt', 'desc')
-      .offset(start)
-      .limit(limit);
-    
-    const snapshot = await query.get();
-    const users = snapshot.docs.map(doc => {
+    let users = totalSnapshot.docs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -121,17 +111,20 @@ export const getAllNannuUsers = async (req, res) => {
         password: data.password ? '****' : '',
         outletId: data.outletId || null,
         userProfile: data.userProfile || '',
-        tenantId: data.tenantId ?? '',
+        tenantId: docTenantId(data.tenantId),
         enableNotification: data.enableNotification !== undefined ? data.enableNotification : true,
         fcmToken: data.fcmToken || '',
         createdAt: data.createdAt || null,
         updatedAt: data.updatedAt || null
       };
     });
+    users = filterByTenant(users, req.tenantId);
+    const totalCount = users.length;
+    users = users.slice(start, end);
     
     // Get all users for counting (without filters for accurate counts)
     const allUsersSnapshot = await db.collection('users').get();
-    const allUsers = allUsersSnapshot.docs.map(doc => doc.data());
+    const allUsers = filterByTenant(allUsersSnapshot.docs.map(doc => doc.data()), req.tenantId);
     
     // Calculate counts
     const totalUsers = allUsers.length;
@@ -188,6 +181,12 @@ export const getNannuUserById = async (req, res) => {
     }
     
     const userData = userDoc.data();
+    if (!matchesTenant(userData?.tenantId, req.tenantId)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Nannu user not found'
+      });
+    }
     
     res.status(200).json({
       success: true,
