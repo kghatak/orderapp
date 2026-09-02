@@ -1208,6 +1208,109 @@ export const deliverOrder = async (req, res) => {
   }
 };
 
+const AUTO_DELIVER_STATUSES = ['processing', 'dispatched'];
+
+/**
+ * POST /orders/auto-deliver-open
+ * Marks processing / dispatched orders as delivered (sets deliveredDate).
+ * Intended for the 11:00 PM IST scheduler, before 11:59 PM closing balance.
+ */
+export const autoDeliverOpenOrders = async (req, res) => {
+  const startedAt = new Date();
+  try {
+    const db = getFirestoreDB();
+    const deliveredTimestamp = admin.firestore.Timestamp.now();
+    const summary = {
+      scanned: 0,
+      delivered: 0,
+      failed: 0,
+      byPreviousStatus: {},
+      errors: [],
+    };
+
+    const openDocs = [];
+    for (const status of AUTO_DELIVER_STATUSES) {
+      const snapshot = await db.collection('orders').where('status', '==', status).get();
+      snapshot.forEach((doc) => openDocs.push(doc));
+    }
+
+    summary.scanned = openDocs.length;
+    if (openDocs.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No processing or dispatched orders to deliver',
+        summary,
+        executedAt: startedAt.toISOString(),
+      });
+    }
+
+    const chunkSize = 400;
+    for (let i = 0; i < openDocs.length; i += chunkSize) {
+      const chunk = openDocs.slice(i, i + chunkSize);
+      const batch = db.batch();
+
+      chunk.forEach((doc) => {
+        const data = doc.data() || {};
+        const fromStatus = data.status || 'unknown';
+        summary.byPreviousStatus[fromStatus] = (summary.byPreviousStatus[fromStatus] || 0) + 1;
+        const historyEntry = {
+          from: fromStatus,
+          to: 'delivered',
+          changedAt: deliveredTimestamp,
+        };
+        const updatedHistory = Array.isArray(data.statusHistory)
+          ? [...data.statusHistory, historyEntry]
+          : [historyEntry];
+
+        batch.update(doc.ref, {
+          status: 'delivered',
+          deliveredDate: data.deliveredDate || deliveredTimestamp,
+          statusHistory: updatedHistory,
+          autoDeliveredAt: deliveredTimestamp,
+          autoDeliveredFrom: fromStatus,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      await batch.commit();
+      summary.delivered += chunk.length;
+
+      await Promise.all(
+        chunk.map(async (doc) => {
+          const data = doc.data() || {};
+          try {
+            await addDeliveredOrderItemsToOutletProducts(data.outletId, data.items || []);
+            await doc.ref.update({
+              mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
+              mongoDeliverySyncStatus: 'synced',
+            });
+          } catch (mongoSyncError) {
+            console.error(
+              `Auto-deliver: order ${doc.id} marked delivered but product stock sync failed:`,
+              mongoSyncError.message,
+            );
+          }
+        }),
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Marked ${summary.delivered} order(s) as delivered`,
+      summary,
+      executedAt: startedAt.toISOString(),
+      completedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error auto-delivering open orders:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to auto-deliver open orders',
+      error: error.message,
+    });
+  }
+};
+
 // Restore utensils to inventory and remove from order
 export const restoreUtensils = async (req, res) => {
   try {
