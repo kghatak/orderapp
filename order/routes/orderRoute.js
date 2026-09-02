@@ -1,5 +1,5 @@
 import express from 'express';
-import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate, backfillDeliveredDate, backfillAcceptedDate } from '../controllers/order.js'
+import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate, backfillDeliveredDate, autoDeliverOpenOrders } from '../controllers/order.js'
 
 const orderRoutes = express.Router();
 
@@ -8,7 +8,7 @@ orderRoutes.get('/', getAllOrders);
 orderRoutes.get('/report', getOrdersReport);
 orderRoutes.delete('/by-date', deleteOrdersByDate);
 orderRoutes.post('/migrate/delivered-date', backfillDeliveredDate); // Migration endpoint to backfill deliveredDate
-orderRoutes.post('/migrate/accepted-date', backfillAcceptedDate);
+orderRoutes.post('/auto-deliver-open', autoDeliverOpenOrders);
 orderRoutes.get('/:id', getOrder);
 orderRoutes.get('/:id/suborders', getSubOrders);
 orderRoutes.patch('/:id/utensils/:utensilId', updateOrderUtensilQuantity);
