@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant } from '../../util/tenant.js';
 import admin from 'firebase-admin';
 
 // Generate custom invoice ID
@@ -96,18 +97,13 @@ export const getAllCustomInvoices = async (req, res) => {
 
     // Get total count for pagination
     const countSnapshot = await query.get();
-    const totalCount = countSnapshot.size;
-
-    // Get paginated results
-    const snapshot = await query.limit(limit).offset(offset).get();
-    const invoices = [];
-
-    snapshot.forEach(doc => {
-      invoices.push({
-        id: doc.id,
-        ...doc.data()
-      });
-    });
+    let invoices = countSnapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    invoices = filterByTenant(invoices, req.tenantId);
+    const totalCount = invoices.length;
+    invoices = invoices.slice(offset, offset + limit);
 
     res.status(200).json({
       invoices,
@@ -213,7 +209,8 @@ export const createCustomInvoice = async (req, res) => {
       invoiceNumber: invoiceNumber,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      createdBy: req.user?.id || 'system' // Assuming user info is available in req.user
+      createdBy: req.user?.id || 'system', // Assuming user info is available in req.user
+      tenantId: req.tenantId || 'nannu_milk',
     };
 
     // Save to Firestore

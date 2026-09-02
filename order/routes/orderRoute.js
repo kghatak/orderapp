@@ -1,9 +1,10 @@
 import express from 'express';
-import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate, backfillDeliveredDate, backfillAcceptedDate } from '../controllers/order.js'
+import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate, backfillDeliveredDate, archiveOrders, backfillAcceptedDate } from '../controllers/order.js'
 
 const orderRoutes = express.Router();
 
 orderRoutes.post('/', createOrder);
+orderRoutes.post('/archive', archiveOrders);
 orderRoutes.get('/', getAllOrders); 
 orderRoutes.get('/report', getOrdersReport);
 orderRoutes.delete('/by-date', deleteOrdersByDate);

@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 
 // Create Store Keeper
 export const createStoreKeeper = async (req, res) => {
@@ -20,7 +21,8 @@ export const createStoreKeeper = async (req, res) => {
 
     // Check if phone number already exists
     const snapshot = await db.collection('storeKeepers').where('phoneNumber', '==', phoneNumber).get();
-    if (!snapshot.empty) {
+    const duplicate = snapshot.docs.some((doc) => matchesTenant(doc.data()?.tenantId, req.tenantId));
+    if (duplicate) {
       return res.status(409).json({ error: 'Store keeper with this phone number already exists' });
     }
 
@@ -29,6 +31,7 @@ export const createStoreKeeper = async (req, res) => {
     const newDocRef = await db.collection('storeKeepers').add({
       name,
       phoneNumber,
+      tenantId: req.tenantId || 'nannu_milk',
       createdAt: now,
       updatedAt: now,
     });
@@ -47,7 +50,7 @@ export const getAllStoreKeepers = async (req, res) => {
     const db = getFirestoreDB();
     const snapshot = await db.collection('storeKeepers').get();
     const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(data);
+    res.status(200).json(filterByTenant(data, req.tenantId));
   } catch (err) {
     console.error('Fetch Store Keepers error:', err);
     res.status(500).json({ error: 'Failed to fetch Store Keepers' });

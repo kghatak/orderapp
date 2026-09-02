@@ -1,5 +1,6 @@
 // controllers/productController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import { categoryIconMap } from '../../util/iconMapper.js';
 
 // Generate Product ID in format PROD-00001 using counters collection
@@ -89,6 +90,7 @@ export const createProduct = async (req, res) => {
       active: active !== undefined ? active : true,
       createdAt: new Date(),
       updatedAt: new Date(),
+      tenantId: req.tenantId || 'nannu_milk',
     };
 
     await db.collection('products').doc(productId).set(productData);
@@ -106,6 +108,9 @@ export const getProductById = async (req, res) => {
     const id = req.params.id;
     const doc = await db.collection('products').doc(id).get();
     if (!doc.exists) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    if (!matchesTenant(doc.data()?.tenantId, req.tenantId)) {
       return res.status(404).json({ error: 'Product not found' });
     }
     res.status(200).json({ id: doc.id, ...doc.data() });
@@ -127,6 +132,7 @@ export const getAllProducts = async (req, res) => {
     // Get all products first
     snapshot = await db.collection('products').get();
     products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    products = filterByTenant(products, req.tenantId);
     
     // Handle name_like parameter (backward compatibility)
     if (name_like && name_like.trim()) {
@@ -241,8 +247,6 @@ export const getAllProducts = async (req, res) => {
         console.log(`Legacy pagination: ${start} to ${end} (${paginatedProducts.length} products)`);
       }
     }
-    
-    console.log(`Final result: ${paginatedProducts.length} products (total available: ${products.length})`);
     
     // Set headers that Refine framework expects for pagination
     res.set('X-Total-Count', products.length.toString());

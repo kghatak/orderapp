@@ -1,5 +1,6 @@
 // controllers/outletController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 
 // Format Firestore Timestamp to human-readable
 export const formatTimestamp = (timestamp) => {
@@ -91,7 +92,10 @@ export const createOutlet = async (req, res) => {
       .get();
     
     if (!existingOutlet.empty) {
-      return res.status(400).json({ error: 'Primary phone number already exists. Please use a different phone number.' });
+      const sameTenant = existingOutlet.docs.some((doc) => matchesTenant(doc.data()?.tenantId, req.tenantId));
+      if (sameTenant) {
+        return res.status(400).json({ error: 'Primary phone number already exists. Please use a different phone number.' });
+      }
     }
     
     const outletId = await generateOutletId();
@@ -112,6 +116,7 @@ export const createOutlet = async (req, res) => {
       discounts,
       isInternal,
       openingBalance: parseFloat(openingBalance) || 0, // Ensure it's a number
+      tenantId: req.tenantId || 'nannu_milk',
       createdAt: new Date()
     };
 
@@ -175,6 +180,9 @@ export const getOutletById = async (req, res) => {
     }
 
     const outletData = outletDoc.data();
+    if (!matchesTenant(outletData?.tenantId, req.tenantId)) {
+      return res.status(404).json({ error: 'Outlet not found' });
+    }
 
     return res.status(200).json({
       id: outletDoc.id,
@@ -204,7 +212,7 @@ export const getAllOutlets = async (req, res) => {
         createdAt: formatTimestamp(data.createdAt),
         updatedAt: formatTimestamp(data.updatedAt),
       };
-    });
+    }).filter((outlet) => matchesTenant(outlet.tenantId, req.tenantId));
 
     res.status(200).json(outlets);
   } catch (error) {
@@ -391,6 +399,7 @@ export const searchOutlets = async (req, res) => {
           updatedAt: formatTimestamp(data.updatedAt),
         };
       })
+      .filter(outlet => matchesTenant(outlet.tenantId, req.tenantId))
       .filter(outlet => {
         return (
           (outlet.name && outlet.name.toLowerCase().includes(lowerQuery)) ||
@@ -566,22 +575,9 @@ export const getPaginatedOutlets = async (req, res) => {
     let { _start = 0, _end = 10 } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
 
-    // Get total count for the X-Total-Count header
     const totalSnapshot = await db.collection('outlets').get();
-    const totalCount = totalSnapshot.size;
-
-    // Query for the paginated data
-    const outletsRef = db.collection('outlets')
-      .orderBy('createdAt', 'desc')
-      .offset(_start)
-      .limit(limit);
-      
-    const snapshot = await outletsRef.get();
-    
-    // Return plain data with formatted timestamps
-    const outlets = snapshot.docs.map((doc) => {
+    let outlets = totalSnapshot.docs.map((doc) => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -590,7 +586,10 @@ export const getPaginatedOutlets = async (req, res) => {
         updatedAt: formatTimestamp(data.updatedAt),
       };
     });
-    // Set headers that Refine expects
+    outlets = filterByTenant(outlets, req.tenantId);
+    const totalCount = outlets.length;
+    outlets = outlets.slice(_start, _end);
+
     res.set('X-Total-Count', totalCount.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
 
@@ -619,7 +618,7 @@ export const getOutletsByStatus = async (req, res) => {
         createdAt: formatTimestamp(data.createdAt),
         updatedAt: formatTimestamp(data.updatedAt),
       };
-    });
+    }).filter((outlet) => matchesTenant(outlet.tenantId, req.tenantId));
 
     res.status(200).json(outlets);
   } catch (error) {

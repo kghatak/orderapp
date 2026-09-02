@@ -3,6 +3,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
+import { DEFAULT_TENANT_ID, isValidTenantId, docTenantId } from '../../util/tenant.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -117,7 +118,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: tenantId || '',
+      tenantId: (tenantId && isValidTenantId(tenantId)) ? String(tenantId).trim() : DEFAULT_TENANT_ID,
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
@@ -132,7 +133,7 @@ export const signup = async (req, res) => {
         phoneNumber: user.phoneNumber,
         userProfile: user.userProfile,
         outletId: user.outletId,
-        tenantId: user.tenantId || '',
+        tenantId: user.tenantId || DEFAULT_TENANT_ID,
         enableNotification: user.enableNotification,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
@@ -209,7 +210,7 @@ export const login = async (req, res) => {
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
-      tenantId: userData.tenantId ?? '',
+      tenantId: docTenantId(userData.tenantId),
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {
@@ -252,6 +253,155 @@ export const login = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to login'
+    });
+  }
+};
+
+export const outletStorekeeperLogin = async (req, res) => {
+  try {
+    const { phoneNumber, password } = req.body;
+    if (!phoneNumber || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'phoneNumber and password are required',
+      });
+    }
+
+    const db = getFirestoreDB();
+    const snapshot = await db.collection('outlet_storekeepers')
+      .where('phoneNumber', '==', String(phoneNumber).trim())
+      .get();
+
+    const trimmedPassword = String(password).trim();
+    let matched = null;
+    snapshot.forEach((doc) => {
+      if (matched) return;
+      const data = doc.data();
+      if (data.password === trimmedPassword && data.isActive === true) {
+        matched = { id: doc.id, ...data };
+      }
+    });
+
+    if (!matched) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid phone number or password',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        id: matched.id,
+        name: matched.name,
+        phoneNumber: matched.phoneNumber,
+        outletId: matched.outletId,
+        outletName: matched.outletName,
+        userProfile: 'OutletStorekeeper',
+        tenantId: docTenantId(matched.tenantId),
+        createdAt: matched.createdAt,
+        updatedAt: matched.updatedAt,
+      },
+    });
+  } catch (err) {
+    console.error('Outlet storekeeper login error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to login',
+    });
+  }
+};
+
+export const outletStorekeeperSignup = async (req, res) => {
+  try {
+    const { phoneNumber, password, confirmPassword } = req.body;
+    if (!phoneNumber || !password || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'phoneNumber, password, and confirmPassword are required',
+      });
+    }
+    if (password !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password and confirm password do not match',
+      });
+    }
+
+    const db = getFirestoreDB();
+    const trimmedPhoneNumber = String(phoneNumber).trim();
+    const trimmedPassword = String(password).trim();
+
+    const snapshot = await db.collection('outlet_storekeepers')
+      .where('phoneNumber', '==', trimmedPhoneNumber)
+      .get();
+
+    let storekeeperDoc = null;
+    snapshot.forEach((doc) => {
+      if (storekeeperDoc) return;
+      const data = doc.data();
+      if (data.isActive === true && data.needsSignup === true) {
+        storekeeperDoc = doc;
+      }
+    });
+
+    if (!storekeeperDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Storekeeper information not found',
+      });
+    }
+
+    const storekeeperData = storekeeperDoc.data();
+    if (storekeeperData.needsSignup !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Storekeeper already signed up',
+      });
+    }
+
+    const userCounterRef = db.collection('counters').doc('userIdCounter');
+    const userCounterDoc = await userCounterRef.get();
+    let currentCount = 0;
+    if (userCounterDoc.exists) {
+      currentCount = userCounterDoc.data().count || 0;
+    }
+    const nextCount = currentCount + 1;
+    const userId = `UID${nextCount.toString().padStart(4, '0')}`;
+    await userCounterRef.set({ count: nextCount }, { merge: true });
+
+    await db.collection('users').doc(userId).set({
+      id: userId,
+      phoneNumber: trimmedPhoneNumber,
+      password: trimmedPassword,
+      userProfile: 'OutletStorekeeper',
+      outletId: storekeeperData.outletId,
+      outletName: storekeeperData.outletName,
+      name: storekeeperData.name,
+      tenantId: storekeeperData.tenantId || DEFAULT_TENANT_ID,
+      enableNotification: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await storekeeperDoc.ref.update({
+      needsSignup: false,
+      password: password,
+      userId,
+      updatedAt: new Date(),
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'User created successfully',
+      data: { userId },
+    });
+  } catch (err) {
+    console.error('Outlet storekeeper signup error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create user',
     });
   }
 };

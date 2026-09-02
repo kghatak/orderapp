@@ -98,8 +98,7 @@ export async function sendWhatsAppText(toPhone, body) {
         },
       }
     );
-    console.log(`WhatsApp text sent to ${to}:`, response.data);
-  } catch (err) {
+      } catch (err) {
     console.error(`WhatsApp text failed for ${to}:`, err.response?.data || err.message);
   }
 }
@@ -166,8 +165,7 @@ export async function sendWhatsAppTemplateBulk(toPhones, templateName, bodyParam
         },
       }
     );
-    console.log(`WhatsApp template "${templateName}" sent to ${normalizedNumbers.length} recipient(s):`, response.data);
-    return { ok: true, data: response.data };
+        return { ok: true, data: response.data };
   } catch (err) {
     console.error(`WhatsApp template "${templateName}" bulk send failed:`, err.response?.data || err.message);
     return { ok: false, error: err.response?.data || err.message };
