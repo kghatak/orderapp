@@ -36,9 +36,6 @@ export class Order {
     // Timestamps
     this.createdAt = data['Created at'] ? new Date(data['Created at']._seconds * 1000) : null;
     this.updatedAt = data.updatedAt ? new Date(data.updatedAt._seconds * 1000) : null;
-    this.acceptedDate = data.acceptedDate
-      ? new Date(data.acceptedDate._seconds ? data.acceptedDate._seconds * 1000 : data.acceptedDate)
-      : null;
 
     // Relational IDs
     this.paymentId = data.paymentId || '';
