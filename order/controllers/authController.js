@@ -125,6 +125,10 @@ export const signup = async (req, res) => {
 
     await db.collection('users').doc(userId).set({ ...user });
 
+    console.log(
+      `[API] signup tenantId=${user.tenantId || DEFAULT_TENANT_ID} userId=${userId} phone=${phoneNumber} profile=${userProfile}`
+    );
+
     res.status(201).json({
       success: true,
       message: 'User created successfully',
@@ -242,6 +246,10 @@ export const login = async (req, res) => {
       }
     }
 
+    console.log(
+      `[API] login tenantId=${responseData.tenantId} userId=${responseData.userId} phone=${phoneNumber} profile=${responseData.userProfile}`
+    );
+
     res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -289,6 +297,11 @@ export const outletStorekeeperLogin = async (req, res) => {
       });
     }
 
+    const tenantId = docTenantId(matched.tenantId);
+    console.log(
+      `[API] outlet-sk-login tenantId=${tenantId} id=${matched.id} phone=${phoneNumber}`
+    );
+
     res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -299,7 +312,7 @@ export const outletStorekeeperLogin = async (req, res) => {
         outletId: matched.outletId,
         outletName: matched.outletName,
         userProfile: 'OutletStorekeeper',
-        tenantId: docTenantId(matched.tenantId),
+        tenantId,
         createdAt: matched.createdAt,
         updatedAt: matched.updatedAt,
       },

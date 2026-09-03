@@ -83,6 +83,13 @@ const buildOrderData = async (req, res) => {
     return null;
   }
   const outlet = outletDoc.data();
+  if (!matchesTenant(outlet.tenantId, req.tenantId)) {
+    console.log(
+      `[API] tenant=${req.tenantId} blocked outlet ${outletId} (doc tenant=${outlet.tenantId || 'empty'})`
+    );
+    res.status(400).json({ error: `Outlet with id ${outletId} not found` });
+    return null;
+  }
 
   // Process items and calculate totals
   const processedItems = [];
@@ -98,6 +105,13 @@ const buildOrderData = async (req, res) => {
     }
 
     const product = productDoc.data();
+    if (!matchesTenant(product.tenantId, req.tenantId)) {
+      console.log(
+        `[API] tenant=${req.tenantId} blocked product ${itemData.productId} (doc tenant=${product.tenantId || 'empty'})`
+      );
+      res.status(400).json({ error: `Product with id ${itemData.productId} not found` });
+      return null;
+    }
     const quantity = itemData.quantity || 0;
     const price = product.price || 0;
     const discountPercentage = itemData.discountPercentage || 0;
