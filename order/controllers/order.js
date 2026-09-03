@@ -1266,6 +1266,8 @@ export const autoDeliverOpenOrders = async (req, res) => {
           status: 'delivered',
           deliveredDate: data.deliveredDate || deliveredTimestamp,
           statusHistory: updatedHistory,
+          autoDelivered: true,
+          deliveredBy: 'auto-11pm',
           autoDeliveredAt: deliveredTimestamp,
           autoDeliveredFrom: fromStatus,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
