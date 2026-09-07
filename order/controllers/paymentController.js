@@ -6,6 +6,7 @@ import {
   markOutletClosingBalanceRecalcPending,
   toIstDateKeyFromValue,
 } from '../services/closingBalanceRecalc.js';
+import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import admin from 'firebase-admin';
 import ExcelJS from 'exceljs';
 
@@ -1962,7 +1963,8 @@ export const getPaymentsTallyXLSX = async (req, res) => {
         const dateKey = effectiveDate ? formatCalendarDateIST(effectiveDate) : '';
         return { ...p, effectiveDate, dateKey };
       })
-      .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey));
+      .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey))
+      .filter((p) => !isTallyExcludedOutlet(p.outletId));
 
     const outletNames = await resolveCurrentOutletNames(
       db,
