@@ -700,9 +700,6 @@ export const removeProductsFromOrder = async (req, res) => {
 
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
-  console.log('getAllOrders REQUEST REACHED');
-  console.log('DEBUG: req.tenantId =', req.tenantId);
-
   if (!validateTenantId(req, res)) return;
 
   try {
@@ -759,8 +756,6 @@ export const getAllOrders = async (req, res) => {
       id: doc.id,
       ...doc.data(),
     }));
-
-    console.log(`Found ${totalCount} orders for tenant: ${req.tenantId}`);
 
     // Set headers that Refine expects
     res.set('X-Total-Count', totalCount.toString());

@@ -43,22 +43,17 @@ export function tenantMiddleware(req, res, next) {
   const raw = readTenantFromRequest(req);
   let tenantId = canonicalizeTenantId(raw);
 
-  console.log('Received tenant ID from header:', raw || '(missing)');
-
   if (!tenantId) {
     tenantId = DEFAULT_TENANT_ID;
-    console.log('Missing tenant ID in header, using default:', tenantId);
   }
 
   if (!ALLOWED_TENANT_IDS.includes(tenantId)) {
-    console.log('Rejected unknown tenant ID:', tenantId);
     return res.status(400).json({
       success: false,
       message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
     });
   }
 
-  console.log('Final tenant ID:', tenantId);
   req.tenantId = tenantId;
   next();
 }
