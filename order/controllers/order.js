@@ -1,7 +1,8 @@
 // controllers/orderController.js
 import admin from 'firebase-admin';
 import { Order } from '../models/order.js';
-import { getFirestoreDB } from '../../util/firebase.js';
+import { getFirestoreDB, createInboxNotification } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
@@ -56,6 +57,13 @@ const buildOrderData = async (req, res) => {
     return null;
   }
   const outlet = outletDoc.data();
+  if (!matchesTenant(outlet.tenantId, req.tenantId)) {
+    console.log(
+      `[API] tenant=${req.tenantId} blocked outlet ${outletId} (doc tenant=${outlet.tenantId || 'empty'})`
+    );
+    res.status(400).json({ error: `Outlet with id ${outletId} not found` });
+    return null;
+  }
 
   // Process items and calculate totals
   const processedItems = [];
@@ -71,6 +79,13 @@ const buildOrderData = async (req, res) => {
     }
 
     const product = productDoc.data();
+    if (!matchesTenant(product.tenantId, req.tenantId)) {
+      console.log(
+        `[API] tenant=${req.tenantId} blocked product ${itemData.productId} (doc tenant=${product.tenantId || 'empty'})`
+      );
+      res.status(400).json({ error: `Product with id ${itemData.productId} not found` });
+      return null;
+    }
     const quantity = itemData.quantity || 0;
     const price = product.price || 0;
     const discountPercentage = itemData.discountPercentage || 0;
@@ -132,6 +147,7 @@ export const createOrder = async (req, res) => {
     // Generate a new unique order ID and use it as the document ID (matches mobile app)
     const parentOrderId = await getNextOrderId(db);
     orderData['parent orderId'] = parentOrderId;
+    orderData.tenantId = req.tenantId || 'TENANT_001';
     
     // Add server timestamps
     orderData['Created at'] = admin.firestore.FieldValue.serverTimestamp();
@@ -188,6 +204,7 @@ export const createOrder = async (req, res) => {
             paymentId: '',
             openingBalance: 0,
             orderPendingAmount: orderTotalAmount,
+            tenantId: orderData.tenantId || req.tenantId || 'TENANT_001',
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
@@ -216,6 +233,16 @@ export const createOrder = async (req, res) => {
     } catch (stockError) {
       console.error('Error updating availableQuantity when creating order:', stockError);
     }
+
+    await createInboxNotification({
+      userId: 'admin',
+      title: 'New Order',
+      body: `New order ${parentOrderId} from ${orderData.outlet || orderData.outletId}`,
+      type: 'order',
+      orderId: parentOrderId,
+      outletId: orderData.outletId,
+      tenantId: orderData.tenantId,
+    });
     
     res.status(201).json({ id: orderRef.id, ...orderDoc.data() });
 
@@ -234,6 +261,9 @@ export const getOrder = async (req, res) => {
     const orderDoc = await orderRef.get();
 
     if (!orderDoc.exists) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    if (!matchesTenant(orderDoc.data()?.tenantId, req.tenantId)) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
@@ -287,6 +317,9 @@ export const patchOrder = async (req, res) => {
       return res.status(404).json({ error: `Order ${orderId} not found.` });
     }
     const orderDataBefore = orderDocBefore.data();
+    if (!matchesTenant(orderDataBefore?.tenantId, req.tenantId)) {
+      return res.status(404).json({ error: `Order ${orderId} not found.` });
+    }
     const currentStatus = orderDataBefore.status || 'pending';
     const orderTotalAmountBefore = orderDataBefore['total amount'] || 0;
 
@@ -368,6 +401,7 @@ export const patchOrder = async (req, res) => {
             orderId,
             status: newStatus,
             outletId: orderData.outletId,
+            tenantId: req.tenantId || orderData.tenantId || 'TENANT_001',
             vehicleNumber: vehicleNumber || orderData.vehicleNumber,
           },
         });
@@ -422,6 +456,18 @@ export const patchOrder = async (req, res) => {
           mongoSyncError
         );
       }
+    }
+
+    if (newStatus && orderDataBefore.outletId) {
+      await createInboxNotification({
+        userId: orderDataBefore.outletId,
+        title: 'Order Update',
+        body: `Order ${orderId} status updated to ${newStatus}`,
+        type: 'order',
+        orderId,
+        outletId: orderDataBefore.outletId,
+        tenantId: req.tenantId || orderDataBefore.tenantId || 'TENANT_001',
+      });
     }
 
     res.status(200).json({ 
@@ -697,14 +743,45 @@ export const removeProductsFromOrder = async (req, res) => {
   }
 };
 
+export const archiveOrders = async (req, res) => {
+  try {
+    const { orderIds } = req.body;
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ error: 'orderIds array is required' });
+    }
+
+    const db = getFirestoreDB();
+    const chunks = [];
+    for (let i = 0; i < orderIds.length; i += 450) {
+      chunks.push(orderIds.slice(i, i + 450));
+    }
+
+    for (const chunk of chunks) {
+      const batch = db.batch();
+      chunk.forEach((orderId) => {
+        batch.update(db.collection('orders').doc(orderId), { archived: true });
+      });
+      await batch.commit();
+    }
+
+    res.status(200).json({
+      message: 'Orders archived successfully',
+      count: orderIds.length,
+    });
+  } catch (error) {
+    console.error('Error archiving orders:', error);
+    res.status(500).json({ error: 'Failed to archive orders' });
+  }
+};
+
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    let { _start = 0, _end = 10, outletId, from, to } = req.query;
+    let { _start = 0, _end = 10, outletId, from, to, excludeArchived } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = Math.max(0, _end - _start);
+    const shouldExcludeArchived = excludeArchived === 'true';
 
     let baseQuery = db.collection('orders');
 
@@ -734,28 +811,18 @@ export const getAllOrders = async (req, res) => {
       }
     }
 
-    // Get total count for the X-Total-Count header
-    const totalSnapshot = await baseQuery.get();
-    const totalCount = totalSnapshot.size;
-
-    // Query for the paginated data
-    const ordersRef = baseQuery
-      .orderBy('Created at', 'desc')
-      .offset(_start)
-      .limit(limit || 10);
-
-    const snapshot = await ordersRef.get();
-
-    const orders = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    // Set headers that Refine expects
+    const snapshot = await baseQuery.orderBy('Created at', 'desc').get();
+    let orders = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    orders = filterByTenant(orders, req.tenantId);
+    if (shouldExcludeArchived) {
+      orders = orders.filter((order) => order.archived !== true);
+    }
+    const totalCount = orders.length;
+    orders = orders.slice(_start, _end);
     res.set('X-Total-Count', totalCount.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+    return res.status(200).json(orders);
 
-    res.status(200).json(orders);
 
   } catch (error) {
     console.error('Error fetching paginated orders:', error);

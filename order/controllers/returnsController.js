@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { filterByTenant, matchesTenant } from '../../util/tenant.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { subtractCollectedReturnItemsFromOutletProducts } from '../../util/outletProductsStock.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
@@ -47,7 +48,10 @@ export const createReturn = async (req, res) => {
       notes,
     });
 
-    await db.collection('returns').doc(returnId).set({ ...returnOrder });
+    await db.collection('returns').doc(returnId).set({
+      ...returnOrder,
+      tenantId: req.tenantId || 'TENANT_001',
+    });
     res.status(201).json({ message: 'Return order created successfully', id: returnId });
   } catch (error) {
     console.error('Error creating return order:', error);
@@ -59,7 +63,13 @@ export const createReturn = async (req, res) => {
 export const getAllReturns = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const { _start = 0, _end = 10, _sort = 'createdAt', _order = 'desc' } = req.query;
+    const {
+      _start = 0,
+      _end = 10,
+      _sort = 'createdAt',
+      _order = 'desc',
+      outletId,
+    } = req.query;
 
     // Parse pagination parameters
     const start = parseInt(_start, 10);
@@ -75,9 +85,15 @@ export const getAllReturns = async (req, res) => {
       id: doc.id,
       ...doc.data()
     }));
+    returns = filterByTenant(returns, req.tenantId);
 
     // Filter out archived returns
     returns = returns.filter(returnOrder => !returnOrder.archived);
+
+    if (outletId) {
+      const oid = String(outletId);
+      returns = returns.filter((item) => String(item.outletId || '') === oid);
+    }
 
     // Sort in memory
     returns.sort((a, b) => {
@@ -129,6 +145,9 @@ export const getReturnById = async (req, res) => {
     const doc = await db.collection('returns').doc(returnId).get();
 
     if (!doc.exists) {
+      return res.status(404).json({ error: 'Return order not found' });
+    }
+    if (!matchesTenant(doc.data()?.tenantId, req.tenantId)) {
       return res.status(404).json({ error: 'Return order not found' });
     }
 
@@ -244,8 +263,8 @@ export const getReturnsByStatus = async (req, res) => {
     const snapshot = await db.collection('returns').where('status', '==', status).get();
     const returns = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(returnOrder => !returnOrder.archived); // Filter out archived returns
-    res.status(200).json(returns);
+      .filter(returnOrder => !returnOrder.archived);
+    res.status(200).json(filterByTenant(returns, req.tenantId));
   } catch (error) {
     console.error('Error filtering return orders:', error);
     res.status(500).json({ error: 'Failed to filter return orders' });
@@ -310,8 +329,7 @@ export const updateReturnItems = async (req, res) => {
 
       // If quantity is 0, skip this item (effectively removing it)
       if (quantity === 0) {
-        console.log(`Removing item ${productId} from return order ${returnId} due to zero quantity`);
-        continue;
+                continue;
       }
 
       // Update item with new quantity, preserving all other fields including existing discountPercentage

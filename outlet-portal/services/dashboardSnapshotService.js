@@ -711,10 +711,6 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
 
 export const runEodDashboardSnapshot = async (businessDate) => {
   const dateKey = businessDate || getYesterdayDateKey();
-  console.log(`[Dashboard EOD] Building snapshot for ${dateKey}`);
-  const saved = await saveDashboardSnapshot(dateKey);
-  console.log(
-    `[Dashboard EOD] Saved snapshot for ${dateKey} (${saved.posByOutlet?.length ?? 0} outlets, ${saved.totalOrders ?? 0} delivered orders)`,
-  );
-  return saved;
+    const saved = await saveDashboardSnapshot(dateKey);
+    return saved;
 };

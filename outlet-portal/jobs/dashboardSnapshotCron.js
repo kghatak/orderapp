@@ -6,8 +6,7 @@ let cronTask = null;
 
 export const startDashboardSnapshotCron = () => {
   if (process.env.DASHBOARD_SNAPSHOT_CRON_ENABLED === 'false') {
-    console.log('Dashboard snapshot cron disabled (DASHBOARD_SNAPSHOT_CRON_ENABLED=false)');
-    return;
+        return;
   }
 
   const schedule = process.env.DASHBOARD_SNAPSHOT_CRON || '10 0 * * *';
@@ -29,8 +28,7 @@ export const startDashboardSnapshotCron = () => {
     { timezone: 'Asia/Kolkata' },
   );
 
-  console.log(`Dashboard snapshot cron scheduled (${schedule}, Asia/Kolkata)`);
-};
+  };
 
 export const stopDashboardSnapshotCron = () => {
   if (cronTask) {

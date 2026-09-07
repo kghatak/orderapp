@@ -2,15 +2,6 @@ import express from 'express';
 import chatController from '../controllers/chatController.js';
 const router = express.Router();
 
-// Middleware for request logging (optional)
-const logRequest = (req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-};
-
-// Apply logging middleware to all routes
-router.use(logRequest);
-
 // Routes
 
 /**

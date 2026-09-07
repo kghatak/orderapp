@@ -18,6 +18,8 @@ import utensilRoutes from './order/routes/utensilRoutes.js';
 import nannuUserRoutes from './order/routes/nannuUserRoutes.js';
 import authRoutes from './order/routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
+import { attachTenant } from './middleware/tenantMiddleware.js';
+import { getTenants, createTenant, getTenantById, updateTenant, createTenantAdmin } from './order/controllers/tenantController.js';
 import { connectMongoDB, isMongoConnected } from './config/db.js';
 import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet-portal/config/portalDb.js';
 import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
@@ -28,6 +30,8 @@ import wastageRoutes from './outlet-portal/routes/wastageRoutes.js';
 import dashboardRoutes from './outlet-portal/routes/dashboardRoutes.js';
 import { startDashboardSnapshotCron } from './outlet-portal/jobs/dashboardSnapshotCron.js';
 import chatRoutes from './order/routes/chatRoutes.js';
+import utensilReturnRoutes from './order/routes/utensilReturnRoutes.js';
+import outletStorekeeperRoutes from './order/routes/outletStorekeeperRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
 import procurementRoutes from './milk/routes/procurementRoutes.js';
@@ -89,19 +93,26 @@ await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module 
 await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
 
 // Route bindings
-app.use('/order(s)?', orderRoutes);
-app.use('/outlet(s)?', outletRoutes);
-app.use('/product(s)?', productRoutes);
-app.use('/return(s)?', returnRoutes);
-app.use('/payment(s)?', paymentRoutes);
-app.use('/storekeeper(s)?', storeKeeperRoutes);
-app.use('/utensil(s)?', utensilRoutes);
-app.use('/nannu-user(s)?', nannuUserRoutes);
+app.get('/tenants', getTenants);
+app.post('/tenants', createTenant);
+app.get('/tenants/:id', getTenantById);
+app.patch('/tenants/:id', updateTenant);
+app.post('/tenants/:id/admin', createTenantAdmin);
+app.use('/order(s)?', attachTenant, orderRoutes);
+app.use('/outlet(s)?', attachTenant, outletRoutes);
+app.use('/product(s)?', attachTenant, productRoutes);
+app.use('/return(s)?', attachTenant, returnRoutes);
+app.use('/payment(s)?', attachTenant, paymentRoutes);
+app.use('/storekeeper(s)?', attachTenant, storeKeeperRoutes);
+app.use('/utensil(s)?', attachTenant, utensilRoutes);
+app.use('/utensil-return(s)?', attachTenant, utensilReturnRoutes);
+app.use('/nannu-user(s)?', attachTenant, nannuUserRoutes);
 app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
-app.use('/invoice(s)?', customInvoiceRoutes);
-app.use('/outletopeningclosingbalance(s)?', outletOpeningClosingBalanceRoutes);
-app.use('/api/balance', outletOpeningClosingBalanceRoutes);
+app.use('/outlet-storekeeper(s)?', attachTenant, outletStorekeeperRoutes);
+app.use('/invoice(s)?', attachTenant, customInvoiceRoutes);
+app.use('/outletopeningclosingbalance(s)?', attachTenant, outletOpeningClosingBalanceRoutes);
+app.use('/api/balance', attachTenant, outletOpeningClosingBalanceRoutes);
 
 // Outlet portal (Firestore outlet users + separate MongoDB)
 app.use('/outlet-portal', (req, res, next) => {

@@ -20,8 +20,7 @@ const simulateSensorData = async () => {
     };
 
     try {
-      const res = await axios.post('http://localhost:5010/sensor/data', payload);
-      console.log(`✅ [${deviceId}] → ${res.data}`);
+      await axios.post('http://localhost:5010/sensor/data', payload);
     } catch (error) {
       console.error(`❌ [${deviceId}] → ${error.message || error}`);
 
@@ -29,8 +28,7 @@ const simulateSensorData = async () => {
       let retryCount = 0;
       while (retryCount < 3) {
         try {
-          const res = await axios.post('http://localhost:5010/sensor/data', payload);
-          console.log(`✅ [${deviceId}] → ${res.data}`);
+          await axios.post('http://localhost:5010/sensor/data', payload);
           break;
         } catch (retryError) {
           retryCount++;
@@ -47,4 +45,3 @@ const simulateSensorData = async () => {
 // Repeat every 3 seconds
 setInterval(simulateSensorData, 3000);
 
-console.log('🚀 Simulating sensor data for 10 devices every 3s...');

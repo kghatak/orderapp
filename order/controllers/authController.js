@@ -3,6 +3,8 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
+import { DEFAULT_TENANT_ID, docTenantId, resolveSignupTenantId } from '../../util/tenant.js';
+import { assertTenantActive } from './tenantController.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -35,11 +37,11 @@ export const signup = async (req, res) => {
     }
 
     // Validate userProfile
-    const validProfiles = ['Admin', 'Outlet', 'StoreKeeper'];
+    const validProfiles = ['Admin', 'Outlet', 'StoreKeeper', 'SuperAdmin'];
     if (!validProfiles.includes(userProfile)) {
       return res.status(400).json({
         success: false,
-        message: 'userProfile must be one of: Admin, Outlet, StoreKeeper'
+        message: 'userProfile must be one of: Admin, Outlet, StoreKeeper, SuperAdmin'
       });
     }
 
@@ -49,6 +51,15 @@ export const signup = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'Invalid admin code for Admin user'
+        });
+      }
+    }
+
+    if (userProfile === 'SuperAdmin') {
+      if (!adminCode || adminCode !== 'SUPERADMIN123') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid admin code for SuperAdmin user'
         });
       }
     }
@@ -96,6 +107,37 @@ export const signup = async (req, res) => {
       }
     }
 
+    const tenantResolved = resolveSignupTenantId(
+      userProfile === 'SuperAdmin' ? DEFAULT_TENANT_ID : tenantId,
+    );
+    if (tenantResolved.error) {
+      return res.status(400).json({
+        success: false,
+        message: tenantResolved.error,
+      });
+    }
+    const orderTenantId = tenantResolved.tenantId;
+
+    // Tenant Admin: ensure partner exists in tenants registry (PRD)
+    if (userProfile === 'Admin' && orderTenantId !== DEFAULT_TENANT_ID) {
+      const tenantRef = db.collection('tenants').doc(orderTenantId);
+      const tenantDoc = await tenantRef.get();
+      if (!tenantDoc.exists) {
+        await tenantRef.set({
+          tenantId: orderTenantId,
+          tenantName: orderTenantId,
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else if (tenantDoc.data()?.status === 'inactive') {
+        return res.status(403).json({
+          success: false,
+          message: 'Tenant is inactive',
+        });
+      }
+    }
+
     // Generate User ID
     const userCounterRef = db.collection('counters').doc('userCounter');
     const userCounterDoc = await userCounterRef.get();
@@ -117,12 +159,16 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: tenantId || '',
+      tenantId: orderTenantId,
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
 
     await db.collection('users').doc(userId).set({ ...user });
+
+    console.log(
+      `[API] signup tenantId=${user.tenantId || DEFAULT_TENANT_ID} userId=${userId} phone=${phoneNumber} profile=${userProfile}`
+    );
 
     res.status(201).json({
       success: true,
@@ -132,7 +178,7 @@ export const signup = async (req, res) => {
         phoneNumber: user.phoneNumber,
         userProfile: user.userProfile,
         outletId: user.outletId,
-        tenantId: user.tenantId || '',
+        tenantId: user.tenantId || DEFAULT_TENANT_ID,
         enableNotification: user.enableNotification,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
@@ -186,6 +232,17 @@ export const login = async (req, res) => {
       });
     }
 
+    const orderTenantId = docTenantId(userData.tenantId);
+    if (userData.userProfile !== 'SuperAdmin') {
+      const active = await assertTenantActive(orderTenantId);
+      if (!active.ok) {
+        return res.status(403).json({
+          success: false,
+          message: active.error || 'Tenant is inactive',
+        });
+      }
+    }
+
     // Update FCM token if provided
     if (fcmToken) {
       await db.collection('users').doc(userDoc.id).update({
@@ -209,7 +266,7 @@ export const login = async (req, res) => {
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
-      tenantId: userData.tenantId ?? '',
+      tenantId: orderTenantId,
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {
@@ -241,6 +298,10 @@ export const login = async (req, res) => {
       }
     }
 
+    console.log(
+      `[API] login tenantId=${responseData.tenantId} userId=${responseData.userId} phone=${phoneNumber} profile=${responseData.userProfile}`
+    );
+
     res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -252,6 +313,160 @@ export const login = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to login'
+    });
+  }
+};
+
+export const outletStorekeeperLogin = async (req, res) => {
+  try {
+    const { phoneNumber, password } = req.body;
+    if (!phoneNumber || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'phoneNumber and password are required',
+      });
+    }
+
+    const db = getFirestoreDB();
+    const snapshot = await db.collection('outlet_storekeepers')
+      .where('phoneNumber', '==', String(phoneNumber).trim())
+      .get();
+
+    const trimmedPassword = String(password).trim();
+    let matched = null;
+    snapshot.forEach((doc) => {
+      if (matched) return;
+      const data = doc.data();
+      if (data.password === trimmedPassword && data.isActive === true) {
+        matched = { id: doc.id, ...data };
+      }
+    });
+
+    if (!matched) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid phone number or password',
+      });
+    }
+
+    const tenantId = docTenantId(matched.tenantId);
+    console.log(
+      `[API] outlet-sk-login tenantId=${tenantId} id=${matched.id} phone=${phoneNumber}`
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        id: matched.id,
+        name: matched.name,
+        phoneNumber: matched.phoneNumber,
+        outletId: matched.outletId,
+        outletName: matched.outletName,
+        userProfile: 'OutletStorekeeper',
+        tenantId,
+        createdAt: matched.createdAt,
+        updatedAt: matched.updatedAt,
+      },
+    });
+  } catch (err) {
+    console.error('Outlet storekeeper login error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to login',
+    });
+  }
+};
+
+export const outletStorekeeperSignup = async (req, res) => {
+  try {
+    const { phoneNumber, password, confirmPassword } = req.body;
+    if (!phoneNumber || !password || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'phoneNumber, password, and confirmPassword are required',
+      });
+    }
+    if (password !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password and confirm password do not match',
+      });
+    }
+
+    const db = getFirestoreDB();
+    const trimmedPhoneNumber = String(phoneNumber).trim();
+    const trimmedPassword = String(password).trim();
+
+    const snapshot = await db.collection('outlet_storekeepers')
+      .where('phoneNumber', '==', trimmedPhoneNumber)
+      .get();
+
+    let storekeeperDoc = null;
+    snapshot.forEach((doc) => {
+      if (storekeeperDoc) return;
+      const data = doc.data();
+      if (data.isActive === true && data.needsSignup === true) {
+        storekeeperDoc = doc;
+      }
+    });
+
+    if (!storekeeperDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Storekeeper information not found',
+      });
+    }
+
+    const storekeeperData = storekeeperDoc.data();
+    if (storekeeperData.needsSignup !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Storekeeper already signed up',
+      });
+    }
+
+    const userCounterRef = db.collection('counters').doc('userIdCounter');
+    const userCounterDoc = await userCounterRef.get();
+    let currentCount = 0;
+    if (userCounterDoc.exists) {
+      currentCount = userCounterDoc.data().count || 0;
+    }
+    const nextCount = currentCount + 1;
+    const userId = `UID${nextCount.toString().padStart(4, '0')}`;
+    await userCounterRef.set({ count: nextCount }, { merge: true });
+
+    await db.collection('users').doc(userId).set({
+      id: userId,
+      phoneNumber: trimmedPhoneNumber,
+      password: trimmedPassword,
+      userProfile: 'OutletStorekeeper',
+      outletId: storekeeperData.outletId,
+      outletName: storekeeperData.outletName,
+      name: storekeeperData.name,
+      tenantId: storekeeperData.tenantId || DEFAULT_TENANT_ID,
+      enableNotification: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await storekeeperDoc.ref.update({
+      needsSignup: false,
+      password: password,
+      userId,
+      updatedAt: new Date(),
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'User created successfully',
+      data: { userId },
+    });
+  } catch (err) {
+    console.error('Outlet storekeeper signup error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create user',
     });
   }
 };

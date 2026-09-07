@@ -10,8 +10,7 @@ export class QueueProcessor {
     async startProcessing() {
         while(true) {
             const message = await this.blockingQueue.dequeue();
-            console.log('QueueProcessor Processing item:', JSON.stringify(message));
-            switch(message.messageType) {
+                        switch(message.messageType) {
                 case 'orderStatusUpdate':
                     sendPushNotification(message.messageBody);
                     break;
