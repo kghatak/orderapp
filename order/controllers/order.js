@@ -5,6 +5,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
+import { belongsToTenant, validateTenantId } from '../../util/tenantMiddleware.js';
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {
@@ -699,6 +700,11 @@ export const removeProductsFromOrder = async (req, res) => {
 
 // Get all orders with pagination for Refine framework
 export const getAllOrders = async (req, res) => {
+  console.log('getAllOrders REQUEST REACHED');
+  console.log('DEBUG: req.tenantId =', req.tenantId);
+
+  if (!validateTenantId(req, res)) return;
+
   try {
     const db = getFirestoreDB();
     let { _start = 0, _end = 10, outletId, from, to } = req.query;
@@ -734,22 +740,27 @@ export const getAllOrders = async (req, res) => {
       }
     }
 
-    // Get total count for the X-Total-Count header
     const totalSnapshot = await baseQuery.get();
-    const totalCount = totalSnapshot.size;
+    const createdAtMillis = (data) => {
+      const created = data['Created at'];
+      if (!created) return 0;
+      if (typeof created.toMillis === 'function') return created.toMillis();
+      if (typeof created._seconds === 'number') return created._seconds * 1000;
+      return 0;
+    };
 
-    // Query for the paginated data
-    const ordersRef = baseQuery
-      .orderBy('Created at', 'desc')
-      .offset(_start)
-      .limit(limit || 10);
+    const tenantOrders = totalSnapshot.docs
+      .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
+      .sort((a, b) => createdAtMillis(b.data()) - createdAtMillis(a.data()));
 
-    const snapshot = await ordersRef.get();
-
-    const orders = snapshot.docs.map((doc) => ({
+    const totalCount = tenantOrders.length;
+    const pageDocs = tenantOrders.slice(_start, _start + (limit || 10));
+    const orders = pageDocs.map((doc) => ({
       id: doc.id,
       ...doc.data(),
     }));
+
+    console.log(`Found ${totalCount} orders for tenant: ${req.tenantId}`);
 
     // Set headers that Refine expects
     res.set('X-Total-Count', totalCount.toString());

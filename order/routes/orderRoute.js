@@ -1,10 +1,11 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders, updateOrderQuantities, getOrderUtensils, addUtensilsToOrder, deliverOrder, restoreUtensils, updateOrderUtensilQuantity, removeUtensilFromOrder, addItemsToOrder, removeProductsFromOrder, getOrdersReport, deleteOrdersByDate, backfillDeliveredDate, autoDeliverOpenOrders } from '../controllers/order.js'
 
 const orderRoutes = express.Router();
 
 orderRoutes.post('/', createOrder);
-orderRoutes.get('/', getAllOrders); 
+orderRoutes.get('/', tenantMiddleware, getAllOrders); 
 orderRoutes.get('/report', getOrdersReport);
 orderRoutes.delete('/by-date', deleteOrdersByDate);
 orderRoutes.post('/migrate/delivered-date', backfillDeliveredDate); // Migration endpoint to backfill deliveredDate

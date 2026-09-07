@@ -1,0 +1,85 @@
+// util/tenantMiddleware.js
+// Reads tenant from request header (not body). Clients send:
+//   X-Tenant-Id / User-TenantId: NM2026 | T12026
+
+export const TENANTS = {
+  NAANU_MILK: 'NM2026',
+  TEST: 'T12026',
+};
+
+export const DEFAULT_TENANT_ID = TENANTS.NAANU_MILK;
+
+export const ALLOWED_TENANT_IDS = Object.values(TENANTS);
+
+const TENANT_ALIASES = {
+  NM2026: TENANTS.NAANU_MILK,
+  T12026: TENANTS.TEST,
+};
+
+function normalizeTenantId(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+}
+
+export function canonicalizeTenantId(value) {
+  const id = normalizeTenantId(value);
+  if (!id) return '';
+  if (TENANT_ALIASES[id]) return TENANT_ALIASES[id];
+  // Milk module id (TENANT001) is not an order tenant.
+  if (/^TENANT\d+$/i.test(id)) return DEFAULT_TENANT_ID;
+  return id;
+}
+
+function readTenantFromRequest(req) {
+  return (
+    req.headers['x-tenant-id'] ||
+    req.headers['user-tenantid'] ||
+    req.query?.tenantId ||
+    ''
+  );
+}
+
+export function tenantMiddleware(req, res, next) {
+  const raw = readTenantFromRequest(req);
+  let tenantId = canonicalizeTenantId(raw);
+
+  console.log('Received tenant ID from header:', raw || '(missing)');
+
+  if (!tenantId) {
+    tenantId = DEFAULT_TENANT_ID;
+    console.log('Missing tenant ID in header, using default:', tenantId);
+  }
+
+  if (!ALLOWED_TENANT_IDS.includes(tenantId)) {
+    console.log('Rejected unknown tenant ID:', tenantId);
+    return res.status(400).json({
+      success: false,
+      message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
+    });
+  }
+
+  console.log('Final tenant ID:', tenantId);
+  req.tenantId = tenantId;
+  next();
+}
+
+export function validateTenantId(req, res) {
+  if (!req.tenantId) {
+    res.status(400).json({
+      success: false,
+      message: 'Missing tenant ID in request',
+    });
+    return false;
+  }
+  return true;
+}
+
+// Existing Naanu Milk docs may have no tenantId yet — treat those as NM2026.
+export function belongsToTenant(docTenantId, requestTenantId) {
+  const requestTenant = canonicalizeTenantId(requestTenantId) || DEFAULT_TENANT_ID;
+  const docTenant = canonicalizeTenantId(docTenantId);
+  if (requestTenant === DEFAULT_TENANT_ID) {
+    return !docTenant || docTenant === DEFAULT_TENANT_ID;
+  }
+  return docTenant === requestTenant;
+}
