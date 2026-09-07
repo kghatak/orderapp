@@ -6,6 +6,7 @@ import {
   markOutletClosingBalanceRecalcDone,
   processPendingClosingBalanceRecalcs,
 } from '../services/closingBalanceRecalc.js';
+import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import admin from 'firebase-admin';
 
 const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -630,8 +631,12 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const dateDoc = await dateDocRef.get();
     if (!dateDoc.exists) continue;
     const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
-    if (!outletsSnapshot.empty) {
-      dayBundles.push({ dateKey, outletDocs: outletsSnapshot.docs });
+    const outletDocs = outletsSnapshot.docs.filter((doc) => {
+      const outletId = doc.id || doc.data()?.outletId;
+      return !isTallyExcludedOutlet(outletId);
+    });
+    if (outletDocs.length) {
+      dayBundles.push({ dateKey, outletDocs });
     }
   }
 
