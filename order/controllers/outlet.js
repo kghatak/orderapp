@@ -116,7 +116,7 @@ export const createOutlet = async (req, res) => {
       discounts,
       isInternal,
       openingBalance: parseFloat(openingBalance) || 0, // Ensure it's a number
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
       createdAt: new Date()
     };
 

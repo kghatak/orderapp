@@ -90,7 +90,7 @@ export const createProduct = async (req, res) => {
       active: active !== undefined ? active : true,
       createdAt: new Date(),
       updatedAt: new Date(),
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     };
 
     await db.collection('products').doc(productId).set(productData);

@@ -84,7 +84,7 @@ export const createOutletPayment = async (req, res) => {
     const outletPayment = new OutletPayment(req.body);
     await db.collection('outlet_payments').doc(outletPayment.outletId).set({
       ...outletPayment,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     });
     res.status(201).json({ message: 'Outlet payment created/updated' });
   } catch (err) {
@@ -100,7 +100,7 @@ export const createPaymentRequest = async (req, res) => {
     const paymentRequest = new PaymentRequest(req.body);
     const ref = await db.collection('payment_requests').add({
       ...paymentRequest,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     });
     res.status(201).json({ message: 'Payment request submitted', id: ref.id });
   } catch (err) {
@@ -116,7 +116,7 @@ export const createPayment = async (req, res) => {
     const payment = new Payment(req.body);
     await db.collection('payments').doc(payment.paymentId).set({
       ...payment,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     });
     res.status(201).json({ message: 'Payment recorded' });
   } catch (err) {

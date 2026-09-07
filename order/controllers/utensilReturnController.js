@@ -37,7 +37,7 @@ export const createUtensilReturn = async (req, res) => {
       outlet,
       outletId,
       isArchived: false,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     };
 
     const docRef = await db.collection('utensilReturnRequests').add(returnRequest);

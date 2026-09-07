@@ -42,7 +42,7 @@ export const createUtensil = async (req, res) => {
       type,
       quantity,
       actualQuantity: actualQuantity || quantity, // Use provided actualQuantity or default to quantity
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };

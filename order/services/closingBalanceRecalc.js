@@ -1,8 +1,4 @@
 import admin from 'firebase-admin';
-import {
-  REPORT_ORDER_STATUSES,
-  isReportOrderStatus,
-} from '../constants/reportOrderStatuses.js';
 
 const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -93,63 +89,6 @@ async function fetchApprovedPaymentsForDay(db, outletId, dayStartTimestamp, dayE
   });
 
   return { total, paymentsList };
-}
-
-export const CLOSING_BALANCE_ORDER_STATUSES = REPORT_ORDER_STATUSES;
-
-/**
- * Orders for one IST day: accepted or later, dated by acceptedDate.
- * Falls back to Created at when acceptedDate has not been backfilled yet.
- */
-export async function fetchOrdersForClosingBalanceDay(
-  db,
-  outletId,
-  dayStartTimestamp,
-  dayEndTimestamp,
-) {
-  const countedIds = new Set();
-  let closingBalanceOrder = 0;
-  const ordersList = [];
-
-  const addDoc = (doc) => {
-    if (countedIds.has(doc.id)) return;
-    const orderData = doc.data();
-    if (!isReportOrderStatus(orderData.status)) return;
-    countedIds.add(doc.id);
-    const orderAmount = parseFloat(
-      orderData['total amount'] || orderData.totalAmount || 0,
-    );
-    closingBalanceOrder += orderAmount;
-    ordersList.push({
-      id: doc.id,
-      outletId: orderData.outletId || outletId,
-      amount: orderAmount,
-      status: orderData.status,
-    });
-  };
-
-  const byAcceptedDate = await db
-    .collection('orders')
-    .where('outletId', '==', outletId)
-    .where('status', 'in', REPORT_ORDER_STATUSES)
-    .where('acceptedDate', '>=', dayStartTimestamp)
-    .where('acceptedDate', '<=', dayEndTimestamp)
-    .get();
-  byAcceptedDate.forEach(addDoc);
-
-  const byCreatedAt = await db
-    .collection('orders')
-    .where('outletId', '==', outletId)
-    .where('status', 'in', REPORT_ORDER_STATUSES)
-    .where('Created at', '>=', dayStartTimestamp)
-    .where('Created at', '<=', dayEndTimestamp)
-    .get();
-  byCreatedAt.forEach((doc) => {
-    if (doc.data().acceptedDate != null) return;
-    addDoc(doc);
-  });
-
-  return { closingBalanceOrder, ordersList };
 }
 
 export const toIstDateKeyFromValue = (value) => {
@@ -366,13 +305,32 @@ export const recalculateOutletClosingBalancesRange = async (
       currentOpeningBalance = openingBalance;
     }
 
-    const { closingBalanceOrder, ordersList } =
-      await fetchOrdersForClosingBalanceDay(
-        db,
-        outletId,
-        dayStartTimestamp,
-        dayEndTimestamp,
-      );
+    const ordersSnapshot = await db
+      .collection('orders')
+      .where('outletId', '==', outletId)
+      .where('status', '==', 'delivered')
+      .where('deliveredDate', '>=', dayStartTimestamp)
+      .where('deliveredDate', '<=', dayEndTimestamp)
+      .get();
+
+    let closingBalanceOrder = 0;
+    const ordersList = [];
+    ordersSnapshot.forEach((doc) => {
+      const orderData = doc.data();
+      const oid = orderData.outletId || outletId;
+      if (orderData.status === 'delivered') {
+        const orderAmount = parseFloat(
+          orderData['total amount'] || orderData.totalAmount || 0,
+        );
+        closingBalanceOrder += orderAmount;
+        ordersList.push({
+          id: doc.id,
+          outletId: oid,
+          amount: orderAmount,
+          status: orderData.status,
+        });
+      }
+    });
 
     const returnsSnapshot = await db
       .collection('returns')

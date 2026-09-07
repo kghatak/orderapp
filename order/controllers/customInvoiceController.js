@@ -210,7 +210,7 @@ export const createCustomInvoice = async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       createdBy: req.user?.id || 'system', // Assuming user info is available in req.user
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     };
 
     // Save to Firestore

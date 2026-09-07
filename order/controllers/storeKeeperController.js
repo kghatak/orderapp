@@ -31,7 +31,7 @@ export const createStoreKeeper = async (req, res) => {
     const newDocRef = await db.collection('storeKeepers').add({
       name,
       phoneNumber,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
       createdAt: now,
       updatedAt: now,
     });

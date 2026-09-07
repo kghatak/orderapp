@@ -50,7 +50,7 @@ export const createReturn = async (req, res) => {
 
     await db.collection('returns').doc(returnId).set({
       ...returnOrder,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
     });
     res.status(201).json({ message: 'Return order created successfully', id: returnId });
   } catch (error) {
@@ -63,7 +63,13 @@ export const createReturn = async (req, res) => {
 export const getAllReturns = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const { _start = 0, _end = 10, _sort = 'createdAt', _order = 'desc' } = req.query;
+    const {
+      _start = 0,
+      _end = 10,
+      _sort = 'createdAt',
+      _order = 'desc',
+      outletId,
+    } = req.query;
 
     // Parse pagination parameters
     const start = parseInt(_start, 10);
@@ -83,6 +89,11 @@ export const getAllReturns = async (req, res) => {
 
     // Filter out archived returns
     returns = returns.filter(returnOrder => !returnOrder.archived);
+
+    if (outletId) {
+      const oid = String(outletId);
+      returns = returns.filter((item) => String(item.outletId || '') === oid);
+    }
 
     // Sort in memory
     returns.sort((a, b) => {

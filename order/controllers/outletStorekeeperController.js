@@ -69,7 +69,7 @@ export const createOutletStorekeeper = async (req, res) => {
       outletName,
       isActive: true,
       needsSignup: true,
-      tenantId: req.tenantId || 'nannu_milk',
+      tenantId: req.tenantId || 'TENANT_001',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });

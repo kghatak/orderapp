@@ -3,7 +3,8 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
-import { DEFAULT_TENANT_ID, isValidTenantId, docTenantId } from '../../util/tenant.js';
+import { DEFAULT_TENANT_ID, docTenantId, resolveSignupTenantId } from '../../util/tenant.js';
+import { assertTenantActive } from './tenantController.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -36,11 +37,11 @@ export const signup = async (req, res) => {
     }
 
     // Validate userProfile
-    const validProfiles = ['Admin', 'Outlet', 'StoreKeeper'];
+    const validProfiles = ['Admin', 'Outlet', 'StoreKeeper', 'SuperAdmin'];
     if (!validProfiles.includes(userProfile)) {
       return res.status(400).json({
         success: false,
-        message: 'userProfile must be one of: Admin, Outlet, StoreKeeper'
+        message: 'userProfile must be one of: Admin, Outlet, StoreKeeper, SuperAdmin'
       });
     }
 
@@ -50,6 +51,15 @@ export const signup = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'Invalid admin code for Admin user'
+        });
+      }
+    }
+
+    if (userProfile === 'SuperAdmin') {
+      if (!adminCode || adminCode !== 'SUPERADMIN123') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid admin code for SuperAdmin user'
         });
       }
     }
@@ -97,6 +107,37 @@ export const signup = async (req, res) => {
       }
     }
 
+    const tenantResolved = resolveSignupTenantId(
+      userProfile === 'SuperAdmin' ? DEFAULT_TENANT_ID : tenantId,
+    );
+    if (tenantResolved.error) {
+      return res.status(400).json({
+        success: false,
+        message: tenantResolved.error,
+      });
+    }
+    const orderTenantId = tenantResolved.tenantId;
+
+    // Tenant Admin: ensure partner exists in tenants registry (PRD)
+    if (userProfile === 'Admin' && orderTenantId !== DEFAULT_TENANT_ID) {
+      const tenantRef = db.collection('tenants').doc(orderTenantId);
+      const tenantDoc = await tenantRef.get();
+      if (!tenantDoc.exists) {
+        await tenantRef.set({
+          tenantId: orderTenantId,
+          tenantName: orderTenantId,
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else if (tenantDoc.data()?.status === 'inactive') {
+        return res.status(403).json({
+          success: false,
+          message: 'Tenant is inactive',
+        });
+      }
+    }
+
     // Generate User ID
     const userCounterRef = db.collection('counters').doc('userCounter');
     const userCounterDoc = await userCounterRef.get();
@@ -118,7 +159,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: (tenantId && isValidTenantId(tenantId)) ? String(tenantId).trim() : DEFAULT_TENANT_ID,
+      tenantId: orderTenantId,
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
@@ -191,6 +232,17 @@ export const login = async (req, res) => {
       });
     }
 
+    const orderTenantId = docTenantId(userData.tenantId);
+    if (userData.userProfile !== 'SuperAdmin') {
+      const active = await assertTenantActive(orderTenantId);
+      if (!active.ok) {
+        return res.status(403).json({
+          success: false,
+          message: active.error || 'Tenant is inactive',
+        });
+      }
+    }
+
     // Update FCM token if provided
     if (fcmToken) {
       await db.collection('users').doc(userDoc.id).update({
@@ -214,7 +266,7 @@ export const login = async (req, res) => {
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
-      tenantId: docTenantId(userData.tenantId),
+      tenantId: orderTenantId,
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {

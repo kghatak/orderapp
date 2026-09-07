@@ -19,7 +19,7 @@ import nannuUserRoutes from './order/routes/nannuUserRoutes.js';
 import authRoutes from './order/routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
 import { attachTenant } from './middleware/tenantMiddleware.js';
-import { getTenants } from './order/controllers/tenantController.js';
+import { getTenants, createTenant, getTenantById, updateTenant, createTenantAdmin } from './order/controllers/tenantController.js';
 import { connectMongoDB, isMongoConnected } from './config/db.js';
 import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet-portal/config/portalDb.js';
 import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
@@ -32,7 +32,6 @@ import { startDashboardSnapshotCron } from './outlet-portal/jobs/dashboardSnapsh
 import chatRoutes from './order/routes/chatRoutes.js';
 import utensilReturnRoutes from './order/routes/utensilReturnRoutes.js';
 import outletStorekeeperRoutes from './order/routes/outletStorekeeperRoutes.js';
-import notificationRoutes from './order/routes/notificationRoutes.js';
 import milkAuthRoutes from './milk/routes/milkAuthRoutes.js';
 import supplierRoutes from './milk/routes/supplierRoutes.js';
 import procurementRoutes from './milk/routes/procurementRoutes.js';
@@ -95,6 +94,10 @@ await connectOutletPortalMongo(); // Separate DB connection for outlet portal (O
 
 // Route bindings
 app.get('/tenants', getTenants);
+app.post('/tenants', createTenant);
+app.get('/tenants/:id', getTenantById);
+app.patch('/tenants/:id', updateTenant);
+app.post('/tenants/:id/admin', createTenantAdmin);
 app.use('/order(s)?', attachTenant, orderRoutes);
 app.use('/outlet(s)?', attachTenant, outletRoutes);
 app.use('/product(s)?', attachTenant, productRoutes);
@@ -107,7 +110,6 @@ app.use('/nannu-user(s)?', attachTenant, nannuUserRoutes);
 app.use('/auth', authRoutes);
 app.use('/chat(s)?', chatRoutes);
 app.use('/outlet-storekeeper(s)?', attachTenant, outletStorekeeperRoutes);
-app.use('/notification(s)?', attachTenant, notificationRoutes);
 app.use('/invoice(s)?', attachTenant, customInvoiceRoutes);
 app.use('/outletopeningclosingbalance(s)?', attachTenant, outletOpeningClosingBalanceRoutes);
 app.use('/api/balance', attachTenant, outletOpeningClosingBalanceRoutes);
