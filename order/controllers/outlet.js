@@ -1,5 +1,6 @@
 // controllers/outletController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { validateTenantId } from '../../util/tenantMiddleware.js';
 
 // Format Firestore Timestamp to human-readable
 export const formatTimestamp = (timestamp) => {
@@ -37,6 +38,8 @@ const generateOutletId = async () => {
 // Create outlet
 export const createOutlet = async (req, res) => {
   try {
+    if (!validateTenantId(req, res)) return;
+
     const {
       outletName,
       name, // Accept both outletName and name for compatibility
@@ -112,6 +115,7 @@ export const createOutlet = async (req, res) => {
       discounts,
       isInternal,
       openingBalance: parseFloat(openingBalance) || 0, // Ensure it's a number
+      tenantId: req.tenantId,
       createdAt: new Date()
     };
 

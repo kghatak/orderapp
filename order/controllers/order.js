@@ -125,6 +125,8 @@ const buildOrderData = async (req, res) => {
 export const createOrder = async (req, res) => {
   try {
     const db = getFirestoreDB();
+    if (!validateTenantId(req, res)) return;
+
     let orderData = await buildOrderData(req, res);
     if (!orderData) {
       return; // Error response was already sent
@@ -133,6 +135,7 @@ export const createOrder = async (req, res) => {
     // Generate a new unique order ID and use it as the document ID (matches mobile app)
     const parentOrderId = await getNextOrderId(db);
     orderData['parent orderId'] = parentOrderId;
+    orderData.tenantId = req.tenantId;
     
     // Add server timestamps
     orderData['Created at'] = admin.firestore.FieldValue.serverTimestamp();

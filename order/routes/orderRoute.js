@@ -4,7 +4,7 @@ import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders
 
 const orderRoutes = express.Router();
 
-orderRoutes.post('/', createOrder);
+orderRoutes.post('/', tenantMiddleware, createOrder);
 orderRoutes.get('/', tenantMiddleware, getAllOrders); 
 orderRoutes.get('/report', getOrdersReport);
 orderRoutes.delete('/by-date', deleteOrdersByDate);

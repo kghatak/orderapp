@@ -1,9 +1,10 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import { createOutlet, getOutletById, updateOutlet, deleteOutlet, getPaginatedOutlets, searchOutlets, getOutletsByStatus, clearOutletData } from '../controllers/outlet.js';
 
 const outletRoutes = express.Router();
 
-outletRoutes.post('/', createOutlet);
+outletRoutes.post('/', tenantMiddleware, createOutlet);
 outletRoutes.get('/', getPaginatedOutlets);
 outletRoutes.get('/search', searchOutlets);
 outletRoutes.get('/status', getOutletsByStatus);

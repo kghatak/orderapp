@@ -1,13 +1,11 @@
 // util/tenantMiddleware.js
 // Reads tenant from request header (not body). Clients send:
-//   X-Tenant-Id / User-TenantId: NM2026 | T12026
+//   X-Tenant-Id / User-TenantId from refine-auth. No default tenant.
 
 export const TENANTS = {
   NAANU_MILK: 'NM2026',
   TEST: 'T12026',
 };
-
-export const DEFAULT_TENANT_ID = TENANTS.NAANU_MILK;
 
 export const ALLOWED_TENANT_IDS = Object.values(TENANTS);
 
@@ -15,6 +13,12 @@ const TENANT_ALIASES = {
   NM2026: TENANTS.NAANU_MILK,
   T12026: TENANTS.TEST,
 };
+
+// Extra tenants set on users in Firestore (e.g. T22026) — same shape as T12026.
+const isCustomOrderTenantId = (id) => /^T\d{4,}$/i.test(id);
+
+export const isAllowedOrderTenantId = (id) =>
+  ALLOWED_TENANT_IDS.includes(id) || isCustomOrderTenantId(id);
 
 function normalizeTenantId(value) {
   if (typeof value !== 'string') return '';
@@ -26,7 +30,7 @@ export function canonicalizeTenantId(value) {
   if (!id) return '';
   if (TENANT_ALIASES[id]) return TENANT_ALIASES[id];
   // Milk module id (TENANT001) is not an order tenant.
-  if (/^TENANT\d+$/i.test(id)) return DEFAULT_TENANT_ID;
+  if (/^TENANT\d+$/i.test(id)) return '';
   return id;
 }
 
@@ -40,14 +44,16 @@ function readTenantFromRequest(req) {
 }
 
 export function tenantMiddleware(req, res, next) {
-  const raw = readTenantFromRequest(req);
-  let tenantId = canonicalizeTenantId(raw);
+  const tenantId = canonicalizeTenantId(readTenantFromRequest(req));
 
   if (!tenantId) {
-    tenantId = DEFAULT_TENANT_ID;
+    return res.status(400).json({
+      success: false,
+      message: 'Missing tenant ID in request',
+    });
   }
 
-  if (!ALLOWED_TENANT_IDS.includes(tenantId)) {
+  if (!isAllowedOrderTenantId(tenantId)) {
     return res.status(400).json({
       success: false,
       message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
@@ -71,10 +77,11 @@ export function validateTenantId(req, res) {
 
 // Existing Naanu Milk docs may have no tenantId yet — treat those as NM2026.
 export function belongsToTenant(docTenantId, requestTenantId) {
-  const requestTenant = canonicalizeTenantId(requestTenantId) || DEFAULT_TENANT_ID;
+  const requestTenant = canonicalizeTenantId(requestTenantId);
+  if (!requestTenant) return false;
   const docTenant = canonicalizeTenantId(docTenantId);
-  if (requestTenant === DEFAULT_TENANT_ID) {
-    return !docTenant || docTenant === DEFAULT_TENANT_ID;
+  if (requestTenant === TENANTS.NAANU_MILK) {
+    return !docTenant || docTenant === TENANTS.NAANU_MILK;
   }
   return docTenant === requestTenant;
 }
