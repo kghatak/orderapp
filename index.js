@@ -37,6 +37,8 @@ import customInvoiceRoutes from './order/routes/customInvoiceRoutes.js';
 //import dailyClosingBalanceRoutes from './routes/dailyClosingBalanceRoutes.js';
 import outletOpeningClosingBalanceRoutes from './order/routes/outletOpeningClosingBalanceRoutes.js';
 import { downloadPublicMilkReport } from './milk/controllers/milkTenDayReportController.js';
+import { handleWhatsAppInbound } from './milk/controllers/whatsappInboundController.js';
+import whatsappReplyRoutes from './milk/routes/whatsappReplyRoutes.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -179,6 +181,10 @@ app.use('/milk/suppliers', supplierRoutes);
 app.use('/milk/procurements', procurementRoutes);
 app.use('/milk/payments', milkPaymentRoutes);
 app.use('/milk/reports', milkReportRoutes);
+app.use('/milk/whatsapp-replies', whatsappReplyRoutes);
+
+// Public MSG91 inbound webhook (no auth — configure this URL in MSG91 WhatsApp webhook)
+app.post('/milk/whatsapp/inbound', handleWhatsAppInbound);
 
 // Public milk 10-day PDF downloads (no auth — used in WhatsApp links)
 app.get('/public/milk-reports/:token', (req, res, next) => {
