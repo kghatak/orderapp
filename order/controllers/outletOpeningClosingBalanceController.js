@@ -834,7 +834,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
  * POST /api/balance/calculate-opening-closing
  * 
  * Daily Opening/Closing Balance calculation for all active outlets.
- * Called by Firebase Cloud Function scheduler every day at 6:00 AM IST.
+ * Called by Firebase Cloud Function scheduler every day at 11:50 PM IST.
  *
  * Steps:
  *   1. Cleanup old records (older than 3 months)

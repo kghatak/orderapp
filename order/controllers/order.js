@@ -1214,7 +1214,7 @@ const AUTO_DELIVER_STATUSES = ['processing', 'dispatched'];
 /**
  * POST /orders/auto-deliver-open
  * Marks processing / dispatched orders as delivered (sets deliveredDate).
- * Intended for the 11:00 PM IST scheduler, before 11:59 PM closing balance.
+ * Intended for the 11:00 PM IST scheduler, before 11:50 PM closing balance.
  */
 export const autoDeliverOpenOrders = async (req, res) => {
   const startedAt = new Date();
