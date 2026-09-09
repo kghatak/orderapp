@@ -7,6 +7,7 @@ import {
   processPendingClosingBalanceRecalcs,
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
+import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 import admin from 'firebase-admin';
 
 const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -836,7 +837,7 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
  * Called by Firebase Cloud Function scheduler every day at 6:00 AM IST.
  *
  * Steps:
- *   1. Cleanup old records (older than 1 month)
+ *   1. Cleanup old records (older than 3 months)
  *   2. Query all active outlets
  *   3. Create balance calculation record for each outlet
  *   4. Mark each record as success after creation
@@ -854,17 +855,17 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
 
     // ──────────────────────────────────────────────
-    // Step 1 — Cleanup old records (older than 1 month)
+    // Step 1 — Cleanup old records (older than 3 months)
     // ──────────────────────────────────────────────
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-    const oneMonthAgoTimestamp = admin.firestore.Timestamp.fromDate(oneMonthAgo);
+    const threeMonthsAgo = new Date();
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+    const threeMonthsAgoTimestamp = admin.firestore.Timestamp.fromDate(threeMonthsAgo);
 
-    console.log(`🧹 [Step 1] Cleaning up records older than ${oneMonthAgo.toISOString()}`);
+    console.log(`🧹 [Step 1] Cleaning up records older than ${threeMonthsAgo.toISOString()}`);
 
     const oldRecordsSnapshot = await db
       .collection('OutletOpeningClosingBalance')
-      .where('timestamp', '<', oneMonthAgoTimestamp)
+      .where('timestamp', '<', threeMonthsAgoTimestamp)
       .get();
 
     if (!oldRecordsSnapshot.empty) {
@@ -968,8 +969,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
 
           let closingBalanceOrder = 0;
           ordersSnapshot.forEach((doc) => {
-            const data = doc.data();
-            closingBalanceOrder += parseFloat(data['total amount'] || data.totalAmount || 0);
+            closingBalanceOrder += getOrderLedgerAmount(doc.data());
           });
 
           // Approved payments: paymentDate (business date), or createdAt when paymentDate is missing
