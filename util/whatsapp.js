@@ -17,12 +17,20 @@ function getCredentials() {
  * Normalize a phone number to MSG91 format: 12-digit with country code, no + or spaces.
  * Assumes India (+91) if only 10 digits are given.
  */
-function normalizePhone(phone) {
-  const digits = String(phone).replace(/\D/g, '');
+export function normalizePhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
   if (digits.length === 10) return `91${digits}`;
   if (digits.length === 12 && digits.startsWith('91')) return digits;
   if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
   return digits;
+}
+
+/** Phone variants used to match supplier records stored as 10-digit or +91 numbers. */
+export function phoneMatchVariants(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const last10 = digits.slice(-10);
+  const with91 = last10.length === 10 ? `91${last10}` : digits;
+  return [...new Set([digits, last10, with91, `+${with91}`, `+${last10}`, `0${last10}`].filter(Boolean))];
 }
 
 /**

@@ -5,20 +5,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
-import { belongsToTenant, validateTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
-
-const ensureOrderTenant = async (db, req, res, orderId) => {
-  const orderRef = db.collection('orders').doc(orderId);
-  const orderDoc = await orderRef.get();
-  if (!orderDoc.exists) {
-    res.status(404).json({ error: 'Order not found' });
-    return null;
-  }
-  if (denyUnlessTenant(res, orderDoc.data().tenantId, req.tenantId, 'Order not found')) {
-    return null;
-  }
-  return orderRef;
-};
+import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {
@@ -1273,7 +1260,7 @@ const AUTO_DELIVER_STATUSES = ['processing', 'dispatched'];
 /**
  * POST /orders/auto-deliver-open
  * Marks processing / dispatched orders as delivered (sets deliveredDate).
- * Intended for the 11:00 PM IST scheduler, before 11:59 PM closing balance.
+ * Intended for the 11:00 PM IST scheduler, before 11:50 PM closing balance.
  */
 export const autoDeliverOpenOrders = async (req, res) => {
   const startedAt = new Date();
@@ -1745,41 +1732,11 @@ export const getOrdersReport = async (req, res) => {
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const snapshotDocs = tenantDocs.slice(offset, offset + parseInt(limit));
 
-    // Process orders data
-    const orders = snapshotDocs.map(doc => {
+    // Process orders data — amount must match daily snapshot (items after discount)
+    const orders = snapshot.docs.map(doc => {
       const data = doc.data();
-      
-      // Calculate actual order amount from items (after discounts)
-      // The "total amount" field is before discount, so we need to calculate from items
-      let orderAmount = 0;
-      
-      if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-        data.items.forEach((item) => {
-          const price = parseFloat(item.price || 0);
-          const quantity = parseFloat(item.quantity || 0);
-          const discountPercentage = parseFloat(item.discountPercentage || 0);
-          
-          // Calculate item subtotal
-          const itemSubtotal = price * quantity;
-          
-          // Calculate discount amount (discountAmount might be 0, so calculate from percentage)
-          let discountAmount = parseFloat(item.discountAmount || 0);
-          if (discountAmount === 0 && discountPercentage > 0) {
-            discountAmount = itemSubtotal * (discountPercentage / 100);
-          }
-          
-          // Item total after discount
-          const itemTotal = itemSubtotal - discountAmount;
-          orderAmount += itemTotal;
-        });
-        
-        // Round to 2 decimal places to avoid floating point precision issues
-        orderAmount = Math.round(orderAmount * 100) / 100;
-      } else {
-        // Fallback: if items array is not available, use total amount
-        orderAmount = parseFloat(data["total amount"] || data.totalAmount || 0);
-      }
-      
+      const orderAmount = getOrderLedgerAmount(data);
+
       return {
         id: doc.id,
         "parent orderId": data["parent orderId"] || data.orderId,

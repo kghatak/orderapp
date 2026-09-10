@@ -1,4 +1,5 @@
 import admin from 'firebase-admin';
+import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 
 const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -319,9 +320,7 @@ export const recalculateOutletClosingBalancesRange = async (
       const orderData = doc.data();
       const oid = orderData.outletId || outletId;
       if (orderData.status === 'delivered') {
-        const orderAmount = parseFloat(
-          orderData['total amount'] || orderData.totalAmount || 0,
-        );
+        const orderAmount = getOrderLedgerAmount(orderData);
         closingBalanceOrder += orderAmount;
         ordersList.push({
           id: doc.id,
