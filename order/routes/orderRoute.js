@@ -4,11 +4,13 @@ import { getOrder, createOrder, getSubOrders, patchOrder, putOrder, getAllOrders
 
 const orderRoutes = express.Router();
 
-orderRoutes.post('/', tenantMiddleware, createOrder);
-orderRoutes.get('/', tenantMiddleware, getAllOrders); 
+orderRoutes.use(tenantMiddleware);
+
+orderRoutes.post('/', createOrder);
+orderRoutes.get('/', getAllOrders); 
 orderRoutes.get('/report', getOrdersReport);
 orderRoutes.delete('/by-date', deleteOrdersByDate);
-orderRoutes.post('/migrate/delivered-date', backfillDeliveredDate); // Migration endpoint to backfill deliveredDate
+orderRoutes.post('/migrate/delivered-date', backfillDeliveredDate);
 orderRoutes.post('/auto-deliver-open', autoDeliverOpenOrders);
 orderRoutes.get('/:id', getOrder);
 orderRoutes.get('/:id/suborders', getSubOrders);

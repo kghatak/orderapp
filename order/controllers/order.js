@@ -5,7 +5,20 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
-import { belongsToTenant, validateTenantId } from '../../util/tenantMiddleware.js';
+import { belongsToTenant, validateTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+
+const ensureOrderTenant = async (db, req, res, orderId) => {
+  const orderRef = db.collection('orders').doc(orderId);
+  const orderDoc = await orderRef.get();
+  if (!orderDoc.exists) {
+    res.status(404).json({ error: 'Order not found' });
+    return null;
+  }
+  if (denyUnlessTenant(res, orderDoc.data().tenantId, req.tenantId, 'Order not found')) {
+    return null;
+  }
+  return orderRef;
+};
 
 // Helper function to generate the next sequential order ID
 const getNextOrderId = async (db) => {
@@ -241,6 +254,10 @@ export const getOrder = async (req, res) => {
       return res.status(404).json({ error: 'Order not found' });
     }
 
+    if (denyUnlessTenant(res, orderDoc.data().tenantId, req.tenantId, 'Order not found')) {
+      return;
+    }
+
     // UPDATED: Return plain data instead of a class instance
     res.status(200).json({ id: orderDoc.id, ...orderDoc.data() });
 
@@ -255,6 +272,13 @@ export const getSubOrders = async (req, res) => {
     try {
         const db = getFirestoreDB();
         const orderId = req.params.id;
+        const parentDoc = await db.collection('orders').doc(orderId).get();
+        if (!parentDoc.exists) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        if (denyUnlessTenant(res, parentDoc.data().tenantId, req.tenantId, 'Order not found')) {
+            return;
+        }
         const ordersRef = db.collection('orders').where('parentOrder', '==', orderId);
         
         const snapshot = await ordersRef.get();
@@ -263,7 +287,9 @@ export const getSubOrders = async (req, res) => {
         }
 
         // UPDATED: Return plain data instead of a class instance
-        const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const orders = snapshot.docs
+          .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
+          .map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json({ count: orders.length, subOrders: orders });
 
     } catch (error) {
@@ -291,6 +317,9 @@ export const patchOrder = async (req, res) => {
       return res.status(404).json({ error: `Order ${orderId} not found.` });
     }
     const orderDataBefore = orderDocBefore.data();
+    if (denyUnlessTenant(res, orderDataBefore.tenantId, req.tenantId, 'Order not found')) {
+      return;
+    }
     const currentStatus = orderDataBefore.status || 'pending';
     const orderTotalAmountBefore = orderDataBefore['total amount'] || 0;
 
@@ -455,6 +484,15 @@ export const putOrder = async (req, res) => {
     if (!orderData) {
       return; // Error response already sent
     }
+
+    const existingOrder = await db.collection('orders').doc(orderId).get();
+    if (!existingOrder.exists) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    if (denyUnlessTenant(res, existingOrder.data().tenantId, req.tenantId, 'Order not found')) {
+      return;
+    }
+    orderData.tenantId = req.tenantId;
     
     orderData.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
@@ -481,6 +519,8 @@ export const addItemsToOrder = async (req, res) => {
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Invalid request body: items array is required.' });
     }
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     // Preload GST from product master for items where payload GST is missing/blank.
     const needsGstProductIds = Array.from(
@@ -624,6 +664,8 @@ export const removeProductsFromOrder = async (req, res) => {
     if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
       return res.status(400).json({ error: 'Invalid request body: productIds array is required.' });
     }
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -783,6 +825,8 @@ export const updateOrderQuantities = async (req, res) => {
       return res.status(400).json({ error: 'Invalid request body: items array is required with productId and quantity.' });
     }
 
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
+
     const orderRef = db.collection('orders').doc(orderId);
     
     await db.runTransaction(async (transaction) => {
@@ -900,6 +944,9 @@ export const getOrderUtensils = async (req, res) => {
     if (!orderDoc.exists) {
       return res.status(404).json({ error: 'Order not found' });
     }
+    if (denyUnlessTenant(res, orderDoc.data().tenantId, req.tenantId, 'Order not found')) {
+      return;
+    }
 
     const orderData = orderDoc.data();
     const utensilsUsed = Array.isArray(orderData.utensilsUsed) ? orderData.utensilsUsed : [];
@@ -932,11 +979,13 @@ export const addUtensilsToOrder = async (req, res) => {
     const orderId = req.params.id;
     const { utensils } = req.body; // utensils: [{ utensilId, usedQuantity }]
 
-    console.log('Adding utensils to order:', { orderId, utensils });
-
     if (!utensils || !Array.isArray(utensils) || utensils.length === 0) {
       return res.status(400).json({ error: 'Invalid request body: utensils array is required with utensilId and usedQuantity.' });
     }
+
+    console.log('Adding utensils to order:', { orderId, utensils });
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -1082,6 +1131,8 @@ export const deliverOrder = async (req, res) => {
     if (!utensils || !Array.isArray(utensils) || utensils.length === 0) {
       return res.status(400).json({ error: 'Invalid request body: utensils array is required with utensilId and usedQuantity.' });
     }
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -1244,7 +1295,9 @@ export const autoDeliverOpenOrders = async (req, res) => {
     }
 
     summary.scanned = openDocs.length;
-    if (openDocs.length === 0) {
+    const tenantDocs = openDocs.filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId));
+    summary.scanned = tenantDocs.length;
+    if (tenantDocs.length === 0) {
       return res.status(200).json({
         success: true,
         message: 'No processing or dispatched orders to deliver',
@@ -1254,8 +1307,8 @@ export const autoDeliverOpenOrders = async (req, res) => {
     }
 
     const chunkSize = 400;
-    for (let i = 0; i < openDocs.length; i += chunkSize) {
-      const chunk = openDocs.slice(i, i + chunkSize);
+    for (let i = 0; i < tenantDocs.length; i += chunkSize) {
+      const chunk = tenantDocs.slice(i, i + chunkSize);
       const batch = db.batch();
 
       chunk.forEach((doc) => {
@@ -1334,6 +1387,8 @@ export const restoreUtensils = async (req, res) => {
     if (!utensils || !Array.isArray(utensils) || utensils.length === 0) {
       return res.status(400).json({ error: 'Invalid request body: utensils array is required with utensilId and usedQuantity.' });
     }
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -1479,6 +1534,8 @@ export const updateOrderUtensilQuantity = async (req, res) => {
       return res.status(400).json({ error: 'Quantity must be greater than 0' });
     }
 
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
+
     const orderRef = db.collection('orders').doc(orderId);
     
     await db.runTransaction(async (transaction) => {
@@ -1574,6 +1631,8 @@ export const removeUtensilFromOrder = async (req, res) => {
     const db = getFirestoreDB();
     const orderId = req.params.id;
     const utensilId = req.params.utensilId;
+
+    if (!(await ensureOrderTenant(db, req, res, orderId))) return;
 
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -1676,16 +1735,18 @@ export const getOrdersReport = async (req, res) => {
 
     // Get total count for pagination
     const totalSnapshot = await query.get();
-    const total = totalSnapshot.size;
+    const tenantDocs = totalSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    const total = tenantDocs.length;
     const totalPages = Math.ceil(total / parseInt(limit));
 
     // Apply pagination
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedQuery = query.offset(offset).limit(parseInt(limit));
-    const snapshot = await paginatedQuery.get();
+    const snapshotDocs = tenantDocs.slice(offset, offset + parseInt(limit));
 
     // Process orders data
-    const orders = snapshot.docs.map(doc => {
+    const orders = snapshotDocs.map(doc => {
       const data = doc.data();
       
       // Calculate actual order amount from items (after discounts)
@@ -1883,7 +1944,9 @@ export const deleteOrdersByDate = async (req, res) => {
       return res.status(200).send(csvContent);
     }
 
-    const ordersToDelete = ordersSnapshot.docs;
+    const ordersToDelete = ordersSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
     const archivedOrders = [];
     const deletedOrdersData = []; // Store full order data for CSV
     let deletedCount = 0;
@@ -1992,6 +2055,10 @@ export const backfillDeliveredDate = async (req, res) => {
     
     deliveredOrdersSnapshot.forEach((doc) => {
       const orderData = doc.data();
+
+      if (!belongsToTenant(orderData.tenantId, req.tenantId)) {
+        return;
+      }
       
       // Skip if deliveredDate already exists
       if (orderData.deliveredDate) {

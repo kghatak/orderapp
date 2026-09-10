@@ -4,13 +4,14 @@ import { createOutlet, getOutletById, updateOutlet, deleteOutlet, getPaginatedOu
 
 const outletRoutes = express.Router();
 
-outletRoutes.post('/', tenantMiddleware, createOutlet);
+outletRoutes.use(tenantMiddleware);
+outletRoutes.post('/', createOutlet);
 outletRoutes.get('/', getPaginatedOutlets);
 outletRoutes.get('/search', searchOutlets);
 outletRoutes.get('/status', getOutletsByStatus);
 outletRoutes.get('/:id', getOutletById);
 outletRoutes.patch('/:id', updateOutlet);
 outletRoutes.delete('/:id', deleteOutlet);
-outletRoutes.post('/:id/clear-data', clearOutletData); // Clear all outlet data
+outletRoutes.post('/:id/clear-data', clearOutletData);
 
 export { outletRoutes };

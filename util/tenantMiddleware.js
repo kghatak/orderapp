@@ -85,3 +85,13 @@ export function belongsToTenant(docTenantId, requestTenantId) {
   }
   return docTenant === requestTenant;
 }
+
+export function denyUnlessTenant(res, docTenantId, requestTenantId, message = 'Not found') {
+  if (belongsToTenant(docTenantId, requestTenantId)) return false;
+  res.status(404).json({ error: message });
+  return true;
+}
+
+export function recordsForTenant(records, requestTenantId) {
+  return records.filter((row) => belongsToTenant(row.tenantId, requestTenantId));
+}

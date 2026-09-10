@@ -1,6 +1,7 @@
 // controllers/productController.js
 import { getFirestoreDB } from '../../util/firebase.js';
 import { categoryIconMap } from '../../util/iconMapper.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 
 // Generate Product ID in format PROD-00001 using counters collection
 const generateProductId = async (db) => {
@@ -87,6 +88,7 @@ export const createProduct = async (req, res) => {
       icon: finalIcon,
       category,
       active: active !== undefined ? active : true,
+      tenantId: req.tenantId,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -108,6 +110,9 @@ export const getProductById = async (req, res) => {
     if (!doc.exists) {
       return res.status(404).json({ error: 'Product not found' });
     }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Product not found')) {
+      return;
+    }
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (err) {
     console.error('Get product error:', err);
@@ -126,7 +131,9 @@ export const getAllProducts = async (req, res) => {
     
     // Get all products first
     snapshot = await db.collection('products').get();
-    products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    products = snapshot.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter((product) => belongsToTenant(product.tenantId, req.tenantId));
     
     // Handle name_like parameter (backward compatibility)
     if (name_like && name_like.trim()) {
@@ -292,6 +299,9 @@ export const updateProduct = async (req, res) => {
     if (!docSnap.exists) {
       return res.status(404).json({ error: 'Product not found' });
     }
+    if (denyUnlessTenant(res, docSnap.data().tenantId, req.tenantId, 'Product not found')) {
+      return;
+    }
 
     const updateData = {};
 
@@ -455,6 +465,13 @@ export const deleteProduct = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const id = req.params.id;
+    const doc = await db.collection('products').doc(id).get();
+    if (!doc.exists) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Product not found')) {
+      return;
+    }
     await db.collection('products').doc(id).delete();
     res.status(200).json({ message: 'Product deleted' });
   } catch (error) {
@@ -610,6 +627,7 @@ export const bulkCreateProducts = async (req, res) => {
           icon,
           category: productData.category,
           active: productData.active !== undefined ? productData.active : true,
+          tenantId: req.tenantId,
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -720,6 +738,15 @@ export const bulkDeleteProducts = async (req, res) => {
 
         // Get product data before deletion for response
         const productData = docSnap.data();
+        if (!belongsToTenant(productData.tenantId, req.tenantId)) {
+          results.errors.push({
+            row: rowNumber,
+            productId: productId,
+            error: 'Product not found'
+          });
+          results.failed++;
+          continue;
+        }
 
         // Delete the product
         await docRef.delete();
