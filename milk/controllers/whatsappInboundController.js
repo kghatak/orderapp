@@ -231,44 +231,120 @@ export const handleWhatsAppInbound = async (req, res) => {
   }
 };
 
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const normalizeDateKey = (value) => {
+  if (value == null || value === '') return null;
+  const key = String(value).trim().slice(0, 10);
+  return DATE_KEY_RE.test(key) ? key : null;
+};
+
+const buildReplyFilter = async ({ tenantId, user, fromKey, toKey, supplierId }) => {
+  const filter = {
+    dateKey: { $gte: fromKey, $lte: toKey }
+  };
+
+  if (user?.role === 'supplier') {
+    const supplier = await Supplier.findOne({ tenantId, userId: user._id }).lean();
+    if (!supplier) {
+      return { error: { status: 404, message: 'Supplier profile not found' } };
+    }
+    filter.tenantId = tenantId;
+    filter.supplierId = supplier._id;
+    return { filter };
+  }
+
+  if (supplierId) {
+    filter.tenantId = tenantId;
+    filter.supplierId = supplierId;
+    return { filter };
+  }
+
+  const suppliers = await Supplier.find({ tenantId }).select('phone').lean();
+  const phones = [...new Set(suppliers.flatMap((s) => phoneMatchVariants(s.phone)))];
+  filter.$or = phones.length
+    ? [{ tenantId }, { phone: { $in: phones } }]
+    : [{ tenantId }];
+
+  return { filter };
+};
+
+const toListItem = (reply, includeRaw) => {
+  const item = {
+    id: reply._id,
+    date: reply.dateKey,
+    phone: reply.phone,
+    supplierId: reply.supplierId,
+    supplierName: reply.supplierName,
+    supplierCode: reply.supplierCode,
+    message: reply.message,
+    contentType: reply.contentType,
+    receivedAt: reply.receivedAt,
+    matched: reply.matched
+  };
+  if (includeRaw) item.raw = reply.raw;
+  return item;
+};
+
 export const listWhatsAppReplies = async (req, res) => {
   try {
     const { tenantId, user } = req;
-    const { date, fromDate, toDate, supplierId, page = 1, limit = 100 } = req.query;
+    const { date, fromDate, toDate, supplierId, page = 1, limit = 200, includeRaw } = req.query;
 
-    const filter = { tenantId };
-    if (user?.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id }).lean();
-      if (!supplier) {
-        return res.status(404).json({ success: false, message: 'Supplier profile not found' });
-      }
-      filter.supplierId = supplier._id;
-    } else if (supplierId) {
-      filter.supplierId = supplierId;
+    const fromKey = normalizeDateKey(fromDate || date);
+    const toKey = normalizeDateKey(toDate || date);
+
+    if (!fromKey || !toKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'fromDate and toDate are required (YYYY-MM-DD). Use date for a single day.'
+      });
+    }
+    if (fromKey > toKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'toDate must be on or after fromDate'
+      });
     }
 
-    if (date) {
-      filter.dateKey = date;
-    } else if (fromDate || toDate) {
-      filter.dateKey = {};
-      if (fromDate) filter.dateKey.$gte = fromDate;
-      if (toDate) filter.dateKey.$lte = toDate;
+    const built = await buildReplyFilter({ tenantId, user, fromKey, toKey, supplierId });
+    if (built.error) {
+      return res.status(built.error.status).json({ success: false, message: built.error.message });
     }
 
-    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000);
+    const skip = (pageNum - 1) * limitNum;
+    const withRaw = includeRaw === 'true' || includeRaw === '1';
+
     const [replies, total] = await Promise.all([
-      SupplierWhatsAppReply.find(filter)
+      SupplierWhatsAppReply.find(built.filter)
         .sort({ dateKey: -1, receivedAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit, 10))
+        .limit(limitNum)
         .lean(),
-      SupplierWhatsAppReply.countDocuments(filter)
+      SupplierWhatsAppReply.countDocuments(built.filter)
     ]);
+
+    const groupedMap = new Map();
+    for (const reply of replies) {
+      const key = reply.dateKey;
+      if (!groupedMap.has(key)) groupedMap.set(key, []);
+      groupedMap.get(key).push(toListItem(reply, withRaw));
+    }
+
+    const data = [...groupedMap.entries()].map(([day, messages]) => ({
+      date: day,
+      count: messages.length,
+      messages
+    }));
 
     res.json({
       success: true,
-      data: replies,
-      pagination: { page: parseInt(page, 10), limit: parseInt(limit, 10), total }
+      fromDate: fromKey,
+      toDate: toKey,
+      data,
+      pagination: { page: pageNum, limit: limitNum, total }
     });
   } catch (err) {
     console.error('List WhatsApp replies error:', err);
