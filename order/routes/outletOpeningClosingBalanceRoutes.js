@@ -1,5 +1,6 @@
 // routes/outletOpeningClosingBalanceRoutes.js
 import express from 'express';
+import { tenantMiddleware, optionalTenantMiddleware } from '../../util/tenantMiddleware.js';
 import {
   getOutletOpeningClosingBalances,
   getOutletOpeningClosingBalanceById,
@@ -20,32 +21,31 @@ import {
 const router = express.Router();
 
 // Get all OutletOpeningClosingBalance records (with optional filters)
-router.get('/', getOutletOpeningClosingBalances);
+router.get('/', tenantMiddleware, getOutletOpeningClosingBalances);
 
 // Daily product delivery aggregation — stores products with qty by date
-router.get('/daily-product-delivery/xlsx', getDailyProductDeliveryXLSX);
-router.get('/daily-product-delivery/csv', getDailyProductDeliveryCSV);
-router.get('/daily-product-delivery', getDailyProductDelivery);
-router.post('/daily-product-delivery', calculateDailyProductDelivery);
+router.get('/daily-product-delivery/xlsx', tenantMiddleware, getDailyProductDeliveryXLSX);
+router.get('/daily-product-delivery/csv', tenantMiddleware, getDailyProductDeliveryCSV);
+router.get('/daily-product-delivery', tenantMiddleware, getDailyProductDelivery);
+router.post('/daily-product-delivery', optionalTenantMiddleware, calculateDailyProductDelivery);
 
 // Daily product return aggregation (collected returns) — same shape as delivery
-router.get('/daily-product-return/xlsx', getDailyProductReturnXLSX);
-router.get('/daily-product-return/csv', getDailyProductReturnCSV);
-router.get('/daily-product-return', getDailyProductReturn);
-router.post('/daily-product-return', calculateDailyProductReturn);
+router.get('/daily-product-return/xlsx', tenantMiddleware, getDailyProductReturnXLSX);
+router.get('/daily-product-return/csv', tenantMiddleware, getDailyProductReturnCSV);
+router.get('/daily-product-return', tenantMiddleware, getDailyProductReturn);
+router.post('/daily-product-return', optionalTenantMiddleware, calculateDailyProductReturn);
 
 // Calculate and update closing balances for an outlet
-router.post('/calculate', calculateClosingBalances);
+router.post('/calculate', tenantMiddleware, calculateClosingBalances);
 
 // Daily Opening/Closing Balance calculation for all active outlets
-router.post('/calculate-opening-closing', calculateDailyOpeningClosingBalance);
+router.post('/calculate-opening-closing', optionalTenantMiddleware, calculateDailyOpeningClosingBalance);
 
 // Manual trigger for midnight backdated-payment recast
-router.get('/recalculate-pending', getPendingClosingBalanceRecalcs);
-router.post('/recalculate-pending', runPendingClosingBalanceRecalcs);
+router.get('/recalculate-pending', tenantMiddleware, getPendingClosingBalanceRecalcs);
+router.post('/recalculate-pending', optionalTenantMiddleware, runPendingClosingBalanceRecalcs);
 
 // Get a specific OutletOpeningClosingBalance record by ID (keep last — wildcard)
-router.get('/:id', getOutletOpeningClosingBalanceById);
+router.get('/:id', tenantMiddleware, getOutletOpeningClosingBalanceById);
 
 export default router;
-

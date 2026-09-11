@@ -1,4 +1,5 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import {
   createUtensil,
   getUtensilById,
@@ -9,10 +10,11 @@ import {
 
 const router = express.Router();
 
+router.use(tenantMiddleware);
 router.post('/', createUtensil);
 router.get('/', getAllUtensils);
 router.get('/:id', getUtensilById);
 router.patch('/:id', updateUtensil);
 router.delete('/:id', deleteUtensil);
 
-export default router; 
+export default router;

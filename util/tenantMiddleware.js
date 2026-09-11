@@ -64,6 +64,22 @@ export function tenantMiddleware(req, res, next) {
   next();
 }
 
+/** Sets req.tenantId when a valid header is present; otherwise continues (cron jobs). */
+export function optionalTenantMiddleware(req, res, next) {
+  const tenantId = canonicalizeTenantId(readTenantFromRequest(req));
+  if (!tenantId) {
+    return next();
+  }
+  if (!isAllowedOrderTenantId(tenantId)) {
+    return res.status(400).json({
+      success: false,
+      message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
+    });
+  }
+  req.tenantId = tenantId;
+  next();
+}
+
 export function validateTenantId(req, res) {
   if (!req.tenantId) {
     res.status(400).json({

@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 import admin from 'firebase-admin';
 
 // Generate custom invoice ID
@@ -94,23 +95,19 @@ export const getAllCustomInvoices = async (req, res) => {
       query = query.where('status', '==', status);
     }
 
-    // Get total count for pagination
-    const countSnapshot = await query.get();
-    const totalCount = countSnapshot.size;
-
-    // Get paginated results
-    const snapshot = await query.limit(limit).offset(offset).get();
-    const invoices = [];
-
-    snapshot.forEach(doc => {
-      invoices.push({
+    const snapshot = await query.get();
+    const invoices = snapshot.docs
+      .map((doc) => ({
         id: doc.id,
-        ...doc.data()
-      });
-    });
+        ...doc.data(),
+      }))
+      .filter((invoice) => belongsToTenant(invoice.tenantId, req.tenantId));
+
+    const totalCount = invoices.length;
+    const paginated = invoices.slice(offset, offset + limit);
 
     res.status(200).json({
-      invoices,
+      invoices: paginated,
       pagination: {
         currentPage,
         totalPages: Math.ceil(totalCount / limit),
@@ -161,7 +158,7 @@ export const createCustomInvoice = async (req, res) => {
       const productRef = db.collection('products').doc(productId);
       const productDoc = await productRef.get();
 
-      if (!productDoc.exists) {
+      if (!productDoc.exists || !belongsToTenant(productDoc.data().tenantId, req.tenantId)) {
         return res.status(400).json({ 
           error: `Product with id ${productId} not found.` 
         });
@@ -211,6 +208,7 @@ export const createCustomInvoice = async (req, res) => {
       pricesIncludeGST: pricesIncludeGST || false,
       status: 'draft',
       invoiceNumber: invoiceNumber,
+      tenantId: req.tenantId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       createdBy: req.user?.id || 'system' // Assuming user info is available in req.user
@@ -242,6 +240,9 @@ export const getCustomInvoice = async (req, res) => {
     if (!invoiceDoc.exists) {
       return res.status(404).json({ error: 'Custom invoice not found' });
     }
+    if (denyUnlessTenant(res, invoiceDoc.data().tenantId, req.tenantId, 'Custom invoice not found')) {
+      return;
+    }
 
     const invoiceData = {
       id: invoiceDoc.id,
@@ -268,6 +269,9 @@ export const updateCustomInvoice = async (req, res) => {
 
     if (!invoiceDoc.exists) {
       return res.status(404).json({ error: 'Custom invoice not found' });
+    }
+    if (denyUnlessTenant(res, invoiceDoc.data().tenantId, req.tenantId, 'Custom invoice not found')) {
+      return;
     }
 
     const updateData = {
@@ -322,7 +326,7 @@ export const updateCustomInvoice = async (req, res) => {
         const productRef = db.collection('products').doc(productId);
         const productDoc = await productRef.get();
 
-        if (!productDoc.exists) {
+        if (!productDoc.exists || !belongsToTenant(productDoc.data().tenantId, req.tenantId)) {
           return res.status(400).json({ 
             error: `Product with id ${productId} not found.` 
           });
@@ -401,6 +405,9 @@ export const updateInvoiceStatus = async (req, res) => {
     if (!invoiceDoc.exists) {
       return res.status(404).json({ error: 'Custom invoice not found' });
     }
+    if (denyUnlessTenant(res, invoiceDoc.data().tenantId, req.tenantId, 'Custom invoice not found')) {
+      return;
+    }
 
     // Update the status
     await invoiceRef.update({
@@ -466,6 +473,9 @@ export const updateInvoiceDate = async (req, res) => {
     if (!invoiceDoc.exists) {
       return res.status(404).json({ error: 'Custom invoice not found' });
     }
+    if (denyUnlessTenant(res, invoiceDoc.data().tenantId, req.tenantId, 'Custom invoice not found')) {
+      return;
+    }
 
     // Update the invoice date
     await invoiceRef.update({
@@ -502,6 +512,9 @@ export const deleteCustomInvoice = async (req, res) => {
 
     if (!invoiceDoc.exists) {
       return res.status(404).json({ error: 'Custom invoice not found' });
+    }
+    if (denyUnlessTenant(res, invoiceDoc.data().tenantId, req.tenantId, 'Custom invoice not found')) {
+      return;
     }
 
     await invoiceRef.delete();

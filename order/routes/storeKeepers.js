@@ -1,4 +1,5 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import {
   createStoreKeeper,
   getAllStoreKeepers,
@@ -10,6 +11,7 @@ import {
 
 const router = express.Router();
 
+router.use(tenantMiddleware);
 router.post('/', createStoreKeeper);
 router.get('/', getAllStoreKeepers);
 router.get('/search', searchStoreKeepers); // e.g., storekeepers/search?query=test
