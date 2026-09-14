@@ -1,5 +1,6 @@
 // controllers/utensilController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 import admin from 'firebase-admin';
 
 // Generate Utensil ID in format UTEN-00001
@@ -41,6 +42,7 @@ export const createUtensil = async (req, res) => {
       type,
       quantity,
       actualQuantity: actualQuantity || quantity, // Use provided actualQuantity or default to quantity
+      tenantId: req.tenantId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
@@ -66,6 +68,9 @@ export const getUtensilById = async (req, res) => {
     if (!doc.exists) {
       return res.status(404).json({ error: 'Utensil not found' });
     }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Utensil not found')) {
+      return;
+    }
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (err) {
     console.error('Get utensil error:', err);
@@ -80,30 +85,23 @@ export const getAllUtensils = async (req, res) => {
     let { _start = 0, _end = 10 } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
 
-    // Get total count for the X-Total-Count header
-    const totalSnapshot = await db.collection('utensils').get();
-    const totalCount = totalSnapshot.size;
+    const totalSnapshot = await db.collection('utensils').orderBy('createdAt', 'desc').get();
+    const utensils = totalSnapshot.docs
+      .map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }))
+      .filter((row) => belongsToTenant(row.tenantId, req.tenantId));
 
-    // Query for the paginated data
-    const utensilsRef = db.collection('utensils')
-      .orderBy('createdAt', 'desc')
-      .offset(_start)
-      .limit(limit);
-      
-    const snapshot = await utensilsRef.get();
-    
-    const utensils = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    const totalCount = utensils.length;
+    const paginated = utensils.slice(_start, _end);
 
     // Set headers that Refine expects
     res.set('X-Total-Count', totalCount.toString());
     res.set('Access-Control-Expose-Headers', 'X-Total-Count');
 
-    res.status(200).json(utensils);
+    res.status(200).json(paginated);
     
   } catch (error) {
     console.error('Fetch utensils error:', error);
@@ -116,13 +114,19 @@ export const updateUtensil = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const id = req.params.id;
-    const data = req.body;
+    const data = { ...req.body };
+    delete data.tenantId;
+    delete data.utensilId;
+    delete data.id;
 
     // Check if utensil exists
     const docRef = db.collection('utensils').doc(id);
     const docSnap = await docRef.get();
     if (!docSnap.exists) {
       return res.status(404).json({ error: 'Utensil not found' });
+    }
+    if (denyUnlessTenant(res, docSnap.data().tenantId, req.tenantId, 'Utensil not found')) {
+      return;
     }
 
     // Add updated timestamp
@@ -155,6 +159,9 @@ export const deleteUtensil = async (req, res) => {
     if (!docSnap.exists) {
       return res.status(404).json({ error: 'Utensil not found' });
     }
+    if (denyUnlessTenant(res, docSnap.data().tenantId, req.tenantId, 'Utensil not found')) {
+      return;
+    }
     
     await docRef.delete();
     res.status(200).json({ message: 'Utensil deleted successfully' });
@@ -162,4 +169,4 @@ export const deleteUtensil = async (req, res) => {
     console.error('Delete utensil error:', error);
     res.status(500).json({ error: 'Failed to delete utensil' });
   }
-}; 
+};

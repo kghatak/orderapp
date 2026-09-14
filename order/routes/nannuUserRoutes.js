@@ -9,11 +9,12 @@ import {
   getNannuUsersByOutletId,
   updateNannuUserFCMToken
 } from '../controllers/nannuUserController.js';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 
 const router = express.Router();
 
-// Nannu User CRUD routes
-router.post('/', createNannuUser); // POST /nannu-users - Create Nannu user
+router.use(tenantMiddleware);
+router.post('/', createNannuUser);
 router.get('/', getAllNannuUsers); // GET /nannu-users - Get all Nannu users
 router.get('/:userId', getNannuUserById); // GET /nannu-users/:userId - Get Nannu user by ID
 router.put('/:userId', updateNannuUser); // PUT /nannu-users/:userId - Update Nannu user

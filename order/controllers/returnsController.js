@@ -2,6 +2,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { subtractCollectedReturnItemsFromOutletProducts } from '../../util/outletProductsStock.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 import admin from 'firebase-admin';
 
 // Generate Return ID in format RET-00000001
@@ -47,7 +48,7 @@ export const createReturn = async (req, res) => {
       notes,
     });
 
-    await db.collection('returns').doc(returnId).set({ ...returnOrder });
+    await db.collection('returns').doc(returnId).set({ ...returnOrder, tenantId: req.tenantId });
     res.status(201).json({ message: 'Return order created successfully', id: returnId });
   } catch (error) {
     console.error('Error creating return order:', error);
@@ -71,10 +72,12 @@ export const getAllReturns = async (req, res) => {
     const snapshot = await db.collection('returns').get();
 
     // Process returns data
-    let returns = snapshot.docs.map(doc => ({
+    let returns = snapshot.docs
+      .map(doc => ({
       id: doc.id,
       ...doc.data()
-    }));
+    }))
+      .filter((returnOrder) => belongsToTenant(returnOrder.tenantId, req.tenantId));
 
     // Filter out archived returns
     returns = returns.filter(returnOrder => !returnOrder.archived);
@@ -131,6 +134,9 @@ export const getReturnById = async (req, res) => {
     if (!doc.exists) {
       return res.status(404).json({ error: 'Return order not found' });
     }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Return order not found')) {
+      return;
+    }
 
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (error) {
@@ -166,6 +172,9 @@ export const updateReturn = async (req, res) => {
       return res.status(404).json({ 
         error: 'Return order not found' 
       });
+    }
+    if (denyUnlessTenant(res, returnDoc.data().tenantId, req.tenantId, 'Return order not found')) {
+      return;
     }
 
     const prevData = returnDoc.data();
@@ -220,6 +229,13 @@ export const deleteReturn = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const returnId = req.params.id;
+    const returnDoc = await db.collection('returns').doc(returnId).get();
+    if (!returnDoc.exists) {
+      return res.status(404).json({ error: 'Return order not found' });
+    }
+    if (denyUnlessTenant(res, returnDoc.data().tenantId, req.tenantId, 'Return order not found')) {
+      return;
+    }
     await db.collection('returns').doc(returnId).update({
       archived: true,
       archivedAt: new Date(),
@@ -244,7 +260,8 @@ export const getReturnsByStatus = async (req, res) => {
     const snapshot = await db.collection('returns').where('status', '==', status).get();
     const returns = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(returnOrder => !returnOrder.archived); // Filter out archived returns
+      .filter(returnOrder => !returnOrder.archived)
+      .filter((returnOrder) => belongsToTenant(returnOrder.tenantId, req.tenantId));
     res.status(200).json(returns);
   } catch (error) {
     console.error('Error filtering return orders:', error);
@@ -269,6 +286,9 @@ export const updateReturnItems = async (req, res) => {
     const returnDoc = await db.collection('returns').doc(returnId).get();
     if (!returnDoc.exists) {
       return res.status(404).json({ error: 'Return order not found' });
+    }
+    if (denyUnlessTenant(res, returnDoc.data().tenantId, req.tenantId, 'Return order not found')) {
+      return;
     }
 
     const returnData = returnDoc.data();
@@ -421,16 +441,16 @@ export const getReturnsReport = async (req, res) => {
 
     // Get total count for pagination
     const totalSnapshot = await query.get();
-    const total = totalSnapshot.size;
+    const tenantDocs = totalSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    const total = tenantDocs.length;
     const totalPages = Math.ceil(total / parseInt(limit));
 
-    // Apply pagination
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedQuery = query.offset(offset).limit(parseInt(limit));
-    const snapshot = await paginatedQuery.get();
+    const snapshotDocs = tenantDocs.slice(offset, offset + parseInt(limit));
 
-    // Process returns data
-    const returns = snapshot.docs.map(doc => {
+    const returns = snapshotDocs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,

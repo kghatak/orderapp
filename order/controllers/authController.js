@@ -3,6 +3,7 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
+import { canonicalizeTenantId, isAllowedOrderTenantId } from '../../util/tenantMiddleware.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -151,7 +152,7 @@ export const signup = async (req, res) => {
 // Login API
 export const login = async (req, res) => {
   try {
-    const { phoneNumber, password, fcmToken, tenantId } = req.body;
+    const { phoneNumber, password, fcmToken } = req.body;
     const db = getFirestoreDB();
 
     // Validation
@@ -222,14 +223,19 @@ export const login = async (req, res) => {
       updatedAt: userData.updatedAt
     };
 
-    // If Admin or StoreKeeper and tenantId provided, include milk JWT (requires MongoDB + MilkUser)
+    // Milk JWT uses the user's refine-auth tenant from Firestore (not a body/hardcoded id).
     const milkEligibleProfiles = ['Admin', 'StoreKeeper'];
-    if (milkEligibleProfiles.includes(userData.userProfile) && tenantId) {
+    const userTenant = canonicalizeTenantId(userData.tenantId);
+    if (
+      milkEligibleProfiles.includes(userData.userProfile) &&
+      userTenant &&
+      isAllowedOrderTenantId(userTenant)
+    ) {
       if (!isMongoConnected()) {
-        console.warn('Login: milkToken skipped — MongoDB not connected (set MONGODB_URI).');
+        console.warn('Login: milkToken skipped — MongoDB not connected.');
       } else {
         try {
-          const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
+          const milkAuth = await getMilkTokenForOrderAdmin(userTenant, userData.phoneNumber, password);
           if (milkAuth) {
             responseData.milkToken = milkAuth.token;
             responseData.milkTenantId = milkAuth.tenantId;

@@ -1,5 +1,19 @@
 // controllers/outletController.js
 import { getFirestoreDB } from '../../util/firebase.js';
+import { belongsToTenant, denyUnlessTenant, validateTenantId } from '../../util/tenantMiddleware.js';
+
+const ensureOutletTenant = async (db, req, res, outletId) => {
+  const outletRef = db.collection('outlets').doc(outletId);
+  const outletDoc = await outletRef.get();
+  if (!outletDoc.exists) {
+    res.status(404).json({ error: 'Outlet not found' });
+    return null;
+  }
+  if (denyUnlessTenant(res, outletDoc.data().tenantId, req.tenantId, 'Outlet not found')) {
+    return null;
+  }
+  return { outletRef, outletDoc };
+};
 
 // Format Firestore Timestamp to human-readable
 export const formatTimestamp = (timestamp) => {
@@ -37,6 +51,8 @@ const generateOutletId = async () => {
 // Create outlet
 export const createOutlet = async (req, res) => {
   try {
+    if (!validateTenantId(req, res)) return;
+
     const {
       outletName,
       name, // Accept both outletName and name for compatibility
@@ -90,7 +106,10 @@ export const createOutlet = async (req, res) => {
       .where('primaryPhoneNumber', '==', primaryPhoneNumber)
       .get();
     
-    if (!existingOutlet.empty) {
+    const phoneTakenInTenant = existingOutlet.docs.some((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    if (phoneTakenInTenant) {
       return res.status(400).json({ error: 'Primary phone number already exists. Please use a different phone number.' });
     }
     
@@ -112,6 +131,7 @@ export const createOutlet = async (req, res) => {
       discounts,
       isInternal,
       openingBalance: parseFloat(openingBalance) || 0, // Ensure it's a number
+      tenantId: req.tenantId,
       createdAt: new Date()
     };
 
@@ -135,7 +155,8 @@ export const createOutlet = async (req, res) => {
           orderPendingAmount: 0,
           orderTotalAmount: 0,
           createdAt: new Date(),
-          lastUpdated: new Date()
+          lastUpdated: new Date(),
+          tenantId: req.tenantId
         }, { merge: true });
         
         console.log(`Updated outlet_payments with opening balance for outlet ${outletId}`);
@@ -173,6 +194,9 @@ export const getOutletById = async (req, res) => {
     if (!outletDoc.exists) {
       return res.status(404).json({ error: 'Outlet not found' });
     }
+    if (denyUnlessTenant(res, outletDoc.data().tenantId, req.tenantId, 'Outlet not found')) {
+      return;
+    }
 
     const outletData = outletDoc.data();
 
@@ -196,7 +220,9 @@ export const getAllOutlets = async (req, res) => {
     const db = getFirestoreDB();
     const snapshot = await db.collection('outlets').get();
 
-    const outlets = snapshot.docs.map(doc => {
+    const outlets = snapshot.docs
+      .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
+      .map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -240,7 +266,9 @@ export const updateOutlet = async (req, res) => {
                 .where('primaryPhoneNumber', '==', primaryPhoneNumber)
                 .get();
             
-            const isDuplicate = existingOutlet.docs.some(doc => doc.id !== outletId);
+            const isDuplicate = existingOutlet.docs.some(
+                (doc) => doc.id !== outletId && belongsToTenant(doc.data().tenantId, req.tenantId)
+            );
             if (isDuplicate) {
                 return res.status(400).json({ error: 'Primary phone number already exists. Please use a different phone number.' });
             }
@@ -282,11 +310,19 @@ export const updateOutlet = async (req, res) => {
         }
         
         updateData.updatedAt = new Date();
+        delete updateData.tenantId;
+        delete updateData.id;
         
         const outletRef = db.collection('outlets').doc(outletId);
         
         // Get current outlet data to check if opening balance is being added/changed
         const currentOutletDoc = await outletRef.get();
+        if (!currentOutletDoc.exists) {
+            return res.status(404).json({ error: 'Outlet not found' });
+        }
+        if (denyUnlessTenant(res, currentOutletDoc.data().tenantId, req.tenantId, 'Outlet not found')) {
+            return;
+        }
         const currentOutletData = currentOutletDoc.data();
         const currentOpeningBalance = currentOutletData.openingBalance || 0;
         const newOpeningBalance = updateData.openingBalance || 0;
@@ -341,6 +377,7 @@ export const updateOutlet = async (req, res) => {
                 openingBalance: newOpeningBalance,
                 orderPendingAmount: 0,
                 orderTotalAmount: 0,
+                tenantId: req.tenantId,
                 createdAt: new Date(),
                 lastUpdated: new Date()
               }, { merge: true });
@@ -365,6 +402,7 @@ export const deleteOutlet = async (req, res) => {
     try {
         const db = getFirestoreDB();
         const outletId = req.params.id;
+        if (!(await ensureOutletTenant(db, req, res, outletId))) return;
         await db.collection('outlets').doc(outletId).delete();
         res.status(200).json({ message: 'Outlet deleted successfully' });
     } catch (error) {
@@ -382,6 +420,7 @@ export const searchOutlets = async (req, res) => {
 
     const snapshot = await db.collection('outlets').get();
     const filtered = snapshot.docs
+      .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
       .map(doc => {
         const data = doc.data();
         return {
@@ -424,6 +463,8 @@ export const clearOutletData = async (req, res) => {
     }
 
     const db = getFirestoreDB();
+
+    if (!(await ensureOutletTenant(db, req, res, outletId))) return;
 
     // Verify outlet exists
     const outletDoc = await db.collection('outlets').doc(outletId).get();
@@ -566,22 +607,24 @@ export const getPaginatedOutlets = async (req, res) => {
     let { _start = 0, _end = 10 } = req.query;
     _start = parseInt(_start);
     _end = parseInt(_end);
-    const limit = _end - _start;
 
-    // Get total count for the X-Total-Count header
     const totalSnapshot = await db.collection('outlets').get();
-    const totalCount = totalSnapshot.size;
+    const tenantDocs = totalSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    tenantDocs.sort((a, b) => {
+      const aTime = a.data().createdAt?.toMillis
+        ? a.data().createdAt.toMillis()
+        : new Date(a.data().createdAt || 0).getTime();
+      const bTime = b.data().createdAt?.toMillis
+        ? b.data().createdAt.toMillis()
+        : new Date(b.data().createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+    const totalCount = tenantDocs.length;
+    const pageDocs = tenantDocs.slice(_start, _end);
 
-    // Query for the paginated data
-    const outletsRef = db.collection('outlets')
-      .orderBy('createdAt', 'desc')
-      .offset(_start)
-      .limit(limit);
-      
-    const snapshot = await outletsRef.get();
-    
-    // Return plain data with formatted timestamps
-    const outlets = snapshot.docs.map((doc) => {
+    const outlets = pageDocs.map((doc) => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -611,7 +654,9 @@ export const getOutletsByStatus = async (req, res) => {
     const status = active === 'true';
 
     const snapshot = await db.collection('outlets').where('active', '==', status).get();
-    const outlets = snapshot.docs.map(doc => {
+    const outlets = snapshot.docs
+      .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
+      .map(doc => {
       const data = doc.data();
       return {
         id: doc.id,

@@ -1,4 +1,5 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import {
   createProduct,
   getProductById,
@@ -11,6 +12,7 @@ import {
 
 const router = express.Router();
 
+router.use(tenantMiddleware);
 router.post('/', createProduct);
 router.post('/bulk-upload', bulkCreateProducts);
 router.delete('/bulk-delete', bulkDeleteProducts);

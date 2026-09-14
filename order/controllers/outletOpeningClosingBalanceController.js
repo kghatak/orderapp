@@ -8,7 +8,47 @@ import {
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 import admin from 'firebase-admin';
+
+/** Outlet IDs for this tenant, or null when the request has no tenant (cron). */
+async function loadTenantOutletIdSet(db, requestTenantId) {
+  if (!requestTenantId) return null;
+  const snap = await db.collection('outlets').get();
+  const ids = new Set();
+  snap.docs.forEach((doc) => {
+    if (belongsToTenant(doc.data().tenantId, requestTenantId)) ids.add(doc.id);
+  });
+  return ids;
+}
+
+function orderMatchesRequestTenant(data, requestTenantId, tenantOutletIds) {
+  if (!requestTenantId) return true;
+  if (belongsToTenant(data.tenantId, requestTenantId)) return true;
+  const outletId = data.outletId || '';
+  return Boolean(tenantOutletIds && outletId && tenantOutletIds.has(outletId));
+}
+
+/** Parent DailyProduct* docs mix all tenants — rebuild from this tenant's outlet subdocs. */
+async function loadDailyProductDayForTenant(db, collectionName, dateKey, tenantOutletIds, mergeFn) {
+  const dateRef = db.collection(collectionName).doc(dateKey);
+  const parent = await dateRef.get();
+  if (!tenantOutletIds) {
+    if (!parent.exists) return null;
+    return parent.data();
+  }
+  const outletsSnap = await dateRef.collection('outlets').get();
+  const tenantData = outletsSnap.docs
+    .filter((d) => tenantOutletIds.has(d.id))
+    .map((d) => d.data());
+  if (!tenantData.length) return null;
+  const { mergedProducts, totals } = mergeFn(tenantData);
+  return {
+    ...(parent.exists ? parent.data() : { date: dateKey }),
+    products: mergedProducts,
+    ...totals,
+  };
+}
 
 const roundMoney2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
@@ -152,6 +192,13 @@ function enumerateDateRangeInclusive(fromStr, toStr) {
  * @param {object} data - Firestore document data
  * @returns {{ data: object, pagination: object }}
  */
+function attachTenantId(data, tenantId) {
+  return {
+    ...data,
+    tenantId: tenantId || null,
+  };
+}
+
 function paginateDailyDeliveryDoc(data, pageNum, limitNum) {
   const allProducts = data.products || [];
   const totalProducts = allProducts.length;
@@ -355,6 +402,7 @@ async function loadMergedProductSnapshotForExport(db, query, options) {
     mergeAcrossDays,
     singleDayNotFoundMsg,
     rangeNotFoundMsg,
+    tenantOutletIds,
   } = options;
   const date = firstQueryString(query.date);
   const fromS = firstQueryString(query.from);
@@ -400,10 +448,17 @@ async function loadMergedProductSnapshotForExport(db, query, options) {
       };
     }
 
-    const snapshots = await Promise.all(
-      dayKeys.map((d) => db.collection(collectionName).doc(d).get()),
-    );
-    const foundDocsData = snapshots.filter((snap) => snap.exists).map((snap) => snap.data());
+    const foundDocsData = [];
+    for (const d of dayKeys) {
+      const data = await loadDailyProductDayForTenant(
+        db,
+        collectionName,
+        d,
+        tenantOutletIds,
+        mergeAcrossDays,
+      );
+      if (data) foundDocsData.push(data);
+    }
     if (!foundDocsData.length) {
       return {
         ok: false,
@@ -428,8 +483,14 @@ async function loadMergedProductSnapshotForExport(db, query, options) {
       };
     }
 
-    const doc = await db.collection(collectionName).doc(date).get();
-    if (!doc.exists) {
+    const dayData = await loadDailyProductDayForTenant(
+      db,
+      collectionName,
+      date,
+      tenantOutletIds,
+      mergeAcrossDays,
+    );
+    if (!dayData) {
       return {
         ok: false,
         status: 404,
@@ -437,7 +498,7 @@ async function loadMergedProductSnapshotForExport(db, query, options) {
       };
     }
 
-    const { mergedProducts, totals } = mergeAcrossDays([doc.data()]);
+    const { mergedProducts, totals } = mergeAcrossDays([dayData]);
     return { ok: true, fromS: date, toS: date, mergedProducts, totals };
   }
 
@@ -451,21 +512,23 @@ async function loadMergedProductSnapshotForExport(db, query, options) {
   };
 }
 
-async function loadMergedDeliveryForExport(db, query) {
+async function loadMergedDeliveryForExport(db, query, tenantOutletIds) {
   return loadMergedProductSnapshotForExport(db, query, {
     collectionName: 'DailyProductDelivery',
     mergeAcrossDays: mergeDeliveryProductsAcrossDays,
     singleDayNotFoundMsg: (day) => `No product delivery record found for ${day}`,
     rangeNotFoundMsg: (from, to) => `No DailyProductDelivery records in range ${from}–${to}`,
+    tenantOutletIds,
   });
 }
 
-async function loadMergedReturnForExport(db, query) {
+async function loadMergedReturnForExport(db, query, tenantOutletIds) {
   return loadMergedProductSnapshotForExport(db, query, {
     collectionName: 'DailyProductReturn',
     mergeAcrossDays: mergeReturnProductsAcrossDays,
     singleDayNotFoundMsg: (day) => `No product return record found for ${day}`,
     rangeNotFoundMsg: (from, to) => `No DailyProductReturn records in range ${from}–${to}`,
+    tenantOutletIds,
   });
 }
 
@@ -562,6 +625,7 @@ const PRODUCT_VOUCHER_EXPORT_HEADERS = [
 const buildDailyProductVoucherExportRows = async (req, kind) => {
   const db = getFirestoreDB();
   const { date, from, to, interState, defaultGst, counter } = req.query;
+  const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
 
   const fromS = firstQueryString(from);
   const toS = firstQueryString(to);
@@ -634,7 +698,9 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     const outletsSnapshot = await dateDocRef.collection('outlets').orderBy('outletName').get();
     const outletDocs = outletsSnapshot.docs.filter((doc) => {
       const outletId = doc.id || doc.data()?.outletId;
-      return !isTallyExcludedOutlet(outletId);
+      if (isTallyExcludedOutlet(outletId)) return false;
+      if (tenantOutletIds && !tenantOutletIds.has(outletId)) return false;
+      return true;
     });
     if (outletDocs.length) {
       dayBundles.push({ dateKey, outletDocs });
@@ -850,6 +916,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const { triggeredAt, timeZone, source } = req.body;
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
 
     console.log(`📊 [Balance Calculation] Started at ${executionStart.toISOString()}`);
     console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
@@ -869,7 +936,12 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
       .get();
 
     if (!oldRecordsSnapshot.empty) {
-      const oldDocs = oldRecordsSnapshot.docs;
+      const oldDocs = tenantOutletIds
+        ? oldRecordsSnapshot.docs.filter((doc) => {
+            const outletId = doc.data().OutletID || doc.data().outletId;
+            return tenantOutletIds.has(outletId);
+          })
+        : oldRecordsSnapshot.docs;
       // Delete in batches of 500 (Firestore batch limit)
       for (let i = 0; i < oldDocs.length; i += 500) {
         const batch = db.batch();
@@ -910,6 +982,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     const activeOutlets = [];
     const pendingOutletIds = new Set();
     outletsSnapshot.forEach((doc) => {
+      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
       const data = doc.data();
       if (data.recalculate === 'pending') {
         pendingOutletIds.add(doc.id);
@@ -919,6 +992,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
         name: data.name || 'Unknown Outlet',
         openingBalance: parseFloat(data.openingBalance) || 0,
         openingBalanceDate: data.openingBalanceDate || null,
+        tenantId: data.tenantId || '',
       });
     });
 
@@ -1014,6 +1088,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             closingBalancePayment,
             closingBanlanceReturn,
             totalClosingBalance,
+            tenantId: outlet.tenantId || req.tenantId || '',
             completedAt: admin.firestore.FieldValue.serverTimestamp(),
           };
 
@@ -1050,7 +1125,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     const failed = results.filter((r) => r.status === 'rejected').length;
 
     console.log(`🔁 [Step 4b] Recasting pending backdated-payment outlets through ${targetDateStr}...`);
-    const pendingRecalc = await processPendingClosingBalanceRecalcs(db, targetDateStr);
+    const pendingRecalc = await processPendingClosingBalanceRecalcs(db, targetDateStr, tenantOutletIds);
     console.log(
       `🔁 [Step 4b] Pending recast — success: ${pendingRecalc.successful}, failed: ${pendingRecalc.failed}`,
     );
@@ -1128,6 +1203,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
 
     console.log(`📅 Target date (IST): ${dateStr}`);
 
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
     const [outletsSnapshot, ordersSnapshot] = await Promise.all([
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('orders')
@@ -1147,7 +1223,10 @@ export const calculateDailyProductDelivery = async (req, res) => {
     });
 
     const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => outletMap.set(doc.id, readOutlet(doc.data())));
+    outletsSnapshot.forEach((doc) => {
+      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
+      outletMap.set(doc.id, readOutlet(doc.data()));
+    });
 
     console.log(`🏪 Found ${outletMap.size} active outlets`);
     console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
@@ -1158,6 +1237,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
 
     ordersSnapshot.forEach((doc) => {
       const data = doc.data();
+      if (!orderMatchesRequestTenant(data, req.tenantId, tenantOutletIds)) return;
       totalOrders++;
       const outletId = data.outletId || 'unknown';
       const items = data.items || [];
@@ -1251,20 +1331,22 @@ export const calculateDailyProductDelivery = async (req, res) => {
     const batchWrites = [];
     const outletSummaries = [];
 
-    batchWrites.push({
-      ref: dateDocRef,
-      data: {
-        date: dateStr,
-        deliveredDate: dateStr,
-        products: globalProducts,
-        totalProducts: globalProducts.length,
-        totalOrders,
-        totalOutlets: outletDataMap.size,
-        ...globalTotals,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'success',
-      },
-    });
+    if (!req.tenantId) {
+      batchWrites.push({
+        ref: dateDocRef,
+        data: {
+          date: dateStr,
+          deliveredDate: dateStr,
+          products: globalProducts,
+          totalProducts: globalProducts.length,
+          totalOrders,
+          totalOutlets: outletDataMap.size,
+          ...globalTotals,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          status: 'success',
+        },
+      });
+    }
 
     for (const [outletId, entry] of outletDataMap) {
       const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
@@ -1379,6 +1461,7 @@ export const calculateDailyProductReturn = async (req, res) => {
 
     console.log(`📅 Target date (IST): ${dateStr}`);
 
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
     const [outletsSnapshot, returnsSnapshot] = await Promise.all([
       db.collection('outlets').where('active', '==', true).get(),
       db.collection('returns')
@@ -1398,7 +1481,10 @@ export const calculateDailyProductReturn = async (req, res) => {
     });
 
     const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => outletMap.set(doc.id, readOutlet(doc.data())));
+    outletsSnapshot.forEach((doc) => {
+      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
+      outletMap.set(doc.id, readOutlet(doc.data()));
+    });
 
     const outletDataMap = new Map();
     const globalProductMap = new Map();
@@ -1407,6 +1493,7 @@ export const calculateDailyProductReturn = async (req, res) => {
     returnsSnapshot.forEach((doc) => {
       const data = doc.data();
       if (data.archived) return;
+      if (!orderMatchesRequestTenant(data, req.tenantId, tenantOutletIds)) return;
       totalReturns++;
       const outletId = data.outletId || 'unknown';
       const items = data.items || data.returnItems || [];
@@ -1500,20 +1587,22 @@ export const calculateDailyProductReturn = async (req, res) => {
     const batchWrites = [];
     const outletSummaries = [];
 
-    batchWrites.push({
-      ref: dateDocRef,
-      data: {
-        date: dateStr,
-        returnDate: dateStr,
-        products: globalProducts,
-        totalProducts: globalProducts.length,
-        totalReturns,
-        totalOutlets: outletDataMap.size,
-        ...globalTotals,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        status: 'success',
-      },
-    });
+    if (!req.tenantId) {
+      batchWrites.push({
+        ref: dateDocRef,
+        data: {
+          date: dateStr,
+          returnDate: dateStr,
+          products: globalProducts,
+          totalProducts: globalProducts.length,
+          totalReturns,
+          totalOutlets: outletDataMap.size,
+          ...globalTotals,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          status: 'success',
+        },
+      });
+    }
 
     for (const [outletId, entry] of outletDataMap) {
       const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
@@ -1642,7 +1731,8 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
 export const getDailyProductDeliveryCSV = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const result = await loadMergedDeliveryForExport(db, req.query);
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
+    const result = await loadMergedDeliveryForExport(db, req.query, tenantOutletIds);
     if (!result.ok) return res.status(result.status).json(result.body);
 
     const csv = buildProductQuantityCsvContent(result.mergedProducts, result.totals, {
@@ -1705,7 +1795,8 @@ export const getDailyProductReturnXLSX = async (req, res) => {
 export const getDailyProductReturnCSV = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const result = await loadMergedReturnForExport(db, req.query);
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
+    const result = await loadMergedReturnForExport(db, req.query, tenantOutletIds);
     if (!result.ok) return res.status(result.status).json(result.body);
 
     const csv = buildProductQuantityCsvContent(result.mergedProducts, result.totals, {
@@ -1745,6 +1836,7 @@ export const getDailyProductDelivery = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const { date, from, to, page = 1, limit = 20, includeDays } = req.query;
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
 
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
@@ -1784,16 +1876,24 @@ export const getDailyProductDelivery = async (req, res) => {
         });
       }
 
-      const snapshots = await Promise.all(
-        dayKeys.map((d) => db.collection('DailyProductDelivery').doc(d).get())
+      const loadedDays = await Promise.all(
+        dayKeys.map((d) =>
+          loadDailyProductDayForTenant(
+            db,
+            'DailyProductDelivery',
+            d,
+            tenantOutletIds,
+            mergeDeliveryProductsAcrossDays,
+          ),
+        ),
       );
 
       const foundDocsData = [];
       const daysDetail = [];
       let daysFound = 0;
-      snapshots.forEach((snap, idx) => {
+      loadedDays.forEach((dayData, idx) => {
         const dayKey = dayKeys[idx];
-        if (!snap.exists) {
+        if (!dayData) {
           if (includeDaysFlag) {
             daysDetail.push({
               date: dayKey,
@@ -1806,13 +1906,14 @@ export const getDailyProductDelivery = async (req, res) => {
           return;
         }
         daysFound += 1;
-        foundDocsData.push(snap.data());
+        foundDocsData.push(dayData);
         if (includeDaysFlag) {
-          const payload = paginateDailyDeliveryDoc(snap.data(), pageNum, limitNum);
+          const payload = paginateDailyDeliveryDoc(dayData, pageNum, limitNum);
           daysDetail.push({
             date: dayKey,
             found: true,
             ...payload,
+            data: attachTenantId(payload.data, req.tenantId),
           });
         }
       });
@@ -1837,7 +1938,7 @@ export const getDailyProductDelivery = async (req, res) => {
       const paginatedMerged = mergedProducts.slice(offset, offset + limitNum);
 
       const allFound = daysFound === dayKeys.length;
-      const mergedData = {
+      const mergedData = attachTenantId({
         date: fromS,
         deliveredDate: fromS === toS ? fromS : toS,
         totalOrders: totals.totalOrders,
@@ -1851,7 +1952,7 @@ export const getDailyProductDelivery = async (req, res) => {
             ? foundDocsData[foundDocsData.length - 1].timestamp.toDate().toISOString()
             : null,
         status: 'success',
-      };
+      }, req.tenantId);
 
       const payload = {
         success: true,
@@ -1904,21 +2005,27 @@ export const getDailyProductDelivery = async (req, res) => {
       });
     }
 
-    const doc = await db.collection('DailyProductDelivery').doc(date).get();
+    const dayData = await loadDailyProductDayForTenant(
+      db,
+      'DailyProductDelivery',
+      date,
+      tenantOutletIds,
+      mergeDeliveryProductsAcrossDays,
+    );
 
-    if (!doc.exists) {
+    if (!dayData) {
       return res.status(404).json({
         success: false,
         message: `No product delivery record found for ${date}`,
       });
     }
 
-    const { data: body, pagination } = paginateDailyDeliveryDoc(doc.data(), pageNum, limitNum);
+    const { data: body, pagination } = paginateDailyDeliveryDoc(dayData, pageNum, limitNum);
 
     return res.status(200).json({
       success: true,
       message: `Product delivery details for ${date}`,
-      data: body,
+      data: attachTenantId(body, req.tenantId),
       pagination,
     });
   } catch (error) {
@@ -1945,6 +2052,7 @@ export const getDailyProductReturn = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const { date, from, to, page = 1, limit = 20, includeDays } = req.query;
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
 
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
@@ -1984,16 +2092,24 @@ export const getDailyProductReturn = async (req, res) => {
         });
       }
 
-      const snapshots = await Promise.all(
-        dayKeys.map((d) => db.collection('DailyProductReturn').doc(d).get())
+      const loadedDays = await Promise.all(
+        dayKeys.map((d) =>
+          loadDailyProductDayForTenant(
+            db,
+            'DailyProductReturn',
+            d,
+            tenantOutletIds,
+            mergeReturnProductsAcrossDays,
+          ),
+        ),
       );
 
       const foundDocsData = [];
       const daysDetail = [];
       let daysFound = 0;
-      snapshots.forEach((snap, idx) => {
+      loadedDays.forEach((dayData, idx) => {
         const dayKey = dayKeys[idx];
-        if (!snap.exists) {
+        if (!dayData) {
           if (includeDaysFlag) {
             daysDetail.push({
               date: dayKey,
@@ -2006,13 +2122,14 @@ export const getDailyProductReturn = async (req, res) => {
           return;
         }
         daysFound += 1;
-        foundDocsData.push(snap.data());
+        foundDocsData.push(dayData);
         if (includeDaysFlag) {
-          const payload = paginateDailyReturnDoc(snap.data(), pageNum, limitNum);
+          const payload = paginateDailyReturnDoc(dayData, pageNum, limitNum);
           daysDetail.push({
             date: dayKey,
             found: true,
             ...payload,
+            data: attachTenantId(payload.data, req.tenantId),
           });
         }
       });
@@ -2037,7 +2154,7 @@ export const getDailyProductReturn = async (req, res) => {
       const paginatedMerged = mergedProducts.slice(offset, offset + limitNum);
 
       const allFound = daysFound === dayKeys.length;
-      const mergedData = {
+      const mergedData = attachTenantId({
         date: fromS,
         returnDate: fromS === toS ? fromS : toS,
         totalReturns: totals.totalReturns,
@@ -2051,7 +2168,7 @@ export const getDailyProductReturn = async (req, res) => {
             ? foundDocsData[foundDocsData.length - 1].timestamp.toDate().toISOString()
             : null,
         status: 'success',
-      };
+      }, req.tenantId);
 
       const payload = {
         success: true,
@@ -2104,21 +2221,27 @@ export const getDailyProductReturn = async (req, res) => {
       });
     }
 
-    const doc = await db.collection('DailyProductReturn').doc(date).get();
+    const dayData = await loadDailyProductDayForTenant(
+      db,
+      'DailyProductReturn',
+      date,
+      tenantOutletIds,
+      mergeReturnProductsAcrossDays,
+    );
 
-    if (!doc.exists) {
+    if (!dayData) {
       return res.status(404).json({
         success: false,
         message: `No product return record found for ${date}`,
       });
     }
 
-    const { data: body, pagination } = paginateDailyReturnDoc(doc.data(), pageNum, limitNum);
+    const { data: body, pagination } = paginateDailyReturnDoc(dayData, pageNum, limitNum);
 
     return res.status(200).json({
       success: true,
       message: `Product return details for ${date}`,
-      data: body,
+      data: attachTenantId(body, req.tenantId),
       pagination,
     });
   } catch (error) {
@@ -2142,6 +2265,15 @@ export const getOutletOpeningClosingBalances = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const { outletId, status, date, limit } = req.query;
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
+
+    if (outletId && tenantOutletIds && !tenantOutletIds.has(outletId)) {
+      return res.status(200).json({
+        message: 'No records found',
+        data: [],
+        count: 0,
+      });
+    }
 
     let query = db.collection('OutletOpeningClosingBalance');
 
@@ -2180,14 +2312,6 @@ export const getOutletOpeningClosingBalances = async (req, res) => {
     // Order by timestamp descending (most recent first)
     query = query.orderBy('timestamp', 'desc');
 
-    // Apply limit if provided
-    if (limit) {
-      const limitNum = parseInt(limit, 10);
-      if (!isNaN(limitNum) && limitNum > 0) {
-        query = query.limit(limitNum);
-      }
-    }
-
     const snapshot = await query.get();
 
     if (snapshot.empty) {
@@ -2201,21 +2325,30 @@ export const getOutletOpeningClosingBalances = async (req, res) => {
     const records = [];
     snapshot.forEach((doc) => {
       const data = doc.data();
-      const outletId = data.OutletID || data.outletId || '';
+      const recordOutletId = data.OutletID || data.outletId || '';
+      if (tenantOutletIds && !tenantOutletIds.has(recordOutletId)) return;
       records.push({
         id: doc.id,
         ...data,
-        outletId,
+        outletId: recordOutletId,
         // Convert Firestore timestamps to ISO strings for JSON response
         timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
         completedAt: data.completedAt?.toDate ? data.completedAt.toDate().toISOString() : data.completedAt,
       });
     });
 
+    let limited = records;
+    if (limit) {
+      const limitNum = parseInt(limit, 10);
+      if (!isNaN(limitNum) && limitNum > 0) {
+        limited = records.slice(0, limitNum);
+      }
+    }
+
     res.status(200).json({
       message: 'Records retrieved successfully',
-      data: records,
-      count: records.length,
+      data: limited,
+      count: limited.length,
     });
   } catch (error) {
     console.error('Error fetching OutletOpeningClosingBalance records:', error);
@@ -2246,6 +2379,14 @@ export const getOutletOpeningClosingBalanceById = async (req, res) => {
 
     const data = doc.data();
     const outletId = data.OutletID || data.outletId || '';
+    let docTenant = data.tenantId;
+    if (!docTenant && outletId) {
+      const outletDoc = await db.collection('outlets').doc(outletId).get();
+      docTenant = outletDoc.exists ? outletDoc.data().tenantId : '';
+    }
+    if (denyUnlessTenant(res, docTenant, req.tenantId, 'Record not found')) {
+      return;
+    }
     const record = {
       id: doc.id,
       ...data,
@@ -2285,6 +2426,9 @@ export const calculateClosingBalances = async (req, res) => {
     if (!outletDoc.exists) {
       return res.status(404).json({ error: 'Outlet not found' });
     }
+    if (denyUnlessTenant(res, outletDoc.data().tenantId, req.tenantId, 'Outlet not found')) {
+      return;
+    }
 
     const todayIstDateStr = getIstDayBoundaries(new Date()).dateStr;
     const openingBalanceDate = outletDoc.data()?.openingBalanceDate;
@@ -2319,14 +2463,16 @@ export const getPendingClosingBalanceRecalcs = async (req, res) => {
       .where('recalculate', '==', 'pending')
       .get();
 
-    const outlets = snapshot.docs.map((doc) => {
-      const data = doc.data() || {};
-      return {
-        outletId: doc.id,
-        outletName: data.name || data.outletName || doc.id,
-        recalculateFromDate: data.recalculateFromDate || null,
-      };
-    });
+    const outlets = snapshot.docs
+      .filter((doc) => belongsToTenant(doc.data()?.tenantId, req.tenantId))
+      .map((doc) => {
+        const data = doc.data() || {};
+        return {
+          outletId: doc.id,
+          outletName: data.name || data.outletName || doc.id,
+          recalculateFromDate: data.recalculateFromDate || null,
+        };
+      });
 
     res.status(200).json({
       total: outlets.length,
@@ -2349,7 +2495,8 @@ export const runPendingClosingBalanceRecalcs = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const throughDate = getIstDayBoundaries(new Date()).dateStr;
-    const summary = await processPendingClosingBalanceRecalcs(db, throughDate);
+    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
+    const summary = await processPendingClosingBalanceRecalcs(db, throughDate, tenantOutletIds);
 
     res.status(200).json({
       success: true,

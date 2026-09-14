@@ -1,11 +1,12 @@
 // controllers/nannuUserController.js
 import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 
 // Create Nannu User
 export const createNannuUser = async (req, res) => {
   try {
-    const { phoneNumber, password, outletId, userProfile, tenantId, enableNotification, fcmToken } = req.body;
+    const { phoneNumber, password, outletId, userProfile, enableNotification, fcmToken } = req.body;
     const db = getFirestoreDB();
     
     // Validation
@@ -50,7 +51,7 @@ export const createNannuUser = async (req, res) => {
       password,
       outletId: outletId || '',
       userProfile: userProfile || 'Outlet',
-      tenantId: tenantId || '',
+      tenantId: req.tenantId,
       enableNotification: enableNotification !== undefined ? enableNotification : true,
       fcmToken: fcmToken || ''
     });
@@ -90,7 +91,6 @@ export const getAllNannuUsers = async (req, res) => {
 
     const start = parseInt(_start);
     const end = parseInt(_end);
-    const limit = end - start;
     
     // Apply filters
     if (outletId) {
@@ -101,18 +101,23 @@ export const getAllNannuUsers = async (req, res) => {
       query = query.where('userProfile', '==', userProfile);
     }
     
-    // Get total count for the X-Total-Count header (with filters applied)
     const totalSnapshot = await query.get();
-    const totalCount = totalSnapshot.size;
-    
-    // Apply pagination using Refine framework pattern
-    query = query
-      .orderBy('createdAt', 'desc')
-      .offset(start)
-      .limit(limit);
-    
-    const snapshot = await query.get();
-    const users = snapshot.docs.map(doc => {
+    const tenantDocs = totalSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    tenantDocs.sort((a, b) => {
+      const aTime = a.data().createdAt?.toMillis
+        ? a.data().createdAt.toMillis()
+        : new Date(a.data().createdAt || 0).getTime();
+      const bTime = b.data().createdAt?.toMillis
+        ? b.data().createdAt.toMillis()
+        : new Date(b.data().createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+    const totalCount = tenantDocs.length;
+    const snapshotDocs = tenantDocs.slice(start, end);
+
+    const users = snapshotDocs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -131,7 +136,9 @@ export const getAllNannuUsers = async (req, res) => {
     
     // Get all users for counting (without filters for accurate counts)
     const allUsersSnapshot = await db.collection('users').get();
-    const allUsers = allUsersSnapshot.docs.map(doc => doc.data());
+    const allUsers = allUsersSnapshot.docs
+      .map(doc => doc.data())
+      .filter((user) => belongsToTenant(user.tenantId, req.tenantId));
     
     // Calculate counts
     const totalUsers = allUsers.length;
@@ -186,6 +193,9 @@ export const getNannuUserById = async (req, res) => {
         message: 'Nannu user not found'
       });
     }
+    if (denyUnlessTenant(res, userDoc.data().tenantId, req.tenantId, 'Nannu user not found')) {
+      return;
+    }
     
     const userData = userDoc.data();
     
@@ -218,7 +228,7 @@ export const getNannuUserById = async (req, res) => {
 export const updateNannuUser = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { phoneNumber, password, outletId, userProfile, tenantId, enableNotification, fcmToken } = req.body;
+    const { phoneNumber, password, outletId, userProfile, enableNotification, fcmToken } = req.body;
     const db = getFirestoreDB();
     
     // Check if user exists
@@ -229,6 +239,9 @@ export const updateNannuUser = async (req, res) => {
         success: false,
         message: 'Nannu user not found'
       });
+    }
+    if (denyUnlessTenant(res, userDoc.data().tenantId, req.tenantId, 'Nannu user not found')) {
+      return;
     }
     
     // Check if phone number is being changed and if it already exists
@@ -255,7 +268,6 @@ export const updateNannuUser = async (req, res) => {
     if (password !== undefined) updateData.password = password;
     if (outletId !== undefined) updateData.outletId = outletId;
     if (userProfile !== undefined) updateData.userProfile = userProfile;
-    if (tenantId !== undefined) updateData.tenantId = tenantId;
     if (enableNotification !== undefined) updateData.enableNotification = enableNotification;
     if (fcmToken !== undefined) updateData.fcmToken = fcmToken;
     
@@ -288,6 +300,9 @@ export const deleteNannuUser = async (req, res) => {
         success: false,
         message: 'Nannu user not found'
       });
+    }
+    if (denyUnlessTenant(res, userDoc.data().tenantId, req.tenantId, 'Nannu user not found')) {
+      return;
     }
     
     const userData = userDoc.data();
@@ -379,7 +394,9 @@ export const getNannuUsersByOutletId = async (req, res) => {
       .where('outletId', '==', outletId)
       .get();
     
-    const users = snapshot.docs.map(doc => {
+    const users = snapshot.docs
+      .filter((doc) => belongsToTenant(doc.data().tenantId, req.tenantId))
+      .map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -432,6 +449,9 @@ export const updateNannuUserFCMToken = async (req, res) => {
         success: false,
         message: 'Nannu user not found'
       });
+    }
+    if (denyUnlessTenant(res, userDoc.data().tenantId, req.tenantId, 'Nannu user not found')) {
+      return;
     }
     
     await db.collection('users').doc(userId).update({
