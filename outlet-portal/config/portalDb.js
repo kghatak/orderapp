@@ -1,17 +1,36 @@
 import mongoose from 'mongoose';
+import { resolveDataEnv } from '../../config/db.js';
 
 let portalConn = null;
 
+const resolvePortalMongo = (env) => {
+  const testUri = (process.env.OUTLET_PORTAL_MONGODB_TEST_URI || '').trim();
+  const prodUri = (process.env.OUTLET_PORTAL_MONGODB_URI || '').trim();
+  const testDb = (process.env.OUTLET_PORTAL_TEST_DB_NAME || '').trim();
+  const prodDb = (process.env.OUTLET_PORTAL_DB_NAME || '').trim() || 'outlet_portal';
+
+  if (env === 'test') {
+    if (testUri) {
+      return { uri: testUri, dbName: testDb || 'outlet_portal_test' };
+    }
+    // Keep current behaviour until a test URI is set: same Atlas as production.
+    return { uri: prodUri, dbName: prodDb };
+  }
+  return { uri: prodUri, dbName: prodDb };
+};
+
 export const connectOutletPortalMongo = async () => {
-  const uri = process.env.OUTLET_PORTAL_MONGODB_URI;
+  const env = resolveDataEnv();
+  const { uri, dbName } = resolvePortalMongo(env);
   if (!uri) {
-    console.warn('⚠️ OUTLET_PORTAL_MONGODB_URI not set – outlet portal module disabled.');
+    console.warn(
+      `⚠️ Outlet portal MongoDB URI not set (FIREBASE_ENV=${env}) – outlet portal module disabled.`
+    );
     return false;
   }
-  const dbName = process.env.OUTLET_PORTAL_DB_NAME || 'outlet_portal';
   try {
     portalConn = await mongoose.createConnection(uri, { dbName }).asPromise();
-    console.log('✅ Outlet portal MongoDB connected:', dbName);
+    console.log(`✅ Outlet portal MongoDB connected (FIREBASE_ENV=${env}): ${dbName}`);
     return true;
   } catch (err) {
     console.warn('⚠️ Outlet portal MongoDB not connected:', err.message);

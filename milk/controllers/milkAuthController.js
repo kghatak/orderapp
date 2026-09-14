@@ -221,6 +221,7 @@ async function getOrCreateMilkAdmin(tenantId, orderUser) {
  */
 export async function getMilkTokenForOrderAdmin(tenantId, phone, password) {
   try {
+    if (!tenantId) return null;
     const orderAdmin = await validateOrderMilkUser(phone, password);
     if (!orderAdmin) return null;
     const user = await getOrCreateMilkAdmin(tenantId, orderAdmin);
