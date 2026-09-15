@@ -313,6 +313,310 @@ function mergeReturnProductsAcrossDays(dayDocsData) {
   return mergeDailyProductDocuments(dayDocsData, 'totalReturns');
 }
 
+function ymdToDmy(ymd) {
+  const [year, month, day] = String(ymd).split('-');
+  if (!year || !month || !day) return ymd;
+  return `${day}-${month}-${year}`;
+}
+
+function slugForFilename(value) {
+  return String(value || 'outlet')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'outlet';
+}
+
+/**
+ * Load DailyProductDelivery/{date}/outlets/{outletId} docs for an inclusive date range.
+ * These subdocs are written by calculateDailyProductDelivery.
+ */
+async function loadOutletDailyDeliveryDocs(db, outletId, dateKeys) {
+  const snapshots = await Promise.all(
+    dateKeys.map((dateKey) =>
+      db.collection('DailyProductDelivery').doc(dateKey).collection('outlets').doc(outletId).get()
+    )
+  );
+  return snapshots.filter((snap) => snap.exists).map((snap) => snap.data());
+}
+
+async function loadOutletDailyDeliveryDays(db, outletId, dateKeys) {
+  const snapshots = await Promise.all(
+    dateKeys.map((dateKey) =>
+      db.collection('DailyProductDelivery').doc(dateKey).collection('outlets').doc(outletId).get()
+    )
+  );
+  return snapshots
+    .map((snap, index) => ({ dateKey: dateKeys[index], data: snap.exists ? snap.data() : null }))
+    .filter((entry) => entry.data);
+}
+
+async function resolveSalesAnalysisParty(db, outletId, snapshotDocs) {
+  const latest = snapshotDocs[snapshotDocs.length - 1] || {};
+  let outletName = latest.outletName || '';
+  let gstNo = latest.gstNo || '';
+  if (!outletName || !gstNo) {
+    const outletDoc = await db.collection('outlets').doc(outletId).get();
+    if (outletDoc.exists) {
+      const data = outletDoc.data() || {};
+      outletName = outletName || data.name || data.outletName || outletId;
+      gstNo = gstNo || data.gstNo || data.gst || data.gstin || '';
+    }
+  }
+  outletName = outletName || outletId;
+  const partyLabel = gstNo
+    ? `Party : ${outletName} (${gstNo})`
+    : `Party : ${outletName}`;
+  return { outletName, gstNo, partyLabel };
+}
+
+function buildSalesAnalysisWorkbook({ fromS, toS, partyLabel, products }) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Order Admin';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Sales Analysis', {
+    views: [{ state: 'frozen', ySplit: 4, showGridLines: false }],
+    pageSetup: { orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+  });
+
+  sheet.columns = [
+    { width: 38 },
+    { width: 12 },
+    { width: 16 },
+    { width: 28 },
+  ];
+
+  const thinBorder = {
+    top: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    left: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    bottom: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    right: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+  };
+
+  sheet.mergeCells('B1:C1');
+  sheet.getCell('A1').value = `From ${ymdToDmy(fromS)} to ${ymdToDmy(toS)}`;
+  sheet.getCell('B1').value = 'Sales Analysis';
+  sheet.getCell('D1').value = partyLabel;
+  sheet.getCell('A1').font = { size: 11, bold: true, color: { argb: 'FF595959' } };
+  sheet.getCell('B1').font = { size: 14, bold: true, color: { argb: 'FFC00000' } };
+  sheet.getCell('B1').alignment = { horizontal: 'center', vertical: 'middle' };
+  sheet.getCell('D1').font = { size: 11, bold: true };
+  sheet.getCell('D1').alignment = { horizontal: 'right', wrapText: true };
+  sheet.getRow(1).height = 22;
+
+  sheet.getCell('A2').value = 'All Items';
+  sheet.getCell('A2').font = { size: 11, color: { argb: 'FF595959' } };
+
+  const headerRow = sheet.getRow(4);
+  headerRow.values = ['Item Details', 'Unit', 'Sale Qty.', 'Sale Amt.'];
+  headerRow.font = { bold: true };
+  headerRow.height = 20;
+  headerRow.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+    cell.border = thinBorder;
+  });
+  sheet.getCell('C4').alignment = { horizontal: 'right', vertical: 'middle' };
+  sheet.getCell('D4').alignment = { horizontal: 'right', vertical: 'middle' };
+
+  products.forEach((product, index) => {
+    const excelRow = sheet.getRow(5 + index);
+    excelRow.values = [
+      product.name,
+      product.unit || '',
+      Number(product.totalQuantity) || 0,
+      Number(product.totalAmount) || 0,
+    ];
+    excelRow.getCell(1).font = { color: { argb: 'FF0000FF' } };
+    excelRow.getCell(3).numFmt = '#,##0.000';
+    excelRow.getCell(3).alignment = { horizontal: 'right' };
+    excelRow.getCell(4).numFmt = '#,##0.00';
+    excelRow.getCell(4).alignment = { horizontal: 'right' };
+    excelRow.eachCell((cell) => {
+      cell.border = thinBorder;
+    });
+  });
+
+  const totalQty = products.reduce((sum, product) => sum + (Number(product.totalQuantity) || 0), 0);
+  const totalAmt = products.reduce((sum, product) => sum + (Number(product.totalAmount) || 0), 0);
+  const totalRow = sheet.getRow(5 + products.length);
+  totalRow.values = ['', '', totalQty, totalAmt];
+  totalRow.font = { bold: true, color: { argb: 'FFC00000' } };
+  totalRow.getCell(3).numFmt = '#,##0.000';
+  totalRow.getCell(3).alignment = { horizontal: 'right' };
+  totalRow.getCell(4).numFmt = '#,##0.00';
+  totalRow.getCell(4).alignment = { horizontal: 'right' };
+  totalRow.eachCell((cell) => {
+    cell.border = thinBorder;
+  });
+
+  if (products.length > 0) {
+    sheet.autoFilter = {
+      from: { row: 4, column: 1 },
+      to: { row: 4 + products.length, column: 4 },
+    };
+  }
+
+  return workbook;
+}
+
+function productHasSale(product) {
+  return (Number(product?.totalQuantity) || 0) !== 0 || (Number(product?.totalAmount) || 0) !== 0;
+}
+
+function itemWiseDiscountFields(product) {
+  const qty = Number(product.totalQuantity) || 0;
+  const afterDiscount = Number(product.totalAmount) || 0;
+  const discountAmount = Number(product.totalDiscount) || 0;
+  const amountBeforeDiscount = roundMoney2(afterDiscount + discountAmount);
+  const listedPct = Number(product.discountPercentage) || 0;
+  const effectivePct =
+    amountBeforeDiscount > 0
+      ? roundMoney2((discountAmount / amountBeforeDiscount) * 100)
+      : listedPct;
+  return {
+    name: product.name || 'Unknown Item',
+    qty,
+    listedPct,
+    effectivePct,
+    amountBeforeDiscount,
+    discountAmount: roundMoney2(discountAmount),
+  };
+}
+
+function buildItemWiseDiscountWorkbook({ fromS, toS, partyLabel, days }) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Order Admin';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Item-wise Discount', {
+    views: [{ state: 'frozen', ySplit: 4, showGridLines: false }],
+    pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+  });
+
+  sheet.columns = [
+    { width: 14 },
+    { width: 12 },
+    { width: 32 },
+    { width: 12 },
+    { width: 12 },
+    { width: 18 },
+    { width: 24 },
+    { width: 18 },
+  ];
+
+  const thinBorder = {
+    top: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    left: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    bottom: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+    right: { style: 'thin', color: { argb: 'FFBFBFBF' } },
+  };
+
+  sheet.mergeCells('C1:F1');
+  sheet.getCell('A1').value = `From ${ymdToDmy(fromS)} to ${ymdToDmy(toS)}`;
+  sheet.getCell('C1').value = 'Item-wise Discount ( Sale )';
+  sheet.getCell('H1').value = 'All Items';
+  sheet.getCell('A1').font = { size: 11, bold: true, color: { argb: 'FF595959' } };
+  sheet.getCell('C1').font = { size: 14, bold: true, color: { argb: 'FFC00000' } };
+  sheet.getCell('C1').alignment = { horizontal: 'center', vertical: 'middle' };
+  sheet.getCell('H1').font = { size: 11, bold: true };
+  sheet.getCell('H1').alignment = { horizontal: 'right' };
+  sheet.getRow(1).height = 22;
+
+  sheet.getCell('A2').value = partyLabel;
+  sheet.getCell('A2').font = { size: 11, bold: true };
+
+  const headerRow = sheet.getRow(4);
+  headerRow.values = [
+    'Vch. Date',
+    'Bill/Vch No.',
+    'Item Details',
+    'Qty.',
+    'Discount (%)',
+    'Effective Discount',
+    'Amount Before Discount',
+    'Discount Amount',
+  ];
+  headerRow.font = { bold: true };
+  headerRow.height = 20;
+  headerRow.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+    cell.border = thinBorder;
+  });
+  [4, 5, 6, 7, 8].forEach((col) => {
+    sheet.getCell(4, col).alignment = { horizontal: 'right', vertical: 'middle' };
+  });
+
+  let excelRowNumber = 5;
+  let totalQty = 0;
+  let totalBefore = 0;
+  let totalDiscount = 0;
+
+  days.forEach((day) => {
+    day.lines.forEach((line, index) => {
+      const excelRow = sheet.getRow(excelRowNumber);
+      excelRow.values = [
+        index === 0 ? ymdToDmy(day.dateKey) : '',
+        index === 0 ? day.voucherNumber : '',
+        line.name,
+        line.qty,
+        line.listedPct,
+        line.effectivePct,
+        line.amountBeforeDiscount,
+        line.discountAmount,
+      ];
+      excelRow.getCell(3).font = { color: { argb: 'FF0000FF' } };
+      excelRow.getCell(4).numFmt = '#,##0.000';
+      excelRow.getCell(5).numFmt = '0" %"';
+      excelRow.getCell(6).numFmt = '0.00" %"';
+      excelRow.getCell(7).numFmt = '#,##0.00';
+      excelRow.getCell(8).numFmt = '#,##0.00';
+      [4, 5, 6, 7, 8].forEach((col) => {
+        excelRow.getCell(col).alignment = { horizontal: 'right' };
+      });
+      excelRow.eachCell((cell) => {
+        cell.border = thinBorder;
+      });
+      totalQty += line.qty;
+      totalBefore += line.amountBeforeDiscount;
+      totalDiscount += line.discountAmount;
+      excelRowNumber += 1;
+    });
+  });
+
+  const totalRow = sheet.getRow(excelRowNumber);
+  totalRow.values = ['', '', '', totalQty, '', '', roundMoney2(totalBefore), roundMoney2(totalDiscount)];
+  totalRow.font = { bold: true, color: { argb: 'FFC00000' } };
+  totalRow.getCell(4).numFmt = '#,##0.000';
+  totalRow.getCell(7).numFmt = '#,##0.00';
+  totalRow.getCell(8).numFmt = '#,##0.00';
+  [4, 7, 8].forEach((col) => {
+    totalRow.getCell(col).alignment = { horizontal: 'right' };
+  });
+  totalRow.eachCell((cell) => {
+    cell.border = thinBorder;
+  });
+
+  return workbook;
+}
+
+async function reserveDeliveryVoucherStart(db, count, requestedCounter) {
+  const parsed = requestedCounter !== undefined && requestedCounter !== ''
+    ? parseInt(String(requestedCounter), 10)
+    : NaN;
+  if (Number.isFinite(parsed) && parsed >= 1) {
+    return parsed;
+  }
+  const voucherCounterRef = db.collection('counters').doc('deliveredvouchercounter');
+  return db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(voucherCounterRef);
+    const last = snap.exists ? Number(snap.data().count) : 0;
+    const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
+    transaction.set(voucherCounterRef, { count: safeLast + count }, { merge: true });
+    return safeLast + 1;
+  });
+}
+
 const escapeCsvCell = (value) => {
   if (value == null) return '';
   const str = String(value);
@@ -1625,6 +1929,198 @@ export const getDailyProductDeliveryXLSX = async (req, res) => {
     return res.status(200).send(Buffer.from(buf));
   } catch (error) {
     console.error('❌ [Daily Product Delivery XLSX] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/balance/daily-product-delivery/sales-analysis/xlsx
+ *
+ * Outlet sales analysis from DailyProductDelivery/{date}/outlets/{outletId}.
+ * Required: outletId, and either date=YYYY-MM-DD or from & to (inclusive, max 31 days).
+ */
+export const getDailyProductDeliverySalesAnalysisXLSX = async (req, res) => {
+  try {
+    const outletId = firstQueryString(req.query.outletId);
+    const fromQuery = firstQueryString(req.query.from);
+    const toQuery = firstQueryString(req.query.to);
+    const dateQuery = firstQueryString(req.query.date);
+
+    if (!outletId) {
+      return res.status(400).json({ success: false, error: 'outletId is required' });
+    }
+
+    let fromS = fromQuery;
+    let toS = toQuery;
+    if (dateQuery && !fromQuery && !toQuery) {
+      fromS = dateQuery;
+      toS = dateQuery;
+    }
+
+    if (!fromS || !toS) {
+      return res.status(400).json({
+        success: false,
+        error: `Provide outletId and date=YYYY-MM-DD, or from and to (inclusive range, maximum ${MAX_XLSX_VOUCHER_RANGE_DAYS} days)`,
+      });
+    }
+    if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+      return res.status(400).json({ success: false, error: 'Dates must be YYYY-MM-DD' });
+    }
+    if (fromS > toS) {
+      return res.status(400).json({ success: false, error: 'from must be on or before to' });
+    }
+
+    const dateKeys = enumerateDateRangeInclusive(fromS, toS);
+    if (dateKeys.length > MAX_XLSX_VOUCHER_RANGE_DAYS) {
+      return res.status(400).json({
+        success: false,
+        error: `Date range spans ${dateKeys.length} days; maximum is ${MAX_XLSX_VOUCHER_RANGE_DAYS}`,
+      });
+    }
+
+    const db = getFirestoreDB();
+    const snapshotDocs = await loadOutletDailyDeliveryDocs(db, outletId, dateKeys);
+    if (!snapshotDocs.length) {
+      const rangeLabel = fromS === toS ? fromS : `${fromS}–${toS}`;
+      return res.status(404).json({
+        success: false,
+        message: `No DailyProductDelivery outlet snapshot found for this outlet in ${rangeLabel}`,
+      });
+    }
+
+    const { mergedProducts } = mergeDeliveryProductsAcrossDays(snapshotDocs);
+    const products = mergedProducts.filter(
+      (product) => (Number(product.totalQuantity) || 0) !== 0 || (Number(product.totalAmount) || 0) !== 0
+    );
+    if (!products.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'No delivered products found for this outlet in the selected date range',
+      });
+    }
+
+    const { outletName, partyLabel } = await resolveSalesAnalysisParty(db, outletId, snapshotDocs);
+    const workbook = buildSalesAnalysisWorkbook({ fromS, toS, partyLabel, products });
+    const buf = await workbook.xlsx.writeBuffer();
+    const filename = fromS === toS
+      ? `sales-analysis-${slugForFilename(outletName)}-${fromS}.xlsx`
+      : `sales-analysis-${slugForFilename(outletName)}-${fromS}-to-${toS}.xlsx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(Buffer.from(buf));
+  } catch (error) {
+    console.error('❌ [Sales Analysis XLSX] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/balance/daily-product-delivery/item-wise-discount/xlsx
+ *
+ * Per-day item discount report from DailyProductDelivery/{date}/outlets/{outletId}.
+ * Required: outletId, and either date=YYYY-MM-DD or from & to (inclusive, max 31 days).
+ * Optional: counter — starting voucher number; else uses/advances counters/deliveredvouchercounter.
+ */
+export const getDailyProductDeliveryItemWiseDiscountXLSX = async (req, res) => {
+  try {
+    const outletId = firstQueryString(req.query.outletId);
+    const fromQuery = firstQueryString(req.query.from);
+    const toQuery = firstQueryString(req.query.to);
+    const dateQuery = firstQueryString(req.query.date);
+    const counterQuery = firstQueryString(req.query.counter);
+
+    if (!outletId) {
+      return res.status(400).json({ success: false, error: 'outletId is required' });
+    }
+
+    let fromS = fromQuery;
+    let toS = toQuery;
+    if (dateQuery && !fromQuery && !toQuery) {
+      fromS = dateQuery;
+      toS = dateQuery;
+    }
+
+    if (!fromS || !toS) {
+      return res.status(400).json({
+        success: false,
+        error: `Provide outletId and date=YYYY-MM-DD, or from and to (inclusive range, maximum ${MAX_XLSX_VOUCHER_RANGE_DAYS} days)`,
+      });
+    }
+    if (!YMD_DATE_REGEX.test(fromS) || !YMD_DATE_REGEX.test(toS)) {
+      return res.status(400).json({ success: false, error: 'Dates must be YYYY-MM-DD' });
+    }
+    if (fromS > toS) {
+      return res.status(400).json({ success: false, error: 'from must be on or before to' });
+    }
+
+    const dateKeys = enumerateDateRangeInclusive(fromS, toS);
+    if (dateKeys.length > MAX_XLSX_VOUCHER_RANGE_DAYS) {
+      return res.status(400).json({
+        success: false,
+        error: `Date range spans ${dateKeys.length} days; maximum is ${MAX_XLSX_VOUCHER_RANGE_DAYS}`,
+      });
+    }
+
+    const db = getFirestoreDB();
+    const dayDocs = await loadOutletDailyDeliveryDays(db, outletId, dateKeys);
+    const daysWithLines = dayDocs
+      .map(({ dateKey, data }) => ({
+        dateKey,
+        data,
+        lines: (data.products || []).filter(productHasSale).map(itemWiseDiscountFields),
+      }))
+      .filter((day) => day.lines.length > 0);
+
+    if (!daysWithLines.length) {
+      const rangeLabel = fromS === toS ? fromS : `${fromS}–${toS}`;
+      return res.status(404).json({
+        success: false,
+        message: `No DailyProductDelivery outlet snapshot found for this outlet in ${rangeLabel}`,
+      });
+    }
+
+    const startVoucherNumber = await reserveDeliveryVoucherStart(
+      db,
+      daysWithLines.length,
+      counterQuery,
+    );
+    const days = daysWithLines.map((day, index) => ({
+      dateKey: day.dateKey,
+      voucherNumber: startVoucherNumber + index,
+      lines: day.lines,
+    }));
+
+    const snapshotDocs = daysWithLines.map((day) => day.data);
+    const { outletName } = await resolveSalesAnalysisParty(db, outletId, snapshotDocs);
+    const workbook = buildItemWiseDiscountWorkbook({
+      fromS,
+      toS,
+      partyLabel: `Party : ${outletName}`,
+      days,
+    });
+    const buf = await workbook.xlsx.writeBuffer();
+    const filename = fromS === toS
+      ? `item-wise-discount-${slugForFilename(outletName)}-${fromS}.xlsx`
+      : `item-wise-discount-${slugForFilename(outletName)}-${fromS}-to-${toS}.xlsx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(Buffer.from(buf));
+  } catch (error) {
+    console.error('❌ [Item-wise Discount XLSX] Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
