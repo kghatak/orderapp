@@ -8,9 +8,48 @@ import {
   saveDashboardSnapshot,
   snapshotToDashboardResponse,
 } from '../services/dashboardSnapshotService.js';
+import { canonicalizeTenantId, TENANTS } from '../../util/tenantMiddleware.js';
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 31;
+
+const readDashboardTenantId = (req, queryTenantId = '') => {
+  const fromHeader = req.headers['x-tenant-id'] || req.headers['user-tenantid'] || '';
+  return canonicalizeTenantId(fromHeader || queryTenantId || '');
+};
+
+const isNaanuMilkTenant = (tenantId) => tenantId === TENANTS.NAANU_MILK;
+
+// Only NM2026 may see legacy snapshots saved with empty tenantId.
+const loadSnapshotForTenant = async (businessDate, tenantId) => {
+  if (!tenantId) return null;
+  const snap = await getSnapshotForDate(businessDate, tenantId);
+  if (snap) return snap;
+  if (isNaanuMilkTenant(tenantId)) {
+    return getSnapshotForDate(businessDate, '');
+  }
+  return null;
+};
+
+const mergeSnapshotsByDate = (...lists) => {
+  const byDate = new Map();
+  for (const rows of lists) {
+    for (const row of rows) {
+      if (!byDate.has(row.businessDate)) byDate.set(row.businessDate, row);
+    }
+  }
+  return [...byDate.values()].sort((a, b) =>
+    String(a.businessDate).localeCompare(String(b.businessDate)),
+  );
+};
+
+const loadSnapshotsInRangeForTenant = async (startDate, endDate, tenantId) => {
+  if (!tenantId) return [];
+  const byTenant = await getSnapshotsInRange(startDate, endDate, tenantId);
+  if (!isNaanuMilkTenant(tenantId)) return byTenant;
+  const byEmpty = await getSnapshotsInRange(startDate, endDate, '');
+  return mergeSnapshotsByDate(byTenant, byEmpty);
+};
 
 const countInclusiveDays = (startDate, endDate) => {
   const { start } = getIstDayBounds(startDate);
@@ -19,8 +58,8 @@ const countInclusiveDays = (startDate, endDate) => {
   return Math.floor(diffMs / (24 * 60 * 60 * 1000)) + 1;
 };
 
-const parseDashboardQuery = (query) => {
-  const tenantId = query.tenantId ? String(query.tenantId).trim() : '';
+const parseDashboardQuery = (query, req) => {
+  const tenantId = readDashboardTenantId(req, query.tenantId);
 
   if (query.date) {
     const businessDate = String(query.date).trim();
@@ -62,7 +101,7 @@ const getPreviousDateKey = (dateKey) => {
 
 export const getDashboard = async (req, res) => {
   try {
-    const parsed = parseDashboardQuery(req.query);
+    const parsed = parseDashboardQuery(req.query, req);
     if (parsed.error) {
       return res.status(400).json({ success: false, message: parsed.error });
     }
@@ -74,8 +113,8 @@ export const getDashboard = async (req, res) => {
       if (parsed.startDate === parsed.endDate) {
         const businessDate = parsed.startDate;
         const [snapshot, previousSnapshot] = await Promise.all([
-          getSnapshotForDate(businessDate, tenantId),
-          getSnapshotForDate(getPreviousDateKey(businessDate), tenantId),
+          loadSnapshotForTenant(businessDate, tenantId),
+          loadSnapshotForTenant(getPreviousDateKey(businessDate), tenantId),
         ]);
 
         if (!snapshot) {
@@ -93,7 +132,7 @@ export const getDashboard = async (req, res) => {
         return res.json({ success: true, data });
       }
 
-      const snapshots = await getSnapshotsInRange(
+      const snapshots = await loadSnapshotsInRangeForTenant(
         parsed.startDate,
         parsed.endDate,
         tenantId,
@@ -112,8 +151,8 @@ export const getDashboard = async (req, res) => {
 
     const { businessDate } = parsed;
     const [snapshot, previousSnapshot] = await Promise.all([
-      getSnapshotForDate(businessDate, tenantId),
-      getSnapshotForDate(getPreviousDateKey(businessDate), tenantId),
+      loadSnapshotForTenant(businessDate, tenantId),
+      loadSnapshotForTenant(getPreviousDateKey(businessDate), tenantId),
     ]);
 
     if (!snapshot) {
@@ -157,9 +196,10 @@ export const createDashboardSnapshot = async (req, res) => {
       });
     }
 
-    const tenantId = req.body?.tenantId
-      ? String(req.body.tenantId).trim()
-      : '';
+    const tenantId = readDashboardTenantId(
+      req,
+      req.body?.tenantId ? String(req.body.tenantId).trim() : '',
+    );
 
     const saved = await saveDashboardSnapshot(businessDate, tenantId);
 
@@ -183,7 +223,7 @@ export const createDashboardSnapshot = async (req, res) => {
 
 export const listDashboardSnapshotDates = async (req, res) => {
   try {
-    const tenantId = req.query.tenantId ? String(req.query.tenantId).trim() : '';
+    const tenantId = readDashboardTenantId(req, req.query.tenantId);
     const limit = Math.min(
       Math.max(parseInt(String(req.query.limit ?? '30'), 10) || 30, 1),
       365,
@@ -194,7 +234,11 @@ export const listDashboardSnapshotDates = async (req, res) => {
     );
     const Snapshot = getDashboardDailySnapshotModel();
 
-    const rows = await Snapshot.find({ tenantId })
+    const tenantFilter = isNaanuMilkTenant(tenantId)
+      ? { tenantId: { $in: [TENANTS.NAANU_MILK, ''] } }
+      : { tenantId };
+
+    const rows = await Snapshot.find(tenantFilter)
       .sort({ businessDate: -1 })
       .limit(limit)
       .select('businessDate snapshotAt dailyRevenueTotal dailyTransactionsTotal')

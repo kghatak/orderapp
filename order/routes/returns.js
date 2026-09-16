@@ -9,9 +9,11 @@ import {
   getReturnsReport,
   updateReturnItems,
 } from '../controllers/returnsController.js';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 
 const router = express.Router();
 
+router.use(tenantMiddleware);
 router.post('/', createReturn);
 router.get('/', getAllReturns);
 router.get('/report', getReturnsReport);

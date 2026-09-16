@@ -445,21 +445,25 @@ export const recalculateOutletClosingBalancesRange = async (
   };
 };
 
-export const processPendingClosingBalanceRecalcs = async (db, throughDate) => {
+export const processPendingClosingBalanceRecalcs = async (db, throughDate, allowedOutletIds = null) => {
   const pendingSnap = await db
     .collection('outlets')
     .where('recalculate', '==', 'pending')
     .get();
 
+  const pendingDocs = allowedOutletIds
+    ? pendingSnap.docs.filter((doc) => allowedOutletIds.has(doc.id))
+    : pendingSnap.docs;
+
   const summary = {
-    total: pendingSnap.size,
+    total: pendingDocs.length,
     successful: 0,
     failed: 0,
     skipped: 0,
     outlets: [],
   };
 
-  for (const doc of pendingSnap.docs) {
+  for (const doc of pendingDocs) {
     const data = doc.data() || {};
     const fromDate = data.recalculateFromDate;
     if (!fromDate) {
