@@ -71,6 +71,10 @@ const buildOrderData = async (req, res) => {
     return null;
   }
   const outlet = outletDoc.data();
+  if (!belongsToTenant(outlet.tenantId, req.tenantId)) {
+    res.status(404).json({ error: 'Outlet not found' });
+    return null;
+  }
 
   // Process items and calculate totals
   const processedItems = [];
