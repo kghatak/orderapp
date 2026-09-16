@@ -10,6 +10,8 @@ import {
   calculateDailyProductReturn,
   getDailyProductDelivery,
   getDailyProductDeliveryXLSX,
+  getDailyProductDeliverySalesAnalysisXLSX,
+  getDailyProductDeliveryItemWiseDiscountXLSX,
   getDailyProductDeliveryCSV,
   getDailyProductReturn,
   getDailyProductReturnXLSX,
@@ -25,6 +27,8 @@ router.get('/', tenantMiddleware, getOutletOpeningClosingBalances);
 
 // Daily product delivery aggregation — stores products with qty by date
 router.get('/daily-product-delivery/xlsx', tenantMiddleware, getDailyProductDeliveryXLSX);
+router.get('/daily-product-delivery/sales-analysis/xlsx', tenantMiddleware, getDailyProductDeliverySalesAnalysisXLSX);
+router.get('/daily-product-delivery/item-wise-discount/xlsx', tenantMiddleware, getDailyProductDeliveryItemWiseDiscountXLSX);
 router.get('/daily-product-delivery/csv', tenantMiddleware, getDailyProductDeliveryCSV);
 router.get('/daily-product-delivery', tenantMiddleware, getDailyProductDelivery);
 router.post('/daily-product-delivery', optionalTenantMiddleware, calculateDailyProductDelivery);
