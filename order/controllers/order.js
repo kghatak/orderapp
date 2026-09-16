@@ -7,6 +7,7 @@ import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovid
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 import { belongsToTenant, validateTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 const ensureOrderTenant = async (db, req, res, orderId) => {
   const orderRef = db.collection('orders').doc(orderId);
@@ -22,19 +23,9 @@ const ensureOrderTenant = async (db, req, res, orderId) => {
 };
 
 // Helper function to generate the next sequential order ID
-const getNextOrderId = async (db) => {
-  const counterRef = db.collection('counters').doc('orders');
-  let newCounter = 1;
-
-  await db.runTransaction(async (transaction) => {
-    const counterDoc = await transaction.get(counterRef);
-    if (counterDoc.exists) {
-      newCounter = (counterDoc.data().count || 0) + 1;
-    }
-    transaction.set(counterRef, { count: newCounter }, { merge: true });
-  });
-
-  return `ORD-${newCounter.toString().padStart(8, '0')}`;
+const getNextOrderId = async (db, tenantId) => {
+  const { globalCount } = await nextTenantCounter(db, 'orders', tenantId);
+  return `ORD-${globalCount.toString().padStart(8, '0')}`;
 };
 
 // HSN/SAC code mapping — keep in sync with iOrder FirestoreService.hsnCodeMapping
@@ -151,7 +142,7 @@ export const createOrder = async (req, res) => {
     }
 
     // Generate a new unique order ID and use it as the document ID (matches mobile app)
-    const parentOrderId = await getNextOrderId(db);
+    const parentOrderId = await getNextOrderId(db, req.tenantId);
     orderData['parent orderId'] = parentOrderId;
     orderData.tenantId = req.tenantId;
     

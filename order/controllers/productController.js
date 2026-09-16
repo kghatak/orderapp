@@ -2,21 +2,12 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { categoryIconMap } from '../../util/iconMapper.js';
 import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Generate Product ID in format PROD-00001 using counters collection
-const generateProductId = async (db) => {
-  const counterRef = db.collection('counters').doc('products');
-  let newCounter = 1;
-
-  await db.runTransaction(async (transaction) => {
-    const counterDoc = await transaction.get(counterRef);
-    if (counterDoc.exists) {
-      newCounter = (counterDoc.data().count || 0) + 1;
-    }
-    transaction.set(counterRef, { count: newCounter }, { merge: true });
-  });
-
-  return `PROD-${newCounter.toString().padStart(5, '0')}`;
+const generateProductId = async (db, tenantId) => {
+  const { globalCount } = await nextTenantCounter(db, 'products', tenantId);
+  return `PROD-${globalCount.toString().padStart(5, '0')}`;
 };
 
 // Create Product
@@ -63,7 +54,7 @@ export const createProduct = async (req, res) => {
     }
 
     const db = getFirestoreDB();
-    const productId = await generateProductId(db);
+    const productId = await generateProductId(db, req.tenantId);
     
     // Use provided icon or get from category mapping
     let finalIcon = icon;
@@ -605,7 +596,7 @@ export const bulkCreateProducts = async (req, res) => {
         }
 
         // Generate product ID
-        const productId = await generateProductId(db);
+        const productId = await generateProductId(db, req.tenantId);
 
         // Use provided icon or get from category mapping
         let icon = productData.icon;

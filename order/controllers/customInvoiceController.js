@@ -1,22 +1,13 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 import admin from 'firebase-admin';
 
 // Generate custom invoice ID
-const generateInvoiceId = async () => {
+const generateInvoiceId = async (tenantId) => {
   const db = getFirestoreDB();
-  const counterRef = db.collection('counters').doc('customInvoiceCounter');
-  
-  const counterDoc = await counterRef.get();
-  let newCounter = 1;
-  
-  if (counterDoc.exists) {
-    const counterData = counterDoc.data();
-    newCounter = (counterData.count || 0) + 1;
-  }
-  
-  await counterRef.set({ count: newCounter }, { merge: true });
-  return `INV-${newCounter.toString().padStart(8, '0')}`;
+  const { globalCount } = await nextTenantCounter(db, 'customInvoiceCounter', tenantId);
+  return `INV-${globalCount.toString().padStart(8, '0')}`;
 };
 
 // Generate invoice number
@@ -188,7 +179,7 @@ export const createCustomInvoice = async (req, res) => {
     const totals = calculateInvoiceTotals(processedItems, discountPercentage || 0);
 
     // Generate invoice ID and number
-    const invoiceId = await generateInvoiceId();
+    const invoiceId = await generateInvoiceId(req.tenantId);
     const invoiceNumber = generateInvoiceNumber();
 
     // Create invoice data

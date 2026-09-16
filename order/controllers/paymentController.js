@@ -8,6 +8,7 @@ import {
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import { belongsToTenant, denyUnlessTenant, recordsForTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 import admin from 'firebase-admin';
 import ExcelJS from 'exceljs';
 
@@ -49,22 +50,9 @@ const flagBackdatedClosingBalance = async (db, outletId, ...dateValues) => {
 };
 
 // Helper to generate sequential payment IDs (PAY0001, PAY0002, ...)
-const generatePaymentId = async (db) => {
-  const counterRef = db.collection('counters').doc('paymentCounter');
-
-  const nextCount = await db.runTransaction(async (transaction) => {
-    const counterDoc = await transaction.get(counterRef);
-    let currentCount = 1;
-
-    if (counterDoc.exists) {
-      currentCount = (counterDoc.data().count || 0) + 1;
-    }
-
-    transaction.set(counterRef, { count: currentCount });
-    return currentCount;
-  });
-
-  return `PAY${nextCount.toString().padStart(4, '0')}`;
+const generatePaymentId = async (db, tenantId) => {
+  const { globalCount } = await nextTenantCounter(db, 'paymentCounter', tenantId);
+  return `PAY${globalCount.toString().padStart(4, '0')}`;
 };
 
 const getCurrentOutletName = (data, fallbackId) =>
@@ -448,20 +436,7 @@ export const approvePaymentRequest = async (req, res) => {
       // Use existing paymentId for this outlet
       paymentId = existingPayment.docs[0].data().paymentId;
     } else {
-      // Generate new paymentId for this outlet
-      const counterRef = db.collection('counters').doc('paymentCounter');
-      const counterDoc = await counterRef.get();
-      
-      let currentCount = 1;
-      if (counterDoc.exists) {
-        currentCount = counterDoc.data().count + 1;
-      }
-      
-      // Generate payment ID in PAY0008 format
-      paymentId = `PAY${currentCount.toString().padStart(4, '0')}`;
-      
-      // Update the counter
-      await counterRef.set({ count: currentCount });
+      paymentId = await generatePaymentId(db, req.tenantId);
     }
     
     // Create approved payment record in payments collection (matching mobile app structure)
@@ -599,7 +574,7 @@ export const recordCashPayment = async (req, res) => {
       outletPaymentData.name ||
       '';
 
-    const paymentId = await generatePaymentId(db);
+    const paymentId = await generatePaymentId(db, req.tenantId);
     const paymentDocRef = db.collection('payments').doc();
 
     let paymentDateTimestamp = null;
@@ -1145,7 +1120,7 @@ const recordPaymentForOutlet = async (db, {
     outletPaymentData.name ||
     '';
 
-  const paymentId = await generatePaymentId(db);
+  const paymentId = await generatePaymentId(db, tenantId);
   const paymentDocRef = db.collection('payments').doc();
 
   let enteredDateTimestamp = null;
@@ -1508,20 +1483,7 @@ export const rejectPaymentRequest = async (req, res) => {
       // Use existing paymentId for this outlet
       paymentId = existingPayment.docs[0].data().paymentId;
     } else {
-      // Generate new paymentId for this outlet
-      const counterRef = db.collection('counters').doc('paymentCounter');
-      const counterDoc = await counterRef.get();
-      
-      let currentCount = 1;
-      if (counterDoc.exists) {
-        currentCount = counterDoc.data().count + 1;
-      }
-      
-      // Generate payment ID in PAY0008 format
-      paymentId = `PAY${currentCount.toString().padStart(4, '0')}`;
-      
-      // Update the counter
-      await counterRef.set({ count: currentCount });
+      paymentId = await generatePaymentId(db, req.tenantId);
     }
     
     // Create rejected payment record in payments collection (matching mobile app structure)
@@ -2068,7 +2030,6 @@ export const getPaymentsTallyXLSX = async (req, res) => {
       });
     }
 
-    const voucherCounterRef = db.collection('counters').doc('paymentreceiptvouchercounter');
     const counterParsed =
       counter !== undefined && counter !== '' ? parseInt(String(counter), 10) : NaN;
     const usePayloadCounter = Number.isFinite(counterParsed) && counterParsed >= 1;
@@ -2077,18 +2038,13 @@ export const getPaymentsTallyXLSX = async (req, res) => {
     if (usePayloadCounter) {
       startVoucherNumber = counterParsed;
     } else {
-      startVoucherNumber = await db.runTransaction(async (transaction) => {
-        const snap = await transaction.get(voucherCounterRef);
-        const last = snap.exists ? Number(snap.data().count) : 0;
-        const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-        const start = safeLast + 1;
-        transaction.set(
-          voucherCounterRef,
-          { count: safeLast + payments.length },
-          { merge: true },
-        );
-        return start;
-      });
+      const reserved = await nextTenantCounter(
+        db,
+        'paymentreceiptvouchercounter',
+        req.tenantId,
+        payments.length,
+      );
+      startVoucherNumber = reserved.start;
     }
 
     const rows = payments.map((p, index) => [

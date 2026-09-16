@@ -1,6 +1,7 @@
 // controllers/outletController.js
 import { getFirestoreDB } from '../../util/firebase.js';
 import { belongsToTenant, denyUnlessTenant, validateTenantId } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 const ensureOutletTenant = async (db, req, res, outletId) => {
   const outletRef = db.collection('outlets').doc(outletId);
@@ -26,26 +27,10 @@ export const formatTimestamp = (timestamp) => {
 };
 
 // Generate custom outlet ID in format OUTID### using atomic counter
-const generateOutletId = async () => {
+const generateOutletId = async (tenantId) => {
     const db = getFirestoreDB();
-    const counterRef = db.collection('counters').doc('outlets');
-    
-    // Use Firestore transaction to ensure atomic increment
-    const outletId = await db.runTransaction(async (transaction) => {
-        const counterDoc = await transaction.get(counterRef);
-        
-        let currentCount = 1;
-        if (counterDoc.exists) {
-            currentCount = counterDoc.data().count + 1;
-        }
-        
-        // Update the counter atomically
-        transaction.set(counterRef, { count: currentCount });
-        
-        return `OUTID${currentCount.toString().padStart(3, '0')}`;
-    });
-    
-    return outletId;
+    const { globalCount } = await nextTenantCounter(db, 'outlets', tenantId);
+    return `OUTID${globalCount.toString().padStart(3, '0')}`;
 };
 
 // Create outlet
@@ -113,7 +98,7 @@ export const createOutlet = async (req, res) => {
       return res.status(400).json({ error: 'Primary phone number already exists. Please use a different phone number.' });
     }
     
-    const outletId = await generateOutletId();
+    const outletId = await generateOutletId(req.tenantId);
 
     const outletData = {
       id: outletId,

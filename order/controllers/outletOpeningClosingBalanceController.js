@@ -9,6 +9,7 @@ import {
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 import admin from 'firebase-admin';
 
 /** Outlet IDs for this tenant, or null when the request has no tenant (cron). */
@@ -786,10 +787,6 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
     0
   );
 
-  const voucherCounterRef = db
-    .collection('counters')
-    .doc(isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter');
-
   const counterParsed =
     counter !== undefined && counter !== '' ? parseInt(String(counter), 10) : NaN;
   const usePayloadCounter = Number.isFinite(counterParsed) && counterParsed >= 1;
@@ -798,14 +795,13 @@ const buildDailyProductVoucherExportRows = async (req, kind) => {
   if (usePayloadCounter) {
     startVoucherNumber = counterParsed;
   } else {
-    startVoucherNumber = await db.runTransaction(async (transaction) => {
-      const snap = await transaction.get(voucherCounterRef);
-      const last = snap.exists ? Number(snap.data().count) : 0;
-      const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-      const start = safeLast + 1;
-      transaction.set(voucherCounterRef, { count: safeLast + totalVoucherGroups }, { merge: true });
-      return start;
-    });
+    const reserved = await nextTenantCounter(
+      db,
+      isDelivery ? 'deliveredvouchercounter' : 'returnvouchercounter',
+      req.tenantId,
+      totalVoucherGroups,
+    );
+    startVoucherNumber = reserved.start;
   }
 
   /** @type {Array<Array<string|number>>} */

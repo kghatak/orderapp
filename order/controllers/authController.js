@@ -4,6 +4,7 @@ import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
 import { canonicalizeTenantId, isAllowedOrderTenantId } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -97,19 +98,9 @@ export const signup = async (req, res) => {
       }
     }
 
-    // Generate User ID
-    const userCounterRef = db.collection('counters').doc('userCounter');
-    const userCounterDoc = await userCounterRef.get();
-
-    let currentCount = 1;
-    if (userCounterDoc.exists) {
-      currentCount = userCounterDoc.data().count + 1;
-    }
-
-    const userId = `UID${currentCount.toString().padStart(4, '0')}`;
-
-    // Update counter
-    await userCounterRef.set({ count: currentCount });
+    const resolvedTenantId = canonicalizeTenantId(tenantId);
+    const { globalCount } = await nextTenantCounter(db, 'userCounter', resolvedTenantId);
+    const userId = `UID${globalCount.toString().padStart(4, '0')}`;
 
     // Create user
     const user = new NannuUser({
@@ -118,7 +109,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: tenantId || '',
+      tenantId: resolvedTenantId || '',
       enableNotification: true,
       fcmToken: fcmToken || ''
     });

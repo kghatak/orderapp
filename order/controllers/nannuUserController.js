@@ -2,6 +2,7 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Create Nannu User
 export const createNannuUser = async (req, res) => {
@@ -30,19 +31,8 @@ export const createNannuUser = async (req, res) => {
       });
     }
     
-    // Generate user ID
-    const userCounterRef = db.collection('counters').doc('userCounter');
-    const userCounterDoc = await userCounterRef.get();
-    
-    let currentCount = 1;
-    if (userCounterDoc.exists) {
-      currentCount = userCounterDoc.data().count + 1;
-    }
-    
-    const userId = `UID${currentCount.toString().padStart(4, '0')}`;
-    
-    // Update counter
-    await userCounterRef.set({ count: currentCount });
+    const { globalCount } = await nextTenantCounter(db, 'userCounter', req.tenantId);
+    const userId = `UID${globalCount.toString().padStart(4, '0')}`;
     
     // Create user
     const user = new NannuUser({
