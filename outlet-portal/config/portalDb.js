@@ -13,8 +13,11 @@ const resolvePortalMongo = (env) => {
     if (testUri) {
       return { uri: testUri, dbName: testDb || 'outlet_portal_test' };
     }
-    // Keep current behaviour until a test URI is set: same Atlas as production.
-    return { uri: prodUri, dbName: prodDb };
+    const milkTestUri = (process.env.MONGODB_TEST_URI || '').trim();
+    if (milkTestUri) {
+      return { uri: milkTestUri, dbName: testDb || 'outlet_portal_test' };
+    }
+    return { uri: '', dbName: testDb || 'outlet_portal_test' };
   }
   return { uri: prodUri, dbName: prodDb };
 };

@@ -18,17 +18,17 @@ const readDashboardTenantId = (req, queryTenantId = '') => {
   return canonicalizeTenantId(fromHeader || queryTenantId || '');
 };
 
-// POS snapshots are still global (cron saves tenantId '' / NM2026). Admin now
-// sends X-Tenant-Id on every call, so look up that tenant first, then legacy docs.
+const isNaanuMilkTenant = (tenantId) => tenantId === TENANTS.NAANU_MILK;
+
+// Only NM2026 may see legacy snapshots saved with empty tenantId.
 const loadSnapshotForTenant = async (businessDate, tenantId) => {
-  if (tenantId) {
-    const snap = await getSnapshotForDate(businessDate, tenantId);
-    if (snap) return snap;
+  if (!tenantId) return null;
+  const snap = await getSnapshotForDate(businessDate, tenantId);
+  if (snap) return snap;
+  if (isNaanuMilkTenant(tenantId)) {
+    return getSnapshotForDate(businessDate, '');
   }
-  return (
-    (await getSnapshotForDate(businessDate, '')) ||
-    (await getSnapshotForDate(businessDate, TENANTS.NAANU_MILK))
-  );
+  return null;
 };
 
 const mergeSnapshotsByDate = (...lists) => {
@@ -44,12 +44,11 @@ const mergeSnapshotsByDate = (...lists) => {
 };
 
 const loadSnapshotsInRangeForTenant = async (startDate, endDate, tenantId) => {
-  const [byTenant, byEmpty, byNaanu] = await Promise.all([
-    tenantId ? getSnapshotsInRange(startDate, endDate, tenantId) : Promise.resolve([]),
-    getSnapshotsInRange(startDate, endDate, ''),
-    getSnapshotsInRange(startDate, endDate, TENANTS.NAANU_MILK),
-  ]);
-  return mergeSnapshotsByDate(byTenant, byEmpty, byNaanu);
+  if (!tenantId) return [];
+  const byTenant = await getSnapshotsInRange(startDate, endDate, tenantId);
+  if (!isNaanuMilkTenant(tenantId)) return byTenant;
+  const byEmpty = await getSnapshotsInRange(startDate, endDate, '');
+  return mergeSnapshotsByDate(byTenant, byEmpty);
 };
 
 const countInclusiveDays = (startDate, endDate) => {
@@ -235,9 +234,9 @@ export const listDashboardSnapshotDates = async (req, res) => {
     );
     const Snapshot = getDashboardDailySnapshotModel();
 
-    const tenantFilter = tenantId
-      ? { tenantId: { $in: [tenantId, '', TENANTS.NAANU_MILK] } }
-      : { tenantId: { $in: ['', TENANTS.NAANU_MILK] } };
+    const tenantFilter = isNaanuMilkTenant(tenantId)
+      ? { tenantId: { $in: [TENANTS.NAANU_MILK, ''] } }
+      : { tenantId };
 
     const rows = await Snapshot.find(tenantFilter)
       .sort({ businessDate: -1 })
