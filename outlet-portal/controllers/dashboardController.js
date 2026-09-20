@@ -8,14 +8,15 @@ import {
   saveDashboardSnapshot,
   snapshotToDashboardResponse,
 } from '../services/dashboardSnapshotService.js';
-import { canonicalizeTenantId, TENANTS } from '../../util/tenantMiddleware.js';
+import { canonicalizeTenantId, resolveRequestTenantId, TENANTS } from '../../util/tenantMiddleware.js';
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 31;
 
 const readDashboardTenantId = (req, queryTenantId = '') => {
+  if (req.tenantId) return canonicalizeTenantId(req.tenantId);
   const fromHeader = req.headers['x-tenant-id'] || req.headers['user-tenantid'] || '';
-  return canonicalizeTenantId(fromHeader || queryTenantId || '');
+  return resolveRequestTenantId(fromHeader || queryTenantId || '');
 };
 
 const isNaanuMilkTenant = (tenantId) => tenantId === TENANTS.NAANU_MILK;
@@ -26,7 +27,10 @@ const loadSnapshotForTenant = async (businessDate, tenantId) => {
   const snap = await getSnapshotForDate(businessDate, tenantId);
   if (snap) return snap;
   if (isNaanuMilkTenant(tenantId)) {
-    return getSnapshotForDate(businessDate, '');
+    return (
+      (await getSnapshotForDate(businessDate, '')) ||
+      getSnapshotForDate(businessDate, 'TENANT001')
+    );
   }
   return null;
 };
@@ -235,7 +239,7 @@ export const listDashboardSnapshotDates = async (req, res) => {
     const Snapshot = getDashboardDailySnapshotModel();
 
     const tenantFilter = isNaanuMilkTenant(tenantId)
-      ? { tenantId: { $in: [TENANTS.NAANU_MILK, ''] } }
+      ? { tenantId: { $in: [TENANTS.NAANU_MILK, 'TENANT001', ''] } }
       : { tenantId };
 
     const rows = await Snapshot.find(tenantFilter)

@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
 import { getPortalConnection } from '../config/portalDb.js';
-import { getOutletProductsModel } from '../models/OutletProducts.js';
+import { getOutletProductsModel, stampProductsMapTenantId } from '../models/OutletProducts.js';
 import { getSaleModel } from '../models/Sale.js';
 import { generateNextSaleId } from '../util/businessIds.js';
 import { buildSalesListFilter } from '../util/salesListFilter.js';
 import { roundQty } from '../../util/quantities.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
@@ -128,7 +129,7 @@ const soldQtyByProductId = (normalizedItems) => {
  * Subtracts sold quantities from MongoDB `Products` for this outlet (keys must exist).
  * Each quantity floors at 0. Runs inside optional Mongoose session (transaction).
  */
-const decrementOutletProductsForSale = async (outletId, normalizedItems, session) => {
+const decrementOutletProductsForSale = async (outletId, normalizedItems, session, tenantId) => {
   const totals = soldQtyByProductId(normalizedItems);
   if (totals.size === 0) return;
 
@@ -155,7 +156,10 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
     touched = true;
   }
 
-  if (touched) {
+  const tenant = typeof tenantId === 'string' ? tenantId.trim() : '';
+  const linesStamped = stampProductsMapTenantId(doc.products, tenant);
+
+  if (touched || linesStamped) {
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save(session ? { session } : {});
@@ -165,7 +169,7 @@ const decrementOutletProductsForSale = async (outletId, normalizedItems, session
 /**
  * Adds quantities back to MongoDB `Products` for this outlet (reverses a sale decrement).
  */
-const incrementOutletProductsForSale = async (outletId, normalizedItems, session) => {
+const incrementOutletProductsForSale = async (outletId, normalizedItems, session, tenantId) => {
   const totals = soldQtyByProductId(normalizedItems);
   if (totals.size === 0) return;
 
@@ -192,7 +196,10 @@ const incrementOutletProductsForSale = async (outletId, normalizedItems, session
     touched = true;
   }
 
-  if (touched) {
+  const tenant = typeof tenantId === 'string' ? tenantId.trim() : '';
+  const linesStamped = stampProductsMapTenantId(doc.products, tenant);
+
+  if (touched || linesStamped) {
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save(session ? { session } : {});
@@ -514,7 +521,7 @@ export const getSaleById = async (req, res) => {
     const auth = req.portalAuth;
     const Sale = getSaleModel();
 
-    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const scope = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
     let sale = null;
 
     if (mongoose.isValidObjectId(id)) {
@@ -591,7 +598,7 @@ export const createSale = async (req, res) => {
       session.startTransaction();
       const created = await Sale.create([salePayload], { session });
       sale = created[0];
-      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session);
+      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session, auth.tenantId);
       await session.commitTransaction();
     } catch (txErr) {
       await session.abortTransaction().catch(() => {});
@@ -601,7 +608,7 @@ export const createSale = async (req, res) => {
       if (isTransactionUnsupportedError(txErr)) {
         try {
           sale = await Sale.create(salePayload);
-          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null, auth.tenantId);
         } catch (fallbackErr) {
           console.error('Create sale (no transaction) error:', fallbackErr);
           if (fallbackErr?.name === 'ValidationError') {
@@ -657,7 +664,7 @@ export const updateSale = async (req, res) => {
     const { id } = req.params;
     const auth = req.portalAuth;
     const Sale = getSaleModel();
-    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const scope = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
 
     let saleDoc = null;
     if (mongoose.isValidObjectId(id)) {
@@ -819,9 +826,9 @@ export const updateSale = async (req, res) => {
     const session = await conn.startSession();
     try {
       session.startTransaction();
-      await incrementOutletProductsForSale(auth.outletId, oldItems, session);
+      await incrementOutletProductsForSale(auth.outletId, oldItems, session, auth.tenantId);
       await Sale.updateOne({ _id: saleDoc._id }, mongoUpdate, { session });
-      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session);
+      await decrementOutletProductsForSale(auth.outletId, normalizedItems, session, auth.tenantId);
       await session.commitTransaction();
     } catch (txErr) {
       await session.abortTransaction().catch(() => {});
@@ -830,9 +837,9 @@ export const updateSale = async (req, res) => {
       }
       if (isTransactionUnsupportedError(txErr)) {
         try {
-          await incrementOutletProductsForSale(auth.outletId, oldItems, null);
+          await incrementOutletProductsForSale(auth.outletId, oldItems, null, auth.tenantId);
           await Sale.updateOne({ _id: saleDoc._id }, mongoUpdate);
-          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null);
+          await decrementOutletProductsForSale(auth.outletId, normalizedItems, null, auth.tenantId);
         } catch (fallbackErr) {
           console.error('Update sale (no transaction) error:', fallbackErr);
           if (fallbackErr?.name === 'ValidationError') {

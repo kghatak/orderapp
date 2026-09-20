@@ -2,21 +2,23 @@ import { MilkPayment } from '../models/MilkPayment.js';
 import { Procurement } from '../models/Procurement.js';
 import { Supplier } from '../models/Supplier.js';
 import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 export const listPayments = async (req, res) => {
   try {
     const { tenantId, user } = req;
     const { page = 1, limit = 50, supplierId, fromDate, toDate } = req.query;
 
-    const filter = { tenantId };
+    const extra = {};
     if (user.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id });
+      const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId));
       if (!supplier) return res.status(404).json({ success: false, message: 'Supplier profile not found' });
-      filter.supplierId = supplier._id;
-    } else if (supplierId) filter.supplierId = supplierId;
+      extra.supplierId = supplier._id;
+    } else if (supplierId) extra.supplierId = supplierId;
 
-    if (fromDate) filter.paymentDate = { ...filter.paymentDate, $gte: new Date(fromDate) };
-    if (toDate) filter.paymentDate = { ...filter.paymentDate, $lte: new Date(toDate) };
+    if (fromDate) extra.paymentDate = { ...extra.paymentDate, $gte: new Date(fromDate) };
+    if (toDate) extra.paymentDate = { ...extra.paymentDate, $lte: new Date(toDate) };
+    const filter = withMongoTenant(extra, tenantId);
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [payments, total] = await Promise.all([
@@ -45,7 +47,7 @@ export const getPayment = async (req, res) => {
     const { tenantId, user } = req;
     const { id } = req.params;
 
-    const payment = await MilkPayment.findOne({ _id: id, tenantId })
+    const payment = await MilkPayment.findOne(withMongoTenant({ _id: id }, tenantId))
       .populate('supplierId', 'supplierCode name phone village')
       .populate('procurementIds')
       .lean();
@@ -55,7 +57,7 @@ export const getPayment = async (req, res) => {
     }
 
     if (user.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id });
+      const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId));
       if (!supplier || payment.supplierId._id.toString() !== supplier._id.toString()) {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
@@ -80,7 +82,7 @@ export const createPayment = async (req, res) => {
       });
     }
 
-    const supplier = await Supplier.findOne({ _id: supplierId, tenantId });
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: supplierId }, tenantId));
     if (!supplier) {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
@@ -100,7 +102,7 @@ export const createPayment = async (req, res) => {
 
     if (procurementIds && procurementIds.length > 0) {
       await Procurement.updateMany(
-        { _id: { $in: procurementIds }, tenantId },
+        withMongoTenant({ _id: { $in: procurementIds } }, tenantId),
         { $set: { paymentStatus: 'paid', paymentId: payment._id, updatedAt: new Date() } }
       );
     }
@@ -132,8 +134,8 @@ export const paymentBalances = async (req, res) => {
     const { tenantId } = req;
     const { fromDate, toDate } = req.query;
 
-    const procMatch = { tenantId };
-    const payMatch = { tenantId };
+    const procMatch = withMongoTenant({}, tenantId);
+    const payMatch = withMongoTenant({}, tenantId);
     if (fromDate) {
       procMatch.date = { ...procMatch.date, $gte: new Date(fromDate) };
       payMatch.paymentDate = { ...payMatch.paymentDate, $gte: new Date(fromDate) };
@@ -161,7 +163,7 @@ export const paymentBalances = async (req, res) => {
           paymentCount: { $sum: 1 }
         }}
       ]),
-      Supplier.find({ tenantId, isActive: true })
+      Supplier.find(withMongoTenant({ isActive: true }, tenantId))
         .select('supplierCode name phone village ratePerFat')
         .sort({ name: 1 })
         .lean()

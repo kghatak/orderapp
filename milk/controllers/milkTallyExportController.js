@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { Procurement } from '../models/Procurement.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const MAX_XLSX_RANGE_DAYS = 10;
 const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;

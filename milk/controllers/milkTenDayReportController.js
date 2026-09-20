@@ -7,6 +7,7 @@ import { Supplier } from '../models/Supplier.js';
 import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 import { buildTenDayReportData, inclusiveDayCount } from '../util/tenDayReportData.js';
 import { generateTenDayReportPdf } from '../util/tenDayReportPdf.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = path.resolve(__dirname, '../../uploads/milk-reports');
@@ -73,7 +74,7 @@ export const sendTenDayReport = async (req, res) => {
       return res.status(400).json({ success: false, message: range.error });
     }
 
-    const supplier = await Supplier.findOne({ _id: supplierId, tenantId });
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: supplierId }, tenantId));
     if (!supplier) {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
@@ -81,11 +82,15 @@ export const sendTenDayReport = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Supplier has no phone number' });
     }
 
-    const procurements = await Procurement.find({
-      tenantId,
-      supplierId,
-      date: { $gte: range.start, $lte: range.end }
-    })
+    const procurements = await Procurement.find(
+      withMongoTenant(
+        {
+          supplierId,
+          date: { $gte: range.start, $lte: range.end },
+        },
+        tenantId,
+      ),
+    )
       .sort({ date: 1, shift: 1 })
       .lean();
 

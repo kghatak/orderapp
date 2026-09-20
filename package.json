@@ -9,7 +9,7 @@
     "dev": "cross-env FIREBASE_ENV=test nodemon index.js",
     "start:test": "cross-env FIREBASE_ENV=test nodemon index.js",
     "build": "echo 'No build step required'",
-    "test": "node --test outlet-portal/util/salesListFilter.test.js"
+    "test": "node --test outlet-portal/util/salesListFilter.test.js util/tenantMiddleware.test.js"
   },
   "keywords": [],
   "author": "",

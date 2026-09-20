@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
 import { getWastageModel } from '../models/Wastage.js';
-import { getOutletProductsModel } from '../models/OutletProducts.js';
+import { getOutletProductsModel, stampProductsMapTenantId } from '../models/OutletProducts.js';
 import { roundQty } from '../../util/quantities.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const CUSTOMER_REPLACEMENT_REASON = 'customer_replacement';
@@ -23,7 +24,9 @@ const findWastage = async (id, auth) => {
     return { err: { status: 400, message: 'Valid wastage id is required' } };
   }
   const Wastage = getWastageModel();
-  const doc = await Wastage.findOne({ _id: id, tenantId: auth.tenantId, outletId: auth.outletId });
+  const doc = await Wastage.findOne(
+    withMongoTenant({ _id: id, outletId: auth.outletId }, auth.tenantId),
+  );
   if (!doc) return { err: { status: 404, message: 'Wastage record not found' } };
   return { doc };
 };
@@ -50,7 +53,7 @@ export const listWastages = async (req, res) => {
     const end = parseYmd(req.query.endDate, 'endDate');
     if (end?.error) return res.status(400).json({ success: false, message: end.error });
 
-    const filter = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const filter = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
     if (start || end) {
       if (start && end && start > end) {
         return res.status(400).json({ success: false, message: 'startDate must be on or before endDate' });
@@ -319,9 +322,10 @@ export const acceptWastage = async (req, res) => {
 
     const productsDoc = await getOutletProductsModel().findOne({ outletId: doc.outletId });
     const entry = productsDoc?.products?.[doc.productId];
-    if (entry && typeof entry === 'object') {
+      if (entry && typeof entry === 'object') {
       const current = roundQty(entry.quantity, 0);
       entry.quantity = roundQty(Math.max(0, current - roundQty(doc.quantity, 0)));
+      stampProductsMapTenantId(productsDoc.products, doc.tenantId);
       productsDoc.markModified('products');
       productsDoc.updatedAt = new Date();
       await productsDoc.save();

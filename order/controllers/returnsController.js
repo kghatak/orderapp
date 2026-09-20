@@ -197,7 +197,8 @@ export const updateReturn = async (req, res) => {
       try {
         await subtractCollectedReturnItemsFromOutletProducts(
           prevData.outletId,
-          prevData.items || []
+          prevData.items || [],
+          prevData.tenantId,
         );
         await db.collection('returns').doc(returnId).update({
           mongoCollectionSyncAt: admin.firestore.FieldValue.serverTimestamp(),

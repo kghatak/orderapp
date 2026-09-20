@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { getExpenseModel } from '../models/Expense.js';
 import { generateExpenseId } from '../util/businessIds.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 const roundMoney = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -96,7 +97,7 @@ export const listExpenses = async (req, res) => {
 
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 100);
       const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
-      const match = { tenantId: scope.auth.tenantId, outletId: scope.outletId };
+      const match = withMongoTenant({ outletId: scope.outletId }, scope.auth.tenantId);
 
       const [result] = await Expense.aggregate([
         { $match: match },
@@ -151,11 +152,12 @@ export const listExpenses = async (req, res) => {
       }
 
       const { start, end } = dayRangeUtc(parsedDate);
-      const rows = await Expense.find({
-        tenantId: scope.auth.tenantId,
-        outletId: scope.outletId,
-        date: { $gte: start, $lte: end }
-      })
+      const rows = await Expense.find(
+        withMongoTenant(
+          { outletId: scope.outletId, date: { $gte: start, $lte: end } },
+          scope.auth.tenantId,
+        ),
+      )
         .sort({ createdAt: -1 })
         .lean();
 
@@ -167,7 +169,7 @@ export const listExpenses = async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 100);
     const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
-    const filter = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const filter = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
 
     const [rows, total] = await Promise.all([
       Expense.find(filter).sort({ date: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -193,7 +195,7 @@ export const getExpenseById = async (req, res) => {
     const { id } = req.params;
     const auth = req.portalAuth;
     const Expense = getExpenseModel();
-    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const scope = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
 
     const doc = await findExpenseDoc(Expense, id, scope);
     const row = doc ? doc.toObject() : null;
@@ -334,7 +336,7 @@ export const updateExpense = async (req, res) => {
     }
 
     const Expense = getExpenseModel();
-    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const scope = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
     const doc = await findExpenseDoc(Expense, id, scope);
 
     if (!doc) {
@@ -418,7 +420,7 @@ export const deleteExpense = async (req, res) => {
     const { id } = req.params;
     const auth = req.portalAuth;
     const Expense = getExpenseModel();
-    const scope = { tenantId: auth.tenantId, outletId: auth.outletId };
+    const scope = withMongoTenant({ outletId: auth.outletId }, auth.tenantId);
 
     const doc = await findExpenseDoc(Expense, id, scope);
     if (!doc) {

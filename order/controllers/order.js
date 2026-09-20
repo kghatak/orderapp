@@ -440,7 +440,11 @@ export const patchOrder = async (req, res) => {
 
     if (newStatus === 'delivered' && currentStatus !== 'delivered') {
       try {
-        await addDeliveredOrderItemsToOutletProducts(orderDataBefore.outletId, orderDataBefore.items || []);
+        await addDeliveredOrderItemsToOutletProducts(
+          orderDataBefore.outletId,
+          orderDataBefore.items || [],
+          orderDataBefore.tenantId,
+        );
         await orderRef.update({
           mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
           mongoDeliverySyncStatus: 'synced'
@@ -1228,7 +1232,8 @@ export const deliverOrder = async (req, res) => {
     try {
       await addDeliveredOrderItemsToOutletProducts(
         deliveredOrderData?.outletId,
-        deliveredOrderData?.items || []
+        deliveredOrderData?.items || [],
+        deliveredOrderData?.tenantId,
       );
       await orderRef.update({
         mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1339,7 +1344,11 @@ export const autoDeliverOpenOrders = async (req, res) => {
         chunk.map(async (doc) => {
           const data = doc.data() || {};
           try {
-            await addDeliveredOrderItemsToOutletProducts(data.outletId, data.items || []);
+            await addDeliveredOrderItemsToOutletProducts(
+              data.outletId,
+              data.items || [],
+              data.tenantId,
+            );
             await doc.ref.update({
               mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
               mongoDeliverySyncStatus: 'synced',

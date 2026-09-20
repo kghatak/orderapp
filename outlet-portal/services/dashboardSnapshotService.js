@@ -50,7 +50,7 @@ const buildMatch = (start, end, tenantId) => {
   };
   if (!tenantId) return match;
   if (tenantId === TENANTS.NAANU_MILK) {
-    match.tenantId = { $in: [TENANTS.NAANU_MILK, ''] };
+    match.tenantId = { $in: [TENANTS.NAANU_MILK, 'TENANT001', ''] };
   } else {
     match.tenantId = tenantId;
   }
