@@ -5,6 +5,7 @@ import {
   recalculateOutletClosingBalancesRange,
   markOutletClosingBalanceRecalcDone,
   processPendingClosingBalanceRecalcs,
+  fetchApprovedTransfersForDay,
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
@@ -1284,6 +1285,12 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             dayEndTimestamp
           );
 
+          const { net: closingBalanceTransfer } = await fetchApprovedTransfersForDay(
+            db,
+            outlet.id,
+            targetDateStr,
+          );
+
           // Query collected returns for this outlet on the triggered date (collectedDate, like orders' deliveredDate)
           const returnsSnapshot = await db.collection('returns')
             .where('outletId', '==', outlet.id)
@@ -1306,7 +1313,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
           // Anchor day uses configured opening balance; other days use running formula
           const totalClosingBalance = isOpeningBalanceAnchorDay
             ? outlet.openingBalance
-            : previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment;
+            : previousDayClosingBalance + closingBalanceOrder - closingBanlanceReturn - closingBalancePayment + closingBalanceTransfer;
 
           // Step 3 & 4 — Upsert balance record (timestamp = end of IST business day for GET ?date=)
           const balancePayload = {
@@ -1317,6 +1324,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
             closingBalanceOrder,
             closingBalancePayment,
             closingBanlanceReturn,
+            closingBalanceTransfer,
             totalClosingBalance,
             completedAt: admin.firestore.FieldValue.serverTimestamp(),
           };

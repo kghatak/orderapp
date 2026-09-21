@@ -3,6 +3,10 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { OutletPayment, PaymentRequest, Payment } from '../models/Payment.js';
 import {
+  getOutletOutstanding,
+  listTransfersForOutlet,
+} from './outletPaymentTransferController.js';
+import {
   markOutletClosingBalanceRecalcPending,
   toIstDateKeyFromValue,
 } from '../services/closingBalanceRecalc.js';
@@ -316,61 +320,75 @@ export const getPendingRequestsByOutlet = async (req, res) => {
       }
     }
     
-    // Calculate totals for each status
-    const approvedRequests = allRequests.filter(req => req.status === 'approved');
-    const rejectedRequests = allRequests.filter(req => req.status === 'rejected');
-    const finalPendingRequests = allRequests.filter(req => req.status === 'pending');
-    
-    const pendingAmount = finalPendingRequests.reduce((sum, req) => sum + req.amount, 0);
-    const approvedAmount = approvedRequests.reduce((sum, req) => sum + req.amount, 0);
-    const rejectedAmount = rejectedRequests.reduce((sum, req) => sum + req.amount, 0);
-    const totalAmount = allRequests.reduce((sum, req) => sum + req.amount, 0);
-    
-    // Get outlet payment summary from outlet_payments collection
-    const outletPaymentDoc = await db.collection('outlet_payments').doc(outletId).get();
-    let outletSummary = {
-      paidAmount: 0,
-      pendingAmount: 0,
-      totalAmount: 0
-    };
-    
-    if (outletPaymentDoc.exists) {
-      const outletPaymentData = outletPaymentDoc.data();
-      const outletTotalAmount = outletPaymentData.totalAmount || 0;
-      const outletPaidAmount = outletPaymentData.paidAmount || 0;
-      // Recalculate pendingAmount to ensure accuracy: pendingAmount = totalAmount - paidAmount
-      const outletPendingAmount = Math.max(0, outletTotalAmount - outletPaidAmount);
-      
-      outletSummary = {
-        paidAmount: outletPaidAmount,
-        pendingAmount: outletPendingAmount,
-        totalAmount: outletTotalAmount
-      };
-    }
-    
-    res.status(200).json({
+    const [outletPaymentDoc, outletDoc] = await Promise.all([
+      db.collection('outlet_payments').doc(outletId).get(),
+      db.collection('outlets').doc(outletId).get(),
+    ]);
+    const outletData = outletDoc.exists ? outletDoc.data() : null;
+    const outletName =
+      outletData?.name ||
+      outletData?.outletName ||
+      allRequests[0]?.outletName ||
+      outletId;
+    const includeTransfers = ['1', 'true', 'yes'].includes(
+      String(req.query.includeTransfers || '').toLowerCase(),
+    );
+    const pendingAmount = await getOutletOutstanding(
+      db,
+      outletId,
+      outletPaymentDoc.exists ? outletPaymentDoc.data() : null,
+      outletData,
+    );
+    const outletSummary = { pendingAmount };
+
+    const payload = {
       outletId: outletId,
+      outletName,
       requests: allRequests,
-      summary: {
-        total: {
-          count: allRequests.length,
-          amount: totalAmount
-        },
-        pending: {
-          count: finalPendingRequests.length,
-          amount: pendingAmount
-        },
-        approved: {
-          count: approvedRequests.length,
-          amount: approvedAmount
-        },
-        rejected: {
-          count: rejectedRequests.length,
-          amount: rejectedAmount
-        }
-      },
-      outletSummary: outletSummary
-    });
+      outletSummary: outletSummary,
+    };
+
+    if (includeTransfers) {
+      const extraLoads = [
+        listTransfersForOutlet(db, outletId).catch((transferError) => {
+          console.error('Fetch transfers for pending outlet failed:', transferError);
+          return null;
+        }),
+      ];
+      if (pendingAmount < 0) {
+        extraLoads.push(
+          db
+            .collection('outlets')
+            .get()
+            .then((snap) =>
+              snap.docs
+                .map((doc) => {
+                  const data = doc.data() || {};
+                  return {
+                    id: doc.id,
+                    name: data.name || data.outletName || doc.id,
+                  };
+                })
+                .filter((outlet) => outlet.id)
+                .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
+            )
+            .catch((outletError) => {
+              console.error('Fetch destination outlets for transfer failed:', outletError);
+              return null;
+            }),
+        );
+      }
+
+      const [transfers, destinationOutlets] = await Promise.all(extraLoads);
+      if (Array.isArray(transfers)) {
+        payload.transfers = transfers;
+      }
+      if (Array.isArray(destinationOutlets)) {
+        payload.destinationOutlets = destinationOutlets;
+      }
+    }
+
+    res.status(200).json(payload);
   } catch (err) {
     console.error('Fetch payment requests by outlet error:', err);
     res.status(500).json({ error: 'Failed to fetch payment requests for outlet' });
@@ -1543,19 +1561,18 @@ export const getOutletPaymentSummary = async (req, res) => {
     }
     
     const outletPaymentData = outletPaymentDoc.data();
+    const outletDoc = await db.collection('outlets').doc(outletId).get();
+    const pendingAmount = await getOutletOutstanding(
+      db,
+      outletId,
+      outletPaymentData,
+      outletDoc.exists ? outletDoc.data() : null,
+    );
     
-    // Recalculate pendingAmount to ensure accuracy: pendingAmount = totalAmount - paidAmount
-    const totalAmount = outletPaymentData.totalAmount || 0;
-    const paidAmount = outletPaymentData.paidAmount || 0;
-    const pendingAmount = Math.max(0, totalAmount - paidAmount);
-    
-    // Return only the essential payment amounts
     res.status(200).json({
       outletId: outletId,
       outletName: outletPaymentData.outletName,
-      paidAmount: paidAmount,
       pendingAmount: pendingAmount,
-      totalAmount: totalAmount
     });
   } catch (err) {
     console.error('Fetch outlet payment summary error:', err);
@@ -1588,42 +1605,48 @@ export const getOutletsWithPendingPayments = async (req, res) => {
     const db = getFirestoreDB();
     
     // Get all outlets with pending payments from outlet_payments collection
-    const snapshot = await db.collection('outlet_payments')
-      .where('pendingAmount', '>', 0)
-      .get();
+    const snapshot = await db.collection('outlet_payments').get();
     
     const outletIds = snapshot.docs.map((doc) => doc.id);
     const outletNames = await resolveCurrentOutletNames(db, outletIds);
+    const outletDocs = await Promise.all(
+      outletIds.map((id) => db.collection('outlets').doc(id).get()),
+    );
+    const outletDataById = {};
+    outletDocs.forEach((doc) => {
+      if (doc.exists) outletDataById[doc.id] = doc.data();
+    });
 
-    const outletsWithPendingPayments = snapshot.docs.map(doc => {
+    const outstandingAmounts = await Promise.all(
+      snapshot.docs.map((doc) =>
+        getOutletOutstanding(
+          db,
+          doc.id,
+          doc.data(),
+          outletDataById[doc.id] || null,
+        ),
+      ),
+    );
+
+    const outletsWithPendingPayments = snapshot.docs.flatMap((doc, index) => {
+      const pendingAmount = outstandingAmounts[index];
+      if (pendingAmount === 0) return [];
       const data = doc.data();
-      return {
+      return [{
         outletId: doc.id,
         outletName: outletNames[doc.id] || data.outletName,
-        pendingAmount: data.pendingAmount || 0,
-        paidAmount: data.paidAmount || 0,
-        totalAmount: data.totalAmount || 0,
+        pendingAmount,
         paymentStatus: data.paymentStatus || 'pending',
         requestStatus: data.requestStatus || 'pending',
         paymentId: data.paymentId || '',
         lastUpdated: data.lastUpdated,
         lastRequestAt: data.lastRequestAt,
         lastRequestAmount: data.lastRequestAmount || 0
-      };
+      }];
     });
-    
-    // Calculate summary
-    const totalOutlets = outletsWithPendingPayments.length;
-    const totalPendingAmount = outletsWithPendingPayments.reduce((sum, outlet) => sum + outlet.pendingAmount, 0);
-    const totalPaidAmount = outletsWithPendingPayments.reduce((sum, outlet) => sum + outlet.paidAmount, 0);
     
     res.status(200).json({
       outlets: outletsWithPendingPayments,
-      summary: {
-        totalOutlets: totalOutlets,
-        totalPendingAmount: totalPendingAmount,
-        totalPaidAmount: totalPaidAmount
-      }
     });
   } catch (err) {
     console.error('Fetch outlets with pending payments error:', err);
