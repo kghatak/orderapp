@@ -60,7 +60,7 @@ export const createReturn = async (req, res) => {
 export const getAllReturns = async (req, res) => {
   try {
     const db = getFirestoreDB();
-    const { _start = 0, _end = 10, _sort = 'createdAt', _order = 'desc' } = req.query;
+    const { _start = 0, _end = 10, _sort = 'createdAt', _order = 'desc', outletId } = req.query;
 
     // Parse pagination parameters
     const start = parseInt(_start, 10);
@@ -81,6 +81,9 @@ export const getAllReturns = async (req, res) => {
 
     // Filter out archived returns
     returns = returns.filter(returnOrder => !returnOrder.archived);
+    if (outletId) {
+      returns = returns.filter((returnOrder) => returnOrder.outletId === outletId);
+    }
 
     // Sort in memory
     returns.sort((a, b) => {

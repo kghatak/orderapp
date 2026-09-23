@@ -92,6 +92,43 @@ async function fetchApprovedPaymentsForDay(db, outletId, dayStartTimestamp, dayE
   return { total, paymentsList };
 }
 
+export const loadApprovedTransferNetByDate = async (db, outletId) => {
+  const byDate = new Map();
+  const add = (dateKey, delta, item) => {
+    if (!dateKey) return;
+    const current = byDate.get(dateKey) || { net: 0, list: [] };
+    current.net += delta;
+    current.list.push(item);
+    byDate.set(dateKey, current);
+  };
+
+  const [fromSnap, toSnap] = await Promise.all([
+    db.collection('outlet_payment_transfers').where('fromOutletId', '==', outletId).get(),
+    db.collection('outlet_payment_transfers').where('toOutletId', '==', outletId).get(),
+  ]);
+
+  fromSnap.forEach((doc) => {
+    const data = doc.data() || {};
+    if (String(data.status || 'approved').toLowerCase() !== 'approved') return;
+    const amount = parseFloat(data.amount || 0);
+    add(data.transferDateKey, amount, { id: doc.id, direction: 'out', amount });
+  });
+
+  toSnap.forEach((doc) => {
+    const data = doc.data() || {};
+    if (String(data.status || 'approved').toLowerCase() !== 'approved') return;
+    const amount = parseFloat(data.amount || 0);
+    add(data.transferDateKey, -amount, { id: doc.id, direction: 'in', amount });
+  });
+
+  return byDate;
+};
+
+export const fetchApprovedTransfersForDay = async (db, outletId, dateStr) => {
+  const byDate = await loadApprovedTransferNetByDate(db, outletId);
+  return byDate.get(dateStr) || { net: 0, list: [] };
+};
+
 export const toIstDateKeyFromValue = (value) => {
   if (value == null) return null;
   const date = value.toDate ? value.toDate() : new Date(value);
@@ -290,6 +327,8 @@ export const recalculateOutletClosingBalancesRange = async (
       : parseFloat(prevBalanceSnapshot.docs[0].data().totalClosingBalance || 0);
   }
 
+  const transferByDate = await loadApprovedTransferNetByDate(db, outletId);
+
   const results = [];
   let dateStr = startDate;
 
@@ -367,11 +406,13 @@ export const recalculateOutletClosingBalancesRange = async (
         dayEndTimestamp,
       );
 
+    const closingBalanceTransfer = transferByDate.get(dateStr)?.net || 0;
     const totalClosingBalance =
       currentOpeningBalance +
       closingBalanceOrder -
       closingBanlanceReturn -
-      closingBalancePayment;
+      closingBalancePayment +
+      closingBalanceTransfer;
 
     const timestamp = dayEndTimestamp;
     const completedAt = admin.firestore.Timestamp.now();
@@ -382,6 +423,7 @@ export const recalculateOutletClosingBalancesRange = async (
         closingBalanceOrder,
         closingBalancePayment,
         closingBanlanceReturn,
+        closingBalanceTransfer,
         totalClosingBalance,
         completedAt,
         status: 'success',
@@ -394,6 +436,7 @@ export const recalculateOutletClosingBalancesRange = async (
         closingBalanceOrder,
         closingBanlanceReturn,
         closingBalancePayment,
+        closingBalanceTransfer,
         totalClosingBalance,
         outletId,
         orders: ordersList,
@@ -408,6 +451,7 @@ export const recalculateOutletClosingBalancesRange = async (
         closingBalanceOrder,
         closingBalancePayment,
         closingBanlanceReturn,
+        closingBalanceTransfer,
         totalClosingBalance,
         timestamp,
         completedAt,
@@ -421,6 +465,7 @@ export const recalculateOutletClosingBalancesRange = async (
         closingBalanceOrder,
         closingBanlanceReturn,
         closingBalancePayment,
+        closingBalanceTransfer,
         totalClosingBalance,
         outletId,
         orders: ordersList,
