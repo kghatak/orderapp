@@ -1,7 +1,8 @@
 import { getFirestoreDB } from './firebase.js';
 import { isOutletPortalMongoConnected } from '../outlet-portal/config/portalDb.js';
-import { getOutletProductsModel } from '../outlet-portal/models/OutletProducts.js';
+import { getOutletProductsModel, stampProductsMapTenantId } from '../outlet-portal/models/OutletProducts.js';
 import { roundQty } from './quantities.js';
+import { canonicalizeTenantId } from './tenantMiddleware.js';
 
 const toFiniteNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -55,13 +56,21 @@ const buildQuantityUpdatesFromItems = (items, catalogByDocId, sign = 1) => {
   return updates;
 };
 
-const syncOutletProductQuantityDeltas = async (outletId, quantityUpdates) => {
+const resolveOutletTenantId = async (outletId, hint) => {
+  const fromHint = canonicalizeTenantId(hint || '');
+  if (fromHint) return fromHint;
+  const snap = await getFirestoreDB().collection('outlets').doc(outletId).get();
+  return canonicalizeTenantId(snap.exists ? snap.data()?.tenantId : '');
+};
+
+const syncOutletProductQuantityDeltas = async (outletId, quantityUpdates, tenantHint) => {
   if (!quantityUpdates || quantityUpdates.size === 0) {
     return;
   }
 
   const OutletProducts = getOutletProductsModel();
   const doc = await OutletProducts.findOne({ outletId });
+  const tenantId = await resolveOutletTenantId(outletId, tenantHint || doc?.tenantId);
   const productsMap =
     doc?.products && typeof doc.products === 'object' && !Array.isArray(doc.products)
       ? doc.products
@@ -90,9 +99,12 @@ const syncOutletProductQuantityDeltas = async (outletId, quantityUpdates) => {
       category: String(category),
       unit: String(unit),
       price,
-      quantity: roundQty(Math.max(0, currentQuantity + quantityDelta))
+      quantity: roundQty(Math.max(0, currentQuantity + quantityDelta)),
+      ...(tenantId ? { tenantId } : {})
     };
   }
+
+  stampProductsMapTenantId(productsMap, tenantId);
 
   const updatedAt = new Date();
   const productCount = Object.keys(productsMap).length;
@@ -112,9 +124,12 @@ const syncOutletProductQuantityDeltas = async (outletId, quantityUpdates) => {
   doc.updatedAt = updatedAt;
   doc.markModified('products');
   await doc.save();
+  if (doc.tenantId) {
+    await OutletProducts.updateOne({ _id: doc._id }, { $unset: { tenantId: 1 } });
+  }
 };
 
-const applyOutletProductQuantityChange = async (outletId, items, sign) => {
+const applyOutletProductQuantityChange = async (outletId, items, sign, tenantId) => {
   const safeOutletId = typeof outletId === 'string' ? outletId.trim() : '';
   if (!safeOutletId || !Array.isArray(items) || items.length === 0) {
     return;
@@ -133,11 +148,11 @@ const applyOutletProductQuantityChange = async (outletId, items, sign) => {
     return;
   }
 
-  await syncOutletProductQuantityDeltas(safeOutletId, quantityUpdates);
+  await syncOutletProductQuantityDeltas(safeOutletId, quantityUpdates, tenantId);
 };
 
-export const addDeliveredOrderItemsToOutletProducts = async (outletId, items) =>
-  applyOutletProductQuantityChange(outletId, items, 1);
+export const addDeliveredOrderItemsToOutletProducts = async (outletId, items, tenantId) =>
+  applyOutletProductQuantityChange(outletId, items, 1, tenantId);
 
-export const subtractCollectedReturnItemsFromOutletProducts = async (outletId, items) =>
-  applyOutletProductQuantityChange(outletId, items, -1);
+export const subtractCollectedReturnItemsFromOutletProducts = async (outletId, items, tenantId) =>
+  applyOutletProductQuantityChange(outletId, items, -1, tenantId);

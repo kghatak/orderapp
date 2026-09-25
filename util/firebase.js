@@ -1,18 +1,53 @@
 import admin from 'firebase-admin';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.join(__dirname, '..');
 
 let db = null;
+let firebaseEnv = null;
+
+const resolveFirebaseEnv = () => {
+    const explicit = (process.env.FIREBASE_ENV || '').trim().toLowerCase();
+    if (explicit === 'test' || explicit === 'production') {
+        return explicit;
+    }
+    const nodeEnv = (process.env.NODE_ENV || '').trim().toLowerCase();
+    if (nodeEnv === 'development' || nodeEnv === 'testing' || nodeEnv === 'test') {
+        return 'test';
+    }
+    return 'production';
+};
+
+const resolveServiceAccountPath = (env) => {
+    const relativePath = env === 'test'
+        ? (process.env.FIREBASE_TEST_SERVICE_ACCOUNT_PATH || 'serviceAccountKey.test.json')
+        : (process.env.FIREBASE_SERVICE_ACCOUNT_PATH || 'serviceAccountKey.json');
+    return path.isAbsolute(relativePath) ? relativePath : path.join(projectRoot, relativePath);
+};
 
 export const initializeFirestore = async () => {
-    const serviceAccount = JSON.parse(fs.readFileSync(new URL('../serviceAccountKey.json', import.meta.url)));
+    firebaseEnv = resolveFirebaseEnv();
+    const serviceAccountPath = resolveServiceAccountPath(firebaseEnv);
+
+    if (!fs.existsSync(serviceAccountPath)) {
+        throw new Error(
+            `Firebase service account not found for FIREBASE_ENV=${firebaseEnv}: ${serviceAccountPath}`
+        );
+    }
+
+    const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
 
     admin.firestore().settings({ ignoreUndefinedProperties: true });
     db = admin.firestore();
-    console.log('Firestore initialized: ', db.projectId);
+    console.log(
+        `Firestore initialized: ${serviceAccount.project_id} (FIREBASE_ENV=${firebaseEnv})`
+    );
 }
 
 export const getFirestoreDB = () => {

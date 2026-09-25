@@ -1,6 +1,7 @@
 import { Supplier } from '../models/Supplier.js';
 import { Procurement } from '../models/Procurement.js';
 import { MilkPayment } from '../models/MilkPayment.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const TDS_NATURE_VALUES = ['not_applicable', 'purchased_of_goods_194q'];
 
@@ -18,16 +19,17 @@ export const listSuppliers = async (req, res) => {
     const { tenantId } = req;
     const { page = 1, limit = 50, search, isActive } = req.query;
 
-    const filter = { tenantId };
+    const extra = {};
     if (search) {
-      filter.$or = [
+      extra.$or = [
         { name: { $regex: search, $options: 'i' } },
         { supplierCode: { $regex: search, $options: 'i' } },
         { phone: { $regex: search, $options: 'i' } },
         { village: { $regex: search, $options: 'i' } }
       ];
     }
-    if (isActive !== undefined) filter.isActive = isActive === 'true';
+    if (isActive !== undefined) extra.isActive = isActive === 'true';
+    const filter = withMongoTenant(extra, tenantId);
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [suppliers, total] = await Promise.all([
@@ -51,7 +53,7 @@ export const getSupplier = async (req, res) => {
     const { tenantId } = req;
     const { id } = req.params;
 
-    const supplier = await Supplier.findOne({ _id: id, tenantId }).lean();
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: id }, tenantId)).lean();
     if (!supplier) {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
@@ -64,7 +66,7 @@ export const getSupplier = async (req, res) => {
 };
 
 const generateSupplierCode = async (tenantId) => {
-  const last = await Supplier.findOne({ tenantId })
+  const last = await Supplier.findOne(withMongoTenant({}, tenantId))
     .sort({ supplierCode: -1 })
     .select('supplierCode')
     .lean();
@@ -200,7 +202,7 @@ export const updateSupplier = async (req, res) => {
     toUpdate.updatedAt = new Date();
 
     const supplier = await Supplier.findOneAndUpdate(
-      { _id: id, tenantId },
+      withMongoTenant({ _id: id }, tenantId),
       { $set: toUpdate },
       { new: true }
     );
@@ -221,7 +223,7 @@ export const deleteSupplier = async (req, res) => {
     const { tenantId } = req;
     const { id } = req.params;
 
-    const supplier = await Supplier.findOne({ _id: id, tenantId });
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: id }, tenantId));
     if (!supplier) {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
@@ -238,7 +240,7 @@ export const deleteSupplier = async (req, res) => {
       });
     }
 
-    await Supplier.deleteOne({ _id: id, tenantId });
+    await Supplier.deleteOne(withMongoTenant({ _id: id }, tenantId));
 
     res.json({ success: true, message: 'Supplier deleted successfully' });
   } catch (err) {

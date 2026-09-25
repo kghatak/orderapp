@@ -11,8 +11,26 @@ import {
   toIstDateKeyFromValue,
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
+import { belongsToTenant, denyUnlessTenant, recordsForTenant } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 import admin from 'firebase-admin';
 import ExcelJS from 'exceljs';
+
+const assertOutletTenant = async (db, req, res, outletId) => {
+  if (!outletId) {
+    res.status(400).json({ error: 'outletId is required' });
+    return false;
+  }
+  const outletDoc = await db.collection('outlets').doc(outletId).get();
+  if (!outletDoc.exists) {
+    res.status(404).json({ error: 'Outlet not found' });
+    return false;
+  }
+  if (denyUnlessTenant(res, outletDoc.data().tenantId, req.tenantId, 'Outlet not found')) {
+    return false;
+  }
+  return true;
+};
 
 const toFirestoreTimestamp = (val) => {
   if (val == null) return null;
@@ -36,22 +54,9 @@ const flagBackdatedClosingBalance = async (db, outletId, ...dateValues) => {
 };
 
 // Helper to generate sequential payment IDs (PAY0001, PAY0002, ...)
-const generatePaymentId = async (db) => {
-  const counterRef = db.collection('counters').doc('paymentCounter');
-
-  const nextCount = await db.runTransaction(async (transaction) => {
-    const counterDoc = await transaction.get(counterRef);
-    let currentCount = 1;
-
-    if (counterDoc.exists) {
-      currentCount = (counterDoc.data().count || 0) + 1;
-    }
-
-    transaction.set(counterRef, { count: currentCount });
-    return currentCount;
-  });
-
-  return `PAY${nextCount.toString().padStart(4, '0')}`;
+const generatePaymentId = async (db, tenantId) => {
+  const { globalCount } = await nextTenantCounter(db, 'paymentCounter', tenantId);
+  return `PAY${globalCount.toString().padStart(4, '0')}`;
 };
 
 const getCurrentOutletName = (data, fallbackId) =>
@@ -86,7 +91,8 @@ export const createOutletPayment = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const outletPayment = new OutletPayment(req.body);
-    await db.collection('outlet_payments').doc(outletPayment.outletId).set({ ...outletPayment });
+    if (!(await assertOutletTenant(db, req, res, outletPayment.outletId))) return;
+    await db.collection('outlet_payments').doc(outletPayment.outletId).set({ ...outletPayment, tenantId: req.tenantId });
     res.status(201).json({ message: 'Outlet payment created/updated' });
   } catch (err) {
     console.error('Create outlet payment error:', err);
@@ -99,7 +105,8 @@ export const createPaymentRequest = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const paymentRequest = new PaymentRequest(req.body);
-    const ref = await db.collection('payment_requests').add({ ...paymentRequest });
+    if (!(await assertOutletTenant(db, req, res, paymentRequest.outletId))) return;
+    const ref = await db.collection('payment_requests').add({ ...paymentRequest, tenantId: req.tenantId });
     res.status(201).json({ message: 'Payment request submitted', id: ref.id });
   } catch (err) {
     console.error('Create payment request error:', err);
@@ -112,7 +119,8 @@ export const createPayment = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const payment = new Payment(req.body);
-    await db.collection('payments').doc(payment.paymentId).set({ ...payment });
+    if (!(await assertOutletTenant(db, req, res, payment.outletId))) return;
+    await db.collection('payments').doc(payment.paymentId).set({ ...payment, tenantId: req.tenantId });
     res.status(201).json({ message: 'Payment recorded' });
   } catch (err) {
     console.error('Create payment error:', err);
@@ -125,7 +133,10 @@ export const getAllOutletPayments = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('outlet_payments').get();
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const data = recordsForTenant(
+      snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      req.tenantId
+    );
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch outlet payments error:', err);
@@ -138,7 +149,10 @@ export const getAllPaymentRequests = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('payment_requests').get();
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const data = recordsForTenant(
+      snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      req.tenantId
+    );
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch payment requests error:', err);
@@ -153,7 +167,8 @@ export const getAllPayments = async (req, res) => {
     const snapshot = await db.collection('payments').get();
     const data = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(payment => payment.paymentType !== 'opening_balance'); // Exclude opening balance payments
+      .filter(payment => payment.paymentType !== 'opening_balance')
+      .filter((payment) => belongsToTenant(payment.tenantId, req.tenantId));
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch payments error:', err);
@@ -180,17 +195,27 @@ export const cleanupOpeningBalancePayments = async (req, res) => {
     
     // Delete all opening balance payment records
     const batch = db.batch();
+    let cleanedCount = 0;
     openingBalancePayments.docs.forEach(doc => {
+      if (!belongsToTenant(doc.data().tenantId, req.tenantId)) return;
       batch.delete(doc.ref);
+      cleanedCount += 1;
     });
+
+    if (cleanedCount === 0) {
+      return res.status(200).json({
+        message: 'No opening balance payment records found to clean up',
+        cleanedCount: 0
+      });
+    }
     
     await batch.commit();
     
-    console.log(`Cleaned up ${openingBalancePayments.size} opening balance payment records`);
+    console.log(`Cleaned up ${cleanedCount} opening balance payment records`);
     
     res.status(200).json({ 
       message: 'Opening balance payment records cleaned up successfully',
-      cleanedCount: openingBalancePayments.size
+      cleanedCount
     });
     
   } catch (err) {
@@ -209,7 +234,10 @@ export const getOutletsWithPendingRequests = async (req, res) => {
       .where('status', '==', 'pending')
       .get();
     
-    const paymentRequests = requestsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const paymentRequests = recordsForTenant(
+      requestsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+      req.tenantId
+    );
     
     // Group by outlet
     const outletMap = new Map();
@@ -251,6 +279,7 @@ export const getPendingRequestsByOutlet = async (req, res) => {
   try {
     const { outletId } = req.params;
     const db = getFirestoreDB();
+    if (!(await assertOutletTenant(db, req, res, outletId))) return;
     
     // Get pending payment requests from payment_requests collection
     const requestsSnapshot = await db.collection('payment_requests')
@@ -350,7 +379,7 @@ export const getPendingRequestsByOutlet = async (req, res) => {
 
     if (includeTransfers) {
       const extraLoads = [
-        listTransfersForOutlet(db, outletId).catch((transferError) => {
+        listTransfersForOutlet(db, outletId, { tenantId: req.tenantId }).catch((transferError) => {
           console.error('Fetch transfers for pending outlet failed:', transferError);
           return null;
         }),
@@ -362,6 +391,7 @@ export const getPendingRequestsByOutlet = async (req, res) => {
             .get()
             .then((snap) =>
               snap.docs
+                .filter((doc) => belongsToTenant(doc.data()?.tenantId, req.tenantId))
                 .map((doc) => {
                   const data = doc.data() || {};
                   return {
@@ -409,6 +439,9 @@ export const approvePaymentRequest = async (req, res) => {
     }
     
     const requestData = requestDoc.data();
+    if (denyUnlessTenant(res, requestData.tenantId, req.tenantId, 'Payment request not found')) {
+      return;
+    }
     
     // Check if this outlet already has a paymentId assigned
     const existingPayment = await db.collection('payments')
@@ -422,20 +455,7 @@ export const approvePaymentRequest = async (req, res) => {
       // Use existing paymentId for this outlet
       paymentId = existingPayment.docs[0].data().paymentId;
     } else {
-      // Generate new paymentId for this outlet
-      const counterRef = db.collection('counters').doc('paymentCounter');
-      const counterDoc = await counterRef.get();
-      
-      let currentCount = 1;
-      if (counterDoc.exists) {
-        currentCount = counterDoc.data().count + 1;
-      }
-      
-      // Generate payment ID in PAY0008 format
-      paymentId = `PAY${currentCount.toString().padStart(4, '0')}`;
-      
-      // Update the counter
-      await counterRef.set({ count: currentCount });
+      paymentId = await generatePaymentId(db, req.tenantId);
     }
     
     // Create approved payment record in payments collection (matching mobile app structure)
@@ -452,7 +472,8 @@ export const approvePaymentRequest = async (req, res) => {
       paymentId: paymentId,
       paymentMode: requestData.paymentMode,
       remarks: remarks || requestData.remarks,
-      status: 'approved'
+      status: 'approved',
+      tenantId: req.tenantId
     };
     
     // Use the original request ID as the document ID in payments collection
@@ -536,6 +557,7 @@ export const recordCashPayment = async (req, res) => {
     if (!outletId) {
       return res.status(400).json({ error: 'outletId is required' });
     }
+    if (!(await assertOutletTenant(db, req, res, outletId))) return;
 
     if (amount === undefined || amount === null || isNaN(parseFloat(amount))) {
       return res.status(400).json({ error: 'A valid amount is required' });
@@ -571,7 +593,7 @@ export const recordCashPayment = async (req, res) => {
       outletPaymentData.name ||
       '';
 
-    const paymentId = await generatePaymentId(db);
+    const paymentId = await generatePaymentId(db, req.tenantId);
     const paymentDocRef = db.collection('payments').doc();
 
     let paymentDateTimestamp = null;
@@ -597,6 +619,7 @@ export const recordCashPayment = async (req, res) => {
       createdAt: serverTimestamp,
       paymentDate: paymentDateTimestamp || serverTimestamp,
       remarks: remarks || null,
+      tenantId: req.tenantId,
     };
 
     let updatedPendingAmount = 0;
@@ -1084,6 +1107,7 @@ const recordPaymentForOutlet = async (db, {
   approvedBy = 'admin',
   paymentDate,
   storeActualPaymentDate = false,
+  tenantId = '',
 }) => {
   const paymentAmount = parseFloat(amount);
   if (!outletId) {
@@ -1094,6 +1118,12 @@ const recordPaymentForOutlet = async (db, {
   }
   if (!VALID_PAYMENT_MODES.includes(paymentMode)) {
     throw new Error(`Invalid paymentMode. Must be one of: ${VALID_PAYMENT_MODES.join(', ')}`);
+  }
+  if (tenantId) {
+    const outletDoc = await db.collection('outlets').doc(outletId).get();
+    if (!outletDoc.exists || !belongsToTenant(outletDoc.data().tenantId, tenantId)) {
+      throw new Error('Outlet not found');
+    }
   }
 
   const outletPaymentRef = db.collection('outlet_payments').doc(outletId);
@@ -1109,7 +1139,7 @@ const recordPaymentForOutlet = async (db, {
     outletPaymentData.name ||
     '';
 
-  const paymentId = await generatePaymentId(db);
+  const paymentId = await generatePaymentId(db, tenantId);
   const paymentDocRef = db.collection('payments').doc();
 
   let enteredDateTimestamp = null;
@@ -1138,6 +1168,7 @@ const recordPaymentForOutlet = async (db, {
     createdAt: serverTimestamp,
     paymentDate: enteredDateTimestamp || serverTimestamp,
     remarks: remarks || null,
+    tenantId: tenantId || '',
   };
 
   if (storeActualPaymentDate && enteredDateTimestamp) {
@@ -1209,6 +1240,9 @@ export const updatePaymentRecord = async (req, res) => {
 
     if (paymentDoc.exists) {
       const existing = paymentDoc.data();
+      if (denyUnlessTenant(res, existing.tenantId, req.tenantId, 'Payment not found')) {
+        return;
+      }
       if (existing.paymentType === 'opening_balance') {
         return res.status(400).json({ error: 'Cannot edit opening balance payment' });
       }
@@ -1361,6 +1395,9 @@ export const deletePaymentRecord = async (req, res) => {
 
     if (paymentDoc.exists) {
       const existing = paymentDoc.data();
+      if (denyUnlessTenant(res, existing.tenantId, req.tenantId, 'Payment not found')) {
+        return;
+      }
       if (existing.paymentType === 'opening_balance') {
         return res.status(400).json({ error: 'Cannot delete opening balance payment' });
       }
@@ -1449,6 +1486,9 @@ export const rejectPaymentRequest = async (req, res) => {
     }
     
     const requestData = requestDoc.data();
+    if (denyUnlessTenant(res, requestData.tenantId, req.tenantId, 'Payment request not found')) {
+      return;
+    }
     
     // Check if this outlet already has a paymentId assigned
     const existingPayment = await db.collection('payments')
@@ -1462,20 +1502,7 @@ export const rejectPaymentRequest = async (req, res) => {
       // Use existing paymentId for this outlet
       paymentId = existingPayment.docs[0].data().paymentId;
     } else {
-      // Generate new paymentId for this outlet
-      const counterRef = db.collection('counters').doc('paymentCounter');
-      const counterDoc = await counterRef.get();
-      
-      let currentCount = 1;
-      if (counterDoc.exists) {
-        currentCount = counterDoc.data().count + 1;
-      }
-      
-      // Generate payment ID in PAY0008 format
-      paymentId = `PAY${currentCount.toString().padStart(4, '0')}`;
-      
-      // Update the counter
-      await counterRef.set({ count: currentCount });
+      paymentId = await generatePaymentId(db, req.tenantId);
     }
     
     // Create rejected payment record in payments collection (matching mobile app structure)
@@ -1489,7 +1516,8 @@ export const rejectPaymentRequest = async (req, res) => {
       rejectedAt: new Date(),
       rejectedBy: admin,
       remarks: remarks || requestData.remarks,
-      status: 'rejected'
+      status: 'rejected',
+      tenantId: req.tenantId
     };
     
     // Use the original request ID as the document ID in payments collection
@@ -1549,6 +1577,7 @@ export const getOutletPaymentSummary = async (req, res) => {
   try {
     const { outletId } = req.params;
     const db = getFirestoreDB();
+    if (!(await assertOutletTenant(db, req, res, outletId))) return;
     
     // Get outlet payment summary from outlet_payments collection
     const outletPaymentDoc = await db.collection('outlet_payments').doc(outletId).get();
@@ -1587,10 +1616,13 @@ export const getAllOutletPaymentSummaries = async (req, res) => {
     
     // Get all outlet payment summaries
     const snapshot = await db.collection('outlet_payments').get();
-    const outletSummaries = snapshot.docs.map(doc => ({
+    const outletSummaries = recordsForTenant(
+      snapshot.docs.map(doc => ({
       outletId: doc.id,
       ...doc.data()
-    }));
+    })),
+      req.tenantId
+    );
     
     res.status(200).json(outletSummaries);
   } catch (err) {
@@ -1607,7 +1639,10 @@ export const getOutletsWithPendingPayments = async (req, res) => {
     // Get all outlets with pending payments from outlet_payments collection
     const snapshot = await db.collection('outlet_payments').get();
     
-    const outletIds = snapshot.docs.map((doc) => doc.id);
+    const tenantDocs = snapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    const outletIds = tenantDocs.map((doc) => doc.id);
     const outletNames = await resolveCurrentOutletNames(db, outletIds);
     const outletDocs = await Promise.all(
       outletIds.map((id) => db.collection('outlets').doc(id).get()),
@@ -1618,7 +1653,7 @@ export const getOutletsWithPendingPayments = async (req, res) => {
     });
 
     const outstandingAmounts = await Promise.all(
-      snapshot.docs.map((doc) =>
+      tenantDocs.map((doc) =>
         getOutletOutstanding(
           db,
           doc.id,
@@ -1628,7 +1663,7 @@ export const getOutletsWithPendingPayments = async (req, res) => {
       ),
     );
 
-    const outletsWithPendingPayments = snapshot.docs.flatMap((doc, index) => {
+    const outletsWithPendingPayments = tenantDocs.flatMap((doc, index) => {
       const pendingAmount = outstandingAmounts[index];
       if (pendingAmount === 0) return [];
       const data = doc.data();
@@ -1691,15 +1726,16 @@ export const getPaymentsReport = async (req, res) => {
 
     // Get total count for pagination
     const totalSnapshot = await query.get();
-    const total = totalSnapshot.size;
+    const tenantDocs = totalSnapshot.docs.filter((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    const total = tenantDocs.length;
     const totalPages = Math.ceil(total / parseInt(limit));
 
-    // Apply pagination
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedQuery = query.offset(offset).limit(parseInt(limit));
-    const snapshot = await paginatedQuery.get();
+    const snapshotDocs = tenantDocs.slice(offset, offset + parseInt(limit));
 
-    const rawPayments = snapshot.docs.map(doc => {
+    const rawPayments = snapshotDocs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -1764,8 +1800,13 @@ export const previewBulkPayments = async (req, res) => {
     const outletExistsSet = new Set();
 
     for (const outletId of outletIds) {
-      const doc = await db.collection('outlet_payments').doc(outletId).get();
-      if (doc.exists) {
+      const paymentDoc = await db.collection('outlet_payments').doc(outletId).get();
+      if (!paymentDoc.exists) continue;
+      const outletDoc = await db.collection('outlets').doc(outletId).get();
+      const tenantOk = outletDoc.exists
+        ? belongsToTenant(outletDoc.data().tenantId, req.tenantId)
+        : belongsToTenant(paymentDoc.data().tenantId, req.tenantId);
+      if (tenantOk) {
         outletExistsSet.add(outletId);
       }
     }
@@ -1860,6 +1901,7 @@ export const bulkRecordPayments = async (req, res) => {
           approvedBy,
           paymentDate,
           storeActualPaymentDate: true,
+          tenantId: req.tenantId,
         });
 
         results.successful++;
@@ -1987,7 +2029,8 @@ export const getPaymentsTallyXLSX = async (req, res) => {
         return { ...p, effectiveDate, dateKey };
       })
       .filter((p) => p.dateKey && allowedDateKeys.has(p.dateKey))
-      .filter((p) => !isTallyExcludedOutlet(p.outletId));
+      .filter((p) => !isTallyExcludedOutlet(p.outletId))
+      .filter((p) => belongsToTenant(p.tenantId, req.tenantId));
 
     const outletNames = await resolveCurrentOutletNames(
       db,
@@ -2012,7 +2055,6 @@ export const getPaymentsTallyXLSX = async (req, res) => {
       });
     }
 
-    const voucherCounterRef = db.collection('counters').doc('paymentreceiptvouchercounter');
     const counterParsed =
       counter !== undefined && counter !== '' ? parseInt(String(counter), 10) : NaN;
     const usePayloadCounter = Number.isFinite(counterParsed) && counterParsed >= 1;
@@ -2021,18 +2063,13 @@ export const getPaymentsTallyXLSX = async (req, res) => {
     if (usePayloadCounter) {
       startVoucherNumber = counterParsed;
     } else {
-      startVoucherNumber = await db.runTransaction(async (transaction) => {
-        const snap = await transaction.get(voucherCounterRef);
-        const last = snap.exists ? Number(snap.data().count) : 0;
-        const safeLast = Number.isFinite(last) && last >= 0 ? last : 0;
-        const start = safeLast + 1;
-        transaction.set(
-          voucherCounterRef,
-          { count: safeLast + payments.length },
-          { merge: true },
-        );
-        return start;
-      });
+      const reserved = await nextTenantCounter(
+        db,
+        'paymentreceiptvouchercounter',
+        req.tenantId,
+        payments.length,
+      );
+      startVoucherNumber = reserved.start;
     }
 
     const rows = payments.map((p, index) => [

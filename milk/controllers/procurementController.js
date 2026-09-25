@@ -1,6 +1,7 @@
 import { Procurement } from '../models/Procurement.js';
 import { Supplier } from '../models/Supplier.js';
 import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const FAT_METER_MIN_READING = 28;
 const MILK_TYPES = ['cow', 'buffalo', 'mixed'];
@@ -202,17 +203,17 @@ export const listProcurements = async (req, res) => {
     const { tenantId, user } = req;
     const { page = 1, limit = 50, supplierId, fromDate, toDate, paymentStatus, shift, milkType } = req.query;
 
-    const filter = { tenantId };
+    const extra = {};
     if (user.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id });
+      const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId));
       if (!supplier) return res.status(404).json({ success: false, message: 'Supplier profile not found' });
-      filter.supplierId = supplier._id;
-    } else if (supplierId) filter.supplierId = supplierId;
+      extra.supplierId = supplier._id;
+    } else if (supplierId) extra.supplierId = supplierId;
 
-    if (fromDate) filter.date = { ...filter.date, $gte: new Date(fromDate) };
-    if (toDate) filter.date = { ...filter.date, $lte: new Date(toDate) };
-    if (paymentStatus) filter.paymentStatus = paymentStatus;
-    if (shift) filter.shift = shift;
+    if (fromDate) extra.date = { ...extra.date, $gte: new Date(fromDate) };
+    if (toDate) extra.date = { ...extra.date, $lte: new Date(toDate) };
+    if (paymentStatus) extra.paymentStatus = paymentStatus;
+    if (shift) extra.shift = shift;
     if (milkType) {
       if (!MILK_TYPES.includes(milkType)) {
         return res.status(400).json({
@@ -220,8 +221,9 @@ export const listProcurements = async (req, res) => {
           message: "milkType must be 'cow', 'buffalo', or 'mixed'"
         });
       }
-      filter.milkType = milkType;
+      extra.milkType = milkType;
     }
+    const filter = withMongoTenant(extra, tenantId);
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [procurements, total] = await Promise.all([
@@ -250,7 +252,7 @@ export const getProcurement = async (req, res) => {
     const { tenantId, user } = req;
     const { id } = req.params;
 
-    const procurement = await Procurement.findOne({ _id: id, tenantId })
+    const procurement = await Procurement.findOne(withMongoTenant({ _id: id }, tenantId))
       .populate('supplierId', 'supplierCode name phone village')
       .lean();
 
@@ -259,7 +261,7 @@ export const getProcurement = async (req, res) => {
     }
 
     if (user.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id });
+      const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId));
       if (!supplier || procurement.supplierId._id.toString() !== supplier._id.toString()) {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
@@ -299,7 +301,7 @@ export const createProcurement = async (req, res) => {
       });
     }
 
-    const supplier = await Supplier.findOne({ _id: supplierId, tenantId });
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: supplierId }, tenantId));
     if (!supplier) {
       return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
@@ -396,7 +398,7 @@ export const updateProcurement = async (req, res) => {
     const body = req.body;
     const { shift, milkType, quantity, fat, snf, fatMeterReading, ratePerFat, remarks } = body;
 
-    const procurement = await Procurement.findOne({ _id: id, tenantId });
+    const procurement = await Procurement.findOne(withMongoTenant({ _id: id }, tenantId));
     if (!procurement) {
       return res.status(404).json({ success: false, message: 'Procurement not found' });
     }
@@ -428,7 +430,7 @@ export const updateProcurement = async (req, res) => {
     }
     if (remarks != null) procurement.remarks = remarks;
 
-    const supplier = await Supplier.findOne({ _id: procurement.supplierId, tenantId });
+    const supplier = await Supplier.findOne(withMongoTenant({ _id: procurement.supplierId }, tenantId));
     const mixedUpdate = isMixedPayload(body);
 
     if (mixedUpdate) {
@@ -494,7 +496,7 @@ export const deleteProcurement = async (req, res) => {
     const { tenantId } = req;
     const { id } = req.params;
 
-    const procurement = await Procurement.findOne({ _id: id, tenantId });
+    const procurement = await Procurement.findOne(withMongoTenant({ _id: id }, tenantId));
     if (!procurement) {
       return res.status(404).json({ success: false, message: 'Procurement not found' });
     }
@@ -506,7 +508,7 @@ export const deleteProcurement = async (req, res) => {
       });
     }
 
-    await Procurement.deleteOne({ _id: id, tenantId });
+    await Procurement.deleteOne(withMongoTenant({ _id: id }, tenantId));
     res.json({ success: true, message: 'Procurement deleted successfully' });
   } catch (err) {
     console.error('Delete procurement error:', err);

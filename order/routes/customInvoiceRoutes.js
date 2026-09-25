@@ -1,4 +1,5 @@
 import express from 'express';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 import {
   getAllCustomInvoices,
   createCustomInvoice,
@@ -10,6 +11,8 @@ import {
 } from '../controllers/customInvoiceController.js';
 
 const customInvoiceRoutes = express.Router();
+
+customInvoiceRoutes.use(tenantMiddleware);
 
 // GET /custom-invoices - Get all custom invoices with pagination
 customInvoiceRoutes.get('/', getAllCustomInvoices);

@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../../util/firebase.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 
 // Create Store Keeper
 export const createStoreKeeper = async (req, res) => {
@@ -18,9 +19,12 @@ export const createStoreKeeper = async (req, res) => {
 
     const db = getFirestoreDB();
 
-    // Check if phone number already exists
+    // Check if phone number already exists for this tenant
     const snapshot = await db.collection('storeKeepers').where('phoneNumber', '==', phoneNumber).get();
-    if (!snapshot.empty) {
+    const sameTenantDuplicate = snapshot.docs.some((doc) =>
+      belongsToTenant(doc.data().tenantId, req.tenantId)
+    );
+    if (sameTenantDuplicate) {
       return res.status(409).json({ error: 'Store keeper with this phone number already exists' });
     }
 
@@ -29,6 +33,7 @@ export const createStoreKeeper = async (req, res) => {
     const newDocRef = await db.collection('storeKeepers').add({
       name,
       phoneNumber,
+      tenantId: req.tenantId,
       createdAt: now,
       updatedAt: now,
     });
@@ -46,7 +51,9 @@ export const getAllStoreKeepers = async (req, res) => {
   try {
     const db = getFirestoreDB();
     const snapshot = await db.collection('storeKeepers').get();
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const data = snapshot.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter((row) => belongsToTenant(row.tenantId, req.tenantId));
     res.status(200).json(data);
   } catch (err) {
     console.error('Fetch Store Keepers error:', err);
@@ -62,6 +69,9 @@ export const getStoreKeeperById = async (req, res) => {
     const doc = await db.collection('storeKeepers').doc(id).get();
     if (!doc.exists) {
       return res.status(404).json({ error: 'Store Keeper not found' });
+    }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Store Keeper not found')) {
+      return;
     }
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (err) {
@@ -87,21 +97,26 @@ export const updateStoreKeeper = async (req, res) => {
       return res.status(400).json({ error: 'Phone number must be 10 digits' });
     }
 
-    // Check if the phone number is used by another user
-    const snapshot = await db.collection('storeKeepers')
-      .where('phoneNumber', '==', phoneNumber)
-      .get();
-
-    const isDuplicate = snapshot.docs.some(doc => doc.id !== id);
-    if (isDuplicate) {
-      return res.status(409).json({ error: 'Phone number already used by another store keeper' });
-    }
-
     // Check if the document exists
     const docRef = db.collection('storeKeepers').doc(id);
     const doc = await docRef.get();
     if (!doc.exists) {
       return res.status(404).json({ error: 'Store keeper not found' });
+    }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Store keeper not found')) {
+      return;
+    }
+
+    // Check if the phone number is used by another user in this tenant
+    const snapshot = await db.collection('storeKeepers')
+      .where('phoneNumber', '==', phoneNumber)
+      .get();
+
+    const isDuplicate = snapshot.docs.some(
+      (other) => other.id !== id && belongsToTenant(other.data().tenantId, req.tenantId)
+    );
+    if (isDuplicate) {
+      return res.status(409).json({ error: 'Phone number already used by another store keeper' });
     }
 
     await docRef.update({
@@ -126,7 +141,16 @@ export const deleteStoreKeeper = async (req, res) => {
     const db = getFirestoreDB();
     const id = req.params.id;
 
-    await db.collection('storeKeepers').doc(id).delete();
+    const docRef = db.collection('storeKeepers').doc(id);
+    const doc = await docRef.get();
+    if (!doc.exists) {
+      return res.status(404).json({ error: 'Store Keeper not found' });
+    }
+    if (denyUnlessTenant(res, doc.data().tenantId, req.tenantId, 'Store Keeper not found')) {
+      return;
+    }
+
+    await docRef.delete();
     res.status(200).json({ message: 'Store Keeper deleted' });
   } catch (err) {
     console.error('Delete Store Keeper error:', err);
@@ -144,6 +168,7 @@ export const searchStoreKeepers = async (req, res) => {
     const snapshot = await db.collection('storeKeepers').get();
     const results = snapshot.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter((sk) => belongsToTenant(sk.tenantId, req.tenantId))
       .filter(sk =>
         (sk.name && sk.name.toLowerCase().includes(lowerQuery)) ||
         (sk.phoneNumber && sk.phoneNumber.includes(query))
@@ -155,4 +180,3 @@ export const searchStoreKeepers = async (req, res) => {
     res.status(500).json({ error: 'Failed to search store keepers' });
   }
 };
-

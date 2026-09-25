@@ -1,6 +1,44 @@
-import { getOutletProductsModel } from '../models/OutletProducts.js';
+import { getOutletProductsModel, stampProductsMapTenantId } from '../models/OutletProducts.js';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { roundQty } from '../../util/quantities.js';
+import { canonicalizeTenantId } from '../../util/tenantMiddleware.js';
+
+/** POS session: JWT outlet + tenant. Request outletId must match; header tenant if sent must match JWT. */
+const resolvePortalOutletId = (req, res, requestedRaw, missingMessage) => {
+  const auth = req.portalAuth;
+  if (!auth?.outletId || !auth?.tenantId) {
+    res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
+    return null;
+  }
+
+  const headerTenant = canonicalizeTenantId(
+    req.headers['x-tenant-id'] || req.headers['user-tenantid'] || '',
+  );
+  const jwtTenant = canonicalizeTenantId(auth.tenantId);
+  if (headerTenant && headerTenant !== jwtTenant) {
+    res.status(403).json({
+      success: false,
+      message: 'Tenant does not match authenticated session',
+    });
+    return null;
+  }
+
+  const requested = requestedRaw != null ? String(requestedRaw).trim() : '';
+  if (!requested) {
+    res.status(400).json({ success: false, message: missingMessage });
+    return null;
+  }
+  if (requested !== auth.outletId) {
+    res.status(403).json({
+      success: false,
+      message: 'outletId does not match authenticated outlet',
+    });
+    return null;
+  }
+  return requested;
+};
+
+const sessionTenantId = (req) => canonicalizeTenantId(req.portalAuth?.tenantId || '');
 
 const toNum = (v, fallback = 0) => {
   const n = Number(v);
@@ -90,8 +128,9 @@ const catalogToOutletLine = (mapKey, existing, catalog) => {
   };
 };
 
-const withRoundedQuantities = (products) => {
+const withRoundedQuantities = (products, tenantId) => {
   if (!products || typeof products !== 'object' || Array.isArray(products)) return products || {};
+  const id = canonicalizeTenantId(tenantId);
   const out = {};
   for (const [key, line] of Object.entries(products)) {
     if (!line || typeof line !== 'object') {
@@ -100,7 +139,8 @@ const withRoundedQuantities = (products) => {
     }
     out[key] = {
       ...line,
-      quantity: roundQty(line.quantity, 0)
+      quantity: roundQty(line.quantity, 0),
+      ...(id ? { tenantId: id } : {})
     };
   }
   return out;
@@ -115,15 +155,13 @@ export const upsertOutletProducts = async (req, res) => {
   try {
     const { outletId, products, merge } = req.body || {};
 
-    if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
-      return res.status(400).json({ success: false, message: 'outletId is required' });
-    }
+    const trimmedOutletId = resolvePortalOutletId(req, res, outletId, 'outletId is required');
+    if (!trimmedOutletId) return;
 
     if (!Array.isArray(products)) {
       return res.status(400).json({ success: false, message: 'products must be an array' });
     }
 
-    const trimmedOutletId = outletId.trim();
     const OutletProducts = getOutletProductsModel();
     const existingDoc = merge ? await OutletProducts.findOne({ outletId: trimmedOutletId }).lean() : null;
     const productsMap =
@@ -160,10 +198,15 @@ export const upsertOutletProducts = async (req, res) => {
 
     const { productCount, manualProductCount } = productCountsFromMap(productsMap);
     const updatedAt = new Date();
+    const tenantId = sessionTenantId(req);
+    stampProductsMapTenantId(productsMap, tenantId);
 
     const doc = await OutletProducts.findOneAndUpdate(
       { outletId: trimmedOutletId },
-      { $set: { products: productsMap, productCount, manualProductCount, updatedAt } },
+      {
+        $set: { products: productsMap, productCount, manualProductCount, updatedAt },
+        $unset: { tenantId: 1 },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
 
@@ -174,7 +217,7 @@ export const upsertOutletProducts = async (req, res) => {
       data: withManualProductCount(
         {
           outletId: doc.outletId,
-          products: withRoundedQuantities(doc.products || {}),
+          products: withRoundedQuantities(doc.products || {}, tenantId),
           productCount: doc.productCount ?? productCount,
           updatedAt: doc.updatedAt
         },
@@ -200,9 +243,8 @@ export const patchOutletProduct = async (req, res) => {
     if (!mapKey) {
       return res.status(400).json({ success: false, message: 'productId path parameter is required' });
     }
-    if (!outletId || typeof outletId !== 'string' || !outletId.trim()) {
-      return res.status(400).json({ success: false, message: 'outletId is required' });
-    }
+    const trimmedOutletId = resolvePortalOutletId(req, res, outletId, 'outletId is required');
+    if (!trimmedOutletId) return;
 
     const hasPatch =
       name !== undefined ||
@@ -218,7 +260,6 @@ export const patchOutletProduct = async (req, res) => {
       });
     }
 
-    const trimmedOutletId = outletId.trim();
     const OutletProducts = getOutletProductsModel();
     const doc = await OutletProducts.findOne({ outletId: trimmedOutletId });
     if (!doc) {
@@ -242,13 +283,17 @@ export const patchOutletProduct = async (req, res) => {
     if (quantity !== undefined) patch.quantity = roundQty(quantity, 0);
 
     productsMap[mapKey] = patch;
+    const tenantId = sessionTenantId(req);
+    stampProductsMapTenantId(productsMap, tenantId);
     doc.products = productsMap;
     const counts = productCountsFromMap(productsMap);
     doc.productCount = counts.productCount;
     doc.manualProductCount = counts.manualProductCount;
+    doc.tenantId = undefined;
     doc.updatedAt = new Date();
     doc.markModified('products');
     await doc.save();
+    await OutletProducts.updateOne({ _id: doc._id }, { $unset: { tenantId: 1 } });
 
     res.status(200).json({
       success: true,
@@ -276,12 +321,13 @@ export const patchOutletProduct = async (req, res) => {
  */
 export const repairMissingOutletProducts = async (req, res) => {
   try {
-    const outletId = req.body?.outletId ?? req.query?.outletId;
-    if (!outletId || typeof outletId !== 'string' || !String(outletId).trim()) {
-      return res.status(400).json({ success: false, message: 'outletId is required' });
-    }
-
-    const trimmedOutletId = String(outletId).trim();
+    const trimmedOutletId = resolvePortalOutletId(
+      req,
+      res,
+      req.body?.outletId ?? req.query?.outletId,
+      'outletId is required',
+    );
+    if (!trimmedOutletId) return;
     const OutletProducts = getOutletProductsModel();
     const doc = await OutletProducts.findOne({ outletId: trimmedOutletId });
     if (!doc?.products || typeof doc.products !== 'object' || Array.isArray(doc.products)) {
@@ -314,9 +360,13 @@ export const repairMissingOutletProducts = async (req, res) => {
       repaired++;
     }
 
-    if (repaired > 0) {
+    const tenantId = sessionTenantId(req);
+    const linesStamped = stampProductsMapTenantId(doc.products, tenantId);
+    const hadDocTenant = canonicalizeTenantId(doc.tenantId);
+    if (repaired > 0 || linesStamped || hadDocTenant) {
+      if (hadDocTenant) doc.tenantId = undefined;
       doc.updatedAt = new Date();
-      doc.markModified('products');
+      if (repaired > 0 || linesStamped) doc.markModified('products');
       await doc.save();
     }
 
@@ -343,19 +393,22 @@ export const repairMissingOutletProducts = async (req, res) => {
  */
 export const getOutletProductsByOutletId = async (req, res) => {
   try {
-    const outletId = req.query.outletId;
-    if (!outletId || typeof outletId !== 'string' || !String(outletId).trim()) {
-      return res.status(400).json({ success: false, message: 'outletId query parameter is required' });
-    }
+    const trimmedOutletId = resolvePortalOutletId(
+      req,
+      res,
+      req.query.outletId,
+      'outletId query parameter is required',
+    );
+    if (!trimmedOutletId) return;
 
     const OutletProducts = getOutletProductsModel();
-    const doc = await OutletProducts.findOne({ outletId: String(outletId).trim() }).lean();
+    const doc = await OutletProducts.findOne({ outletId: trimmedOutletId }).lean();
 
     if (!doc) {
       return res.status(200).json({
         success: true,
         data: {
-          outletId: String(outletId).trim(),
+          outletId: trimmedOutletId,
           products: {},
           productCount: 0,
           updatedAt: null
@@ -363,7 +416,20 @@ export const getOutletProductsByOutletId = async (req, res) => {
       });
     }
 
-    const { _id, __v, manualProductCount: storedManualCount, ...rest } = doc;
+    const jwtTenant = sessionTenantId(req);
+    const lineTenantMissing = stampProductsMapTenantId(doc.products, jwtTenant);
+    const hadDocTenant = Boolean(canonicalizeTenantId(doc.tenantId));
+    if (lineTenantMissing || hadDocTenant) {
+      await OutletProducts.updateOne(
+        { outletId: trimmedOutletId },
+        {
+          ...(lineTenantMissing ? { $set: { products: doc.products } } : {}),
+          $unset: { tenantId: 1 },
+        },
+      );
+    }
+
+    const { _id, __v, tenantId: _docTenant, manualProductCount: storedManualCount, ...rest } = doc;
     const counts = productCountsFromMap(rest.products);
     const productCount =
       typeof rest.productCount === 'number' && Number.isFinite(rest.productCount)
@@ -380,7 +446,7 @@ export const getOutletProductsByOutletId = async (req, res) => {
         {
           id: _id,
           ...rest,
-          products: withRoundedQuantities(rest.products),
+          products: withRoundedQuantities(rest.products, jwtTenant),
           productCount
         },
         manualProductCount

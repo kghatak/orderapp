@@ -5,6 +5,7 @@
 
 import { getSaleModel } from '../models/Sale.js';
 import { getSequenceCounterModel } from '../models/SequenceCounter.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 function cleanOutletSegment(outletId) {
   const s = String(outletId || 'OUTLET').trim();
@@ -19,7 +20,7 @@ const SALE_SEQUENCE_MIN = 1000;
  */
 async function computeNumericSaleMax(tenantId, outletId) {
   const Sale = getSaleModel();
-  const rows = await Sale.find({ tenantId, outletId }, { saleId: 1 }).lean();
+  const rows = await Sale.find(withMongoTenant({ outletId }, tenantId), { saleId: 1 }).lean();
   let max = 0;
   for (const row of rows) {
     const sid = row.saleId;

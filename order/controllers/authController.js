@@ -3,6 +3,8 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
+import { canonicalizeTenantId, isAllowedOrderTenantId } from '../../util/tenantMiddleware.js';
+import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Signup API
 export const signup = async (req, res) => {
@@ -96,19 +98,9 @@ export const signup = async (req, res) => {
       }
     }
 
-    // Generate User ID
-    const userCounterRef = db.collection('counters').doc('userCounter');
-    const userCounterDoc = await userCounterRef.get();
-
-    let currentCount = 1;
-    if (userCounterDoc.exists) {
-      currentCount = userCounterDoc.data().count + 1;
-    }
-
-    const userId = `UID${currentCount.toString().padStart(4, '0')}`;
-
-    // Update counter
-    await userCounterRef.set({ count: currentCount });
+    const resolvedTenantId = canonicalizeTenantId(tenantId);
+    const { globalCount } = await nextTenantCounter(db, 'userCounter', resolvedTenantId);
+    const userId = `UID${globalCount.toString().padStart(4, '0')}`;
 
     // Create user
     const user = new NannuUser({
@@ -117,7 +109,7 @@ export const signup = async (req, res) => {
       password,
       outletId: userProfile === 'Outlet' ? '' : null, // Will be set when linked to outlet
       userProfile,
-      tenantId: tenantId || '',
+      tenantId: resolvedTenantId || '',
       enableNotification: true,
       fcmToken: fcmToken || ''
     });
@@ -151,7 +143,7 @@ export const signup = async (req, res) => {
 // Login API
 export const login = async (req, res) => {
   try {
-    const { phoneNumber, password, fcmToken, tenantId } = req.body;
+    const { phoneNumber, password, fcmToken } = req.body;
     const db = getFirestoreDB();
 
     // Validation
@@ -222,14 +214,19 @@ export const login = async (req, res) => {
       updatedAt: userData.updatedAt
     };
 
-    // If Admin or StoreKeeper and tenantId provided, include milk JWT (requires MongoDB + MilkUser)
+    // Milk JWT uses the user's refine-auth tenant from Firestore (not a body/hardcoded id).
     const milkEligibleProfiles = ['Admin', 'StoreKeeper'];
-    if (milkEligibleProfiles.includes(userData.userProfile) && tenantId) {
+    const userTenant = canonicalizeTenantId(userData.tenantId);
+    if (
+      milkEligibleProfiles.includes(userData.userProfile) &&
+      userTenant &&
+      isAllowedOrderTenantId(userTenant)
+    ) {
       if (!isMongoConnected()) {
-        console.warn('Login: milkToken skipped — MongoDB not connected (set MONGODB_URI).');
+        console.warn('Login: milkToken skipped — MongoDB not connected.');
       } else {
         try {
-          const milkAuth = await getMilkTokenForOrderAdmin(tenantId, userData.phoneNumber, password);
+          const milkAuth = await getMilkTokenForOrderAdmin(userTenant, userData.phoneNumber, password);
           if (milkAuth) {
             responseData.milkToken = milkAuth.token;
             responseData.milkTenantId = milkAuth.tenantId;

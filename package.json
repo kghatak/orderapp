@@ -4,9 +4,12 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "nodemon index.js",
+    "start": "cross-env FIREBASE_ENV=production nodemon index.js",
+    "start:prod": "cross-env FIREBASE_ENV=production nodemon index.js",
+    "dev": "cross-env FIREBASE_ENV=test nodemon index.js",
+    "start:test": "cross-env FIREBASE_ENV=test nodemon index.js",
     "build": "echo 'No build step required'",
-    "test": "node --test outlet-portal/util/salesListFilter.test.js"
+    "test": "node --test outlet-portal/util/salesListFilter.test.js util/tenantMiddleware.test.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +20,7 @@
     "axios": "^1.5.0",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
+    "cross-env": "^10.1.0",
     "csv-parser": "^3.0.0",
     "dotenv": "^16.5.0",
     "exceljs": "^4.4.0",
