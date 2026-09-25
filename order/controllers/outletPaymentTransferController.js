@@ -6,6 +6,7 @@ import {
   markOutletClosingBalanceRecalcPending,
   recalculateOutletClosingBalancesRange,
 } from '../services/closingBalanceRecalc.js';
+import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 
 const TRANSFERS_COLLECTION = 'outlet_payment_transfers';
 
@@ -53,6 +54,7 @@ const serializeTransfer = (id, data = {}) => ({
   cancelledBy: data.cancelledBy || null,
   cancelledAt: serializeTimestamp(data.cancelledAt),
   cancelReason: data.cancelReason || null,
+  tenantId: data.tenantId || '',
 });
 
 const unclampedPending = (data) => {
@@ -194,8 +196,14 @@ export const createOutletPaymentTransfer = async (req, res) => {
     if (!fromOutletDoc.exists) {
       return res.status(404).json({ success: false, message: 'Source outlet not found' });
     }
+    if (denyUnlessTenant(res, fromOutletDoc.data().tenantId, req.tenantId, 'Source outlet not found')) {
+      return;
+    }
     if (!toOutletDoc.exists) {
       return res.status(404).json({ success: false, message: 'Destination outlet not found' });
+    }
+    if (denyUnlessTenant(res, toOutletDoc.data().tenantId, req.tenantId, 'Destination outlet not found')) {
+      return;
     }
 
     const fromPayRef = db.collection('outlet_payments').doc(fromOutletId);
@@ -305,6 +313,7 @@ export const createOutletPaymentTransfer = async (req, res) => {
         performedBy: actor,
         performedById: performedById || null,
         userProfile: userProfile || null,
+        tenantId: req.tenantId,
       });
     });
 
@@ -327,9 +336,12 @@ export const createOutletPaymentTransfer = async (req, res) => {
   }
 };
 
+const matchesRequestTenant = (item, tenantId) =>
+  !tenantId || belongsToTenant(item.tenantId, tenantId);
+
 export const listTransfersForOutlet = async (db, outletId, filters = {}) => {
   if (!outletId) return [];
-  const { startKey = null, endKey = null, status = null } = filters;
+  const { startKey = null, endKey = null, status = null, tenantId = null } = filters;
   const [fromSnap, toSnap] = await Promise.all([
     db.collection(TRANSFERS_COLLECTION).where('fromOutletId', '==', String(outletId)).get(),
     db.collection(TRANSFERS_COLLECTION).where('toOutletId', '==', String(outletId)).get(),
@@ -338,6 +350,7 @@ export const listTransfersForOutlet = async (db, outletId, filters = {}) => {
   fromSnap.docs.concat(toSnap.docs).forEach((doc) => byId.set(doc.id, doc));
   return [...byId.values()]
     .map((doc) => serializeTransfer(doc.id, doc.data()))
+    .filter((item) => matchesRequestTenant(item, tenantId))
     .filter((item) => {
       if (status && String(item.status).toLowerCase() !== String(status).toLowerCase()) {
         return false;
@@ -359,11 +372,17 @@ export const getOutletPaymentTransfers = async (req, res) => {
 
     let transfers = [];
     if (outletId) {
-      transfers = await listTransfersForOutlet(db, outletId, { startKey, endKey, status });
+      transfers = await listTransfersForOutlet(db, outletId, {
+        startKey,
+        endKey,
+        status,
+        tenantId: req.tenantId,
+      });
     } else {
       const snap = await db.collection(TRANSFERS_COLLECTION).get();
       transfers = snap.docs
         .map((doc) => serializeTransfer(doc.id, doc.data()))
+        .filter((item) => matchesRequestTenant(item, req.tenantId))
         .filter((item) => {
           if (status && String(item.status).toLowerCase() !== String(status).toLowerCase()) {
             return false;
@@ -418,6 +437,9 @@ export const cancelOutletPaymentTransfer = async (req, res) => {
     }
 
     const transfer = transferDoc.data();
+    if (denyUnlessTenant(res, transfer.tenantId, req.tenantId, 'Transfer not found')) {
+      return;
+    }
     if (String(transfer.status || 'approved').toLowerCase() === 'cancelled') {
       return res.status(400).json({ success: false, message: 'Transfer is already cancelled' });
     }

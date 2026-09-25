@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
+import { canonicalizeTenantId } from '../../util/tenantMiddleware.js';
 
 const YMD_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -203,6 +204,7 @@ export const recalculateOutletClosingBalancesRange = async (
 
   const outletData = outletDoc.data();
   const outletName = outletData.name || outletData.outletName || '';
+  const balanceTenantId = canonicalizeTenantId(outletData.tenantId) || '';
   const openingBalance = parseFloat(outletData.openingBalance) || 0;
   const openingBalanceDate = outletData.openingBalanceDate;
 
@@ -281,6 +283,7 @@ export const recalculateOutletClosingBalancesRange = async (
           completedAt: previousCompletedAt,
           status: 'success',
           outletName,
+          tenantId: balanceTenantId,
         });
       } else {
         await previousDoc.ref.update({
@@ -288,6 +291,7 @@ export const recalculateOutletClosingBalancesRange = async (
           completedAt: previousCompletedAt,
           status: 'success',
           outletName,
+          tenantId: balanceTenantId,
         });
       }
     } else {
@@ -302,6 +306,7 @@ export const recalculateOutletClosingBalancesRange = async (
         timestamp: previousBounds.dayEndTimestamp,
         completedAt: previousCompletedAt,
         status: 'success',
+        tenantId: balanceTenantId,
       });
       existingDocsByDate.set(previousDateStr, {
         ref: previousDocRef,
@@ -428,6 +433,7 @@ export const recalculateOutletClosingBalancesRange = async (
         completedAt,
         status: 'success',
         outletName,
+        tenantId: balanceTenantId,
       });
       results.push({
         date: dateStr,
@@ -456,6 +462,7 @@ export const recalculateOutletClosingBalancesRange = async (
         timestamp,
         completedAt,
         status: 'success',
+        tenantId: balanceTenantId,
       });
       existingDocsByDate.set(dateStr, { ref: newDocRef, id: newDocRef.id });
       results.push({

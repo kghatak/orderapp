@@ -9,7 +9,7 @@ import {
 } from '../services/closingBalanceRecalc.js';
 import { isTallyExcludedOutlet } from '../../util/tallyExportExclusions.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
-import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { belongsToTenant, canonicalizeTenantId, denyUnlessTenant, TENANTS } from '../../util/tenantMiddleware.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
 import admin from 'firebase-admin';
 
@@ -29,6 +29,85 @@ function orderMatchesRequestTenant(data, requestTenantId, tenantOutletIds) {
   if (belongsToTenant(data.tenantId, requestTenantId)) return true;
   const outletId = data.outletId || '';
   return Boolean(tenantOutletIds && outletId && tenantOutletIds.has(outletId));
+}
+
+function storedBalanceTenantId(outletTenantId, requestTenantId) {
+  const fromOutlet = canonicalizeTenantId(outletTenantId);
+  if (fromOutlet) return fromOutlet;
+  const fromRequest = canonicalizeTenantId(requestTenantId);
+  return fromRequest || TENANTS.NAANU_MILK;
+}
+
+function mergeRawProductMaps(maps) {
+  const merged = new Map();
+  for (const map of maps) {
+    for (const [productId, row] of map) {
+      const existing = merged.get(productId);
+      if (existing) {
+        existing.totalQuantity += row.totalQuantity;
+        existing.totalAmount += row.totalAmount;
+        existing.totalDiscount += row.totalDiscount || 0;
+        existing.gstWeighted = (existing.gstWeighted || 0) + (row.gstWeighted || 0);
+      } else {
+        merged.set(productId, { ...row });
+      }
+    }
+  }
+  return merged;
+}
+
+function appendDailyProductTenantWrites({
+  batchWrites,
+  dateDocRef,
+  dateStr,
+  dateField,
+  countField,
+  totalCountKey,
+  outletDataMap,
+  outletMap,
+  requestTenantId,
+  buildProductList,
+  computeTotals,
+}) {
+  batchWrites.push({
+    ref: dateDocRef,
+    data: {
+      date: dateStr,
+      [dateField]: dateStr,
+      tenantScoped: true,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'success',
+    },
+  });
+
+  const groups = new Map();
+  for (const [outletId, entry] of outletDataMap) {
+    const info = outletMap.get(outletId);
+    const tenantId = storedBalanceTenantId(info?.tenantId, requestTenantId);
+    if (!groups.has(tenantId)) groups.set(tenantId, []);
+    groups.get(tenantId).push(entry);
+  }
+
+  for (const [tenantId, entries] of groups) {
+    const products = buildProductList(mergeRawProductMaps(entries.map((entry) => entry.productMap)));
+    const totals = computeTotals(products);
+    const activityCount = entries.reduce((sum, entry) => sum + (entry[countField] || 0), 0);
+    batchWrites.push({
+      ref: dateDocRef.collection('tenants').doc(tenantId),
+      data: {
+        date: dateStr,
+        [dateField]: dateStr,
+        tenantId,
+        products,
+        totalProducts: products.length,
+        [totalCountKey]: activityCount,
+        totalOutlets: entries.length,
+        ...totals,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      },
+    });
+  }
 }
 
 const assertOutletBelongsToRequest = async (db, req, res, outletId) => {
@@ -1539,6 +1618,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
       state: dd.state || '',
       address: dd.address || '',
       pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
+      tenantId: dd.tenantId || '',
     });
 
     const outletMap = new Map();
@@ -1650,22 +1730,19 @@ export const calculateDailyProductDelivery = async (req, res) => {
     const batchWrites = [];
     const outletSummaries = [];
 
-    if (!req.tenantId) {
-      batchWrites.push({
-        ref: dateDocRef,
-        data: {
-          date: dateStr,
-          deliveredDate: dateStr,
-          products: globalProducts,
-          totalProducts: globalProducts.length,
-          totalOrders,
-          totalOutlets: outletDataMap.size,
-          ...globalTotals,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          status: 'success',
-        },
-      });
-    }
+    appendDailyProductTenantWrites({
+      batchWrites,
+      dateDocRef,
+      dateStr,
+      dateField: 'deliveredDate',
+      countField: 'orderCount',
+      totalCountKey: 'totalOrders',
+      outletDataMap,
+      outletMap,
+      requestTenantId: req.tenantId,
+      buildProductList,
+      computeTotals,
+    });
 
     for (const [outletId, entry] of outletDataMap) {
       const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
@@ -1686,6 +1763,7 @@ export const calculateDailyProductDelivery = async (req, res) => {
           totalProducts: products.length,
           totalOrders: entry.orderCount,
           ...totals,
+          tenantId: storedBalanceTenantId(info.tenantId, req.tenantId),
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           status: 'success',
         },
@@ -1797,6 +1875,7 @@ export const calculateDailyProductReturn = async (req, res) => {
       state: dd.state || '',
       address: dd.address || '',
       pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
+      tenantId: dd.tenantId || '',
     });
 
     const outletMap = new Map();
@@ -1906,22 +1985,19 @@ export const calculateDailyProductReturn = async (req, res) => {
     const batchWrites = [];
     const outletSummaries = [];
 
-    if (!req.tenantId) {
-      batchWrites.push({
-        ref: dateDocRef,
-        data: {
-          date: dateStr,
-          returnDate: dateStr,
-          products: globalProducts,
-          totalProducts: globalProducts.length,
-          totalReturns,
-          totalOutlets: outletDataMap.size,
-          ...globalTotals,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          status: 'success',
-        },
-      });
-    }
+    appendDailyProductTenantWrites({
+      batchWrites,
+      dateDocRef,
+      dateStr,
+      dateField: 'returnDate',
+      countField: 'returnCount',
+      totalCountKey: 'totalReturns',
+      outletDataMap,
+      outletMap,
+      requestTenantId: req.tenantId,
+      buildProductList,
+      computeTotals,
+    });
 
     for (const [outletId, entry] of outletDataMap) {
       const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
@@ -1942,6 +2018,7 @@ export const calculateDailyProductReturn = async (req, res) => {
           totalProducts: products.length,
           totalReturns: entry.returnCount,
           ...totals,
+          tenantId: storedBalanceTenantId(info.tenantId, req.tenantId),
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           status: 'success',
         },
