@@ -2,6 +2,12 @@ import { getSaleModel } from '../models/Sale.js';
 import { getDashboardDailySnapshotModel } from '../models/DashboardDailySnapshot.js';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstBoundariesForCalendarDate } from '../../util/istDateBoundaries.js';
+import {
+  belongsToTenant,
+  canonicalizeTenantId,
+  isAllowedOrderTenantId,
+  TENANTS,
+} from '../../util/tenantMiddleware.js';
 
 export const TZ = 'Asia/Kolkata';
 
@@ -42,8 +48,55 @@ const buildMatch = (start, end, tenantId) => {
   const match = {
     createdAt: { $gte: start, $lte: end },
   };
-  if (tenantId) match.tenantId = tenantId;
+  if (!tenantId) return match;
+  if (tenantId === TENANTS.NAANU_MILK) {
+    match.tenantId = { $in: [TENANTS.NAANU_MILK, 'TENANT001', ''] };
+  } else {
+    match.tenantId = tenantId;
+  }
   return match;
+};
+
+const firestoreRowMatchesTenant = (data, tenantId, tenantOutletIds) => {
+  if (!tenantId) return true;
+  if (belongsToTenant(data?.tenantId, tenantId)) return true;
+  const outletId = data?.outletId || data?.OutletID || '';
+  return Boolean(tenantOutletIds && outletId && tenantOutletIds.has(outletId));
+};
+
+const collectTenantOutletIds = (outletsSnap, tenantId) => {
+  if (!tenantId) return null;
+  const ids = new Set();
+  outletsSnap.forEach((doc) => {
+    if (belongsToTenant(doc.data()?.tenantId, tenantId)) ids.add(doc.id);
+  });
+  return ids;
+};
+
+const listSnapshotTenantIds = async () => {
+  const ids = new Set(['', TENANTS.NAANU_MILK]);
+  try {
+    const Sale = getSaleModel();
+    const saleTenants = await Sale.distinct('tenantId');
+    for (const raw of saleTenants) {
+      const id = canonicalizeTenantId(raw);
+      if (id && isAllowedOrderTenantId(id)) ids.add(id);
+    }
+  } catch (err) {
+    console.warn('[Dashboard EOD] Could not list sale tenants:', err.message || err);
+  }
+  try {
+    const db = getFirestoreDB();
+    const outletsSnap = await db.collection('outlets').get();
+    outletsSnap.forEach((doc) => {
+      const id = canonicalizeTenantId(doc.data()?.tenantId);
+      if (!id) ids.add(TENANTS.NAANU_MILK);
+      else if (isAllowedOrderTenantId(id)) ids.add(id);
+    });
+  } catch (err) {
+    console.warn('[Dashboard EOD] Could not list outlet tenants:', err.message || err);
+  }
+  return [...ids];
 };
 
 const splitPaymentSum = (modes) => ({
@@ -250,7 +303,7 @@ const aggregateTopProducts = async (Sale, match) => {
  * Outlet payments breakdown for Payment Summary donut
  * (Firestore `payments`: Cash / Transfer by Bank / Cheque).
  */
-const aggregatePaymentSummaryItems = async (businessDate) => {
+const aggregatePaymentSummaryItems = async (businessDate, tenantId = '') => {
   const empty = PAYMENT_SUMMARY_KEYS.map(({ key, label }) => ({
     key,
     label,
@@ -262,6 +315,12 @@ const aggregatePaymentSummaryItems = async (businessDate) => {
     const { dayStartTimestamp, dayEndTimestamp } =
       getIstBoundariesForCalendarDate(businessDate);
 
+    let tenantOutletIds = null;
+    if (tenantId) {
+      const outletsSnap = await db.collection('outlets').get();
+      tenantOutletIds = collectTenantOutletIds(outletsSnap, tenantId);
+    }
+
     const countedIds = new Set();
     const totals = Object.fromEntries(PAYMENT_SUMMARY_KEYS.map(({ key }) => [key, 0]));
 
@@ -270,6 +329,7 @@ const aggregatePaymentSummaryItems = async (businessDate) => {
       const data = doc.data() || {};
       if (data.paymentType === 'opening_balance') return;
       if (String(data.status || '').toLowerCase() !== 'approved') return;
+      if (!firestoreRowMatchesTenant(data, tenantId, tenantOutletIds)) return;
 
       countedIds.add(doc.id);
       const mapped = mapOutletPaymentMode(data.paymentMode);
@@ -305,7 +365,7 @@ const aggregatePaymentSummaryItems = async (businessDate) => {
  * Delivery KPIs + order-status overview from Firestore
  * (same sources as opening/closing balance EOD jobs).
  */
-const aggregateDeliveryAndOutletSummary = async (businessDate) => {
+const aggregateDeliveryAndOutletSummary = async (businessDate, tenantId = '') => {
   const db = getFirestoreDB();
   const { dayStartTimestamp, dayEndTimestamp } =
     getIstBoundariesForCalendarDate(businessDate);
@@ -352,25 +412,36 @@ const aggregateDeliveryAndOutletSummary = async (businessDate) => {
 
     let active = 0;
     let inactive = 0;
+    const tenantOutletIds = collectTenantOutletIds(outletsSnap, tenantId);
     outletsSnap.forEach((doc) => {
+      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
       if (doc.data()?.active === false) inactive += 1;
       else active += 1;
     });
 
     let totalSales = 0;
+    let deliveredCount = 0;
     deliveredSnap.forEach((doc) => {
       const data = doc.data() || {};
+      if (!firestoreRowMatchesTenant(data, tenantId, tenantOutletIds)) return;
+      deliveredCount += 1;
       totalSales += parseFloat(data['total amount'] || data.totalAmount || 0);
     });
 
     let totalReturnAmount = 0;
+    let returnCount = 0;
     returnsSnap.forEach((doc) => {
-      totalReturnAmount += parseFloat(doc.data()?.totalAmount || 0);
+      const data = doc.data() || {};
+      if (!firestoreRowMatchesTenant(data, tenantId, tenantOutletIds)) return;
+      returnCount += 1;
+      totalReturnAmount += parseFloat(data.totalAmount || 0);
     });
 
     const statusTotals = {};
     createdOrdersSnap.forEach((doc) => {
-      const status = String(doc.data()?.status || 'pending')
+      const data = doc.data() || {};
+      if (!firestoreRowMatchesTenant(data, tenantId, tenantOutletIds)) return;
+      const status = String(data.status || 'pending')
         .trim()
         .toLowerCase() || 'pending';
       statusTotals[status] = (statusTotals[status] || 0) + 1;
@@ -384,11 +455,11 @@ const aggregateDeliveryAndOutletSummary = async (businessDate) => {
 
     return {
       totalSales: roundMoney(totalSales),
-      totalOrders: deliveredSnap.size,
-      totalOutlets: outletsSnap.size,
+      totalOrders: deliveredCount,
+      totalOutlets: active + inactive,
       totalOutletsActive: active,
       totalOutletsInactive: inactive,
-      totalReturnOrders: returnsSnap.size,
+      totalReturnOrders: returnCount,
       totalReturnAmount: roundMoney(totalReturnAmount),
       orderStatusItems: allKeys.map((status) => ({
         key: status,
@@ -463,8 +534,8 @@ export const buildDashboardSnapshotForDate = async (businessDate, tenantId = '')
     aggregateTopOutlets(Sale, match),
     aggregatePosByOutlet(Sale, match),
     aggregateTopProducts(Sale, match),
-    aggregatePaymentSummaryItems(businessDate),
-    aggregateDeliveryAndOutletSummary(businessDate),
+    aggregatePaymentSummaryItems(businessDate, tenantId),
+    aggregateDeliveryAndOutletSummary(businessDate, tenantId),
   ]);
 
   const outletNames = await resolveOutletNames([
@@ -711,10 +782,17 @@ export const mergeSnapshotsToDashboardResponse = (snapshots, tenantId = '') => {
 
 export const runEodDashboardSnapshot = async (businessDate) => {
   const dateKey = businessDate || getYesterdayDateKey();
-  console.log(`[Dashboard EOD] Building snapshot for ${dateKey}`);
-  const saved = await saveDashboardSnapshot(dateKey);
+  const tenantIds = await listSnapshotTenantIds();
   console.log(
-    `[Dashboard EOD] Saved snapshot for ${dateKey} (${saved.posByOutlet?.length ?? 0} outlets, ${saved.totalOrders ?? 0} delivered orders)`,
+    `[Dashboard EOD] Building snapshots for ${dateKey} (${tenantIds.length} tenants)`,
   );
+  const saved = [];
+  for (const tenantId of tenantIds) {
+    const doc = await saveDashboardSnapshot(dateKey, tenantId);
+    saved.push(doc);
+    console.log(
+      `[Dashboard EOD] Saved ${dateKey} tenant=${tenantId || '(legacy)'} (${doc.posByOutlet?.length ?? 0} outlets, ${doc.totalOrders ?? 0} delivered orders)`,
+    );
+  }
   return saved;
 };

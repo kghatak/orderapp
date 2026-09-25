@@ -24,8 +24,11 @@ import {
   bulkRecordPayments,
   getPaymentsTallyXLSX,
 } from '../controllers/paymentController.js';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 
 const router = express.Router();
+
+router.use(tenantMiddleware);
 
 const upload = multer({
   storage: multer.memoryStorage(),

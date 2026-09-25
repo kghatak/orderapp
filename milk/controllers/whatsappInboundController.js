@@ -1,6 +1,7 @@
 import { Supplier } from '../models/Supplier.js';
 import { SupplierWhatsAppReply } from '../models/SupplierWhatsAppReply.js';
 import { phoneMatchVariants } from '../../util/whatsapp.js';
+import { mongoTenantFilter, withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
@@ -245,26 +246,25 @@ const buildReplyFilter = async ({ tenantId, user, fromKey, toKey, supplierId }) 
   };
 
   if (user?.role === 'supplier') {
-    const supplier = await Supplier.findOne({ tenantId, userId: user._id }).lean();
+    const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId)).lean();
     if (!supplier) {
       return { error: { status: 404, message: 'Supplier profile not found' } };
     }
-    filter.tenantId = tenantId;
-    filter.supplierId = supplier._id;
+    Object.assign(filter, withMongoTenant({ supplierId: supplier._id }, tenantId));
     return { filter };
   }
 
   if (supplierId) {
-    filter.tenantId = tenantId;
-    filter.supplierId = supplierId;
+    Object.assign(filter, withMongoTenant({ supplierId }, tenantId));
     return { filter };
   }
 
-  const suppliers = await Supplier.find({ tenantId }).select('phone').lean();
+  const suppliers = await Supplier.find(withMongoTenant({}, tenantId)).select('phone').lean();
   const phones = [...new Set(suppliers.flatMap((s) => phoneMatchVariants(s.phone)))];
+  const tenantClause = mongoTenantFilter(tenantId);
   filter.$or = phones.length
-    ? [{ tenantId }, { phone: { $in: phones } }]
-    : [{ tenantId }];
+    ? [tenantClause, { phone: { $in: phones } }]
+    : [tenantClause];
 
   return { filter };
 };

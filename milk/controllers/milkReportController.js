@@ -1,6 +1,7 @@
 import { Procurement } from '../models/Procurement.js';
 import { MilkPayment } from '../models/MilkPayment.js';
 import { Supplier } from '../models/Supplier.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 export const dailySummary = async (req, res) => {
   try {
@@ -14,8 +15,8 @@ export const dailySummary = async (req, res) => {
     end.setHours(23, 59, 59, 999);
 
     const [procurements, totalActiveSuppliers] = await Promise.all([
-      Procurement.find({ tenantId, date: { $gte: start, $lte: end } }).lean(),
-      Supplier.countDocuments({ tenantId, isActive: true })
+      Procurement.find(withMongoTenant({ date: { $gte: start, $lte: end } }, tenantId)).lean(),
+      Supplier.countDocuments(withMongoTenant({ isActive: true }, tenantId))
     ]);
 
     const totalQuantity = procurements.reduce((s, p) => s + (p.quantity || 0), 0);
@@ -45,7 +46,7 @@ export const supplierSummary = async (req, res) => {
     let supplierId = req.query.supplierId;
 
     if (user.role === 'supplier') {
-      const supplier = await Supplier.findOne({ tenantId, userId: user._id });
+      const supplier = await Supplier.findOne(withMongoTenant({ userId: user._id }, tenantId));
       if (!supplier) return res.status(404).json({ success: false, message: 'Supplier profile not found' });
       supplierId = supplier._id.toString();
     } else if (!supplierId) {
@@ -53,8 +54,8 @@ export const supplierSummary = async (req, res) => {
     }
 
     const { fromDate, toDate } = req.query;
-    const procFilter = { tenantId, supplierId };
-    const payFilter = { tenantId, supplierId };
+    const procFilter = withMongoTenant({ supplierId }, tenantId);
+    const payFilter = withMongoTenant({ supplierId }, tenantId);
     if (fromDate) {
       procFilter.date = { ...procFilter.date, $gte: new Date(fromDate) };
       payFilter.paymentDate = { ...payFilter.paymentDate, $gte: new Date(fromDate) };
@@ -126,8 +127,8 @@ export const periodSummary = async (req, res) => {
     }
 
     const [procurements, totalActiveSuppliers] = await Promise.all([
-      Procurement.find({ tenantId, date: { $gte: start, $lte: end } }).lean(),
-      Supplier.countDocuments({ tenantId, isActive: true })
+      Procurement.find(withMongoTenant({ date: { $gte: start, $lte: end } }, tenantId)).lean(),
+      Supplier.countDocuments(withMongoTenant({ isActive: true }, tenantId))
     ]);
 
     const totalQuantity = procurements.reduce((s, p) => s + (p.quantity || 0), 0);

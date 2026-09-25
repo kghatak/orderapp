@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { MilkUser } from '../models/MilkUser.js';
 import { Supplier } from '../models/Supplier.js';
 import { getFirestoreDB } from '../../util/firebase.js';
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'milk-procurement-secret';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '7d';
@@ -35,7 +36,7 @@ export const signup = async (req, res) => {
       });
     }
 
-    const existing = await MilkUser.findOne({ tenantId, phone });
+    const existing = await MilkUser.findOne(withMongoTenant({ phone }, tenantId));
     if (existing) {
       return res.status(409).json({
         success: false,
@@ -100,7 +101,7 @@ export const login = async (req, res) => {
     }
 
     // 1. Try MilkUser first
-    let user = await MilkUser.findOne({ tenantId, phone });
+    let user = await MilkUser.findOne(withMongoTenant({ phone }, tenantId));
     if (!user) {
       // 2. Fallback: check Order app Admin / StoreKeeper (Firestore)
       const orderAdmin = await validateOrderMilkUser(phone, password);
@@ -221,6 +222,7 @@ async function getOrCreateMilkAdmin(tenantId, orderUser) {
  */
 export async function getMilkTokenForOrderAdmin(tenantId, phone, password) {
   try {
+    if (!tenantId) return null;
     const orderAdmin = await validateOrderMilkUser(phone, password);
     if (!orderAdmin) return null;
     const user = await getOrCreateMilkAdmin(tenantId, orderAdmin);

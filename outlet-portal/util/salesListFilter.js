@@ -1,3 +1,5 @@
+import { withMongoTenant } from '../../util/tenantMiddleware.js';
+
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Digits-only phone pattern; optional non-digits between digits (+91, spaces, dashes). */
@@ -82,9 +84,9 @@ export const buildSalesListFilter = ({
   customerName,
   customerPhone
 }) => {
-  const filter = { tenantId, outletId };
+  const extra = { outletId };
   const pm = paymentMode !== undefined && paymentMode !== null ? String(paymentMode).trim() : '';
-  if (pm) filter.paymentMode = pm;
+  if (pm) extra.paymentMode = pm;
 
   const and = [];
 
@@ -105,11 +107,17 @@ export const buildSalesListFilter = ({
   const phoneClause = buildCustomerPhoneFilter(customerPhone);
   if (phoneClause) and.push(phoneClause);
 
+  const filter = withMongoTenant(extra, tenantId);
+
+  if (and.length === 0) return filter;
+  if (filter.$and) {
+    filter.$and = [...filter.$and, ...and];
+    return filter;
+  }
   if (and.length === 1) {
     Object.assign(filter, and[0]);
-  } else if (and.length > 1) {
-    filter.$and = and;
+    return filter;
   }
-
+  filter.$and = and;
   return filter;
 };

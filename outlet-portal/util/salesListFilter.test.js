@@ -18,6 +18,18 @@ test('full phone search matches only exact last 10 digits', () => {
   assert.ok(filter.$or || filter['customer.phone']);
 });
 
+test('NM2026 sales list includes empty tenantId', () => {
+  const filter = buildSalesListFilter({
+    tenantId: 'NM2026',
+    outletId: 'O1',
+  });
+  assert.ok(filter.$and);
+  const tenantOr = filter.$and.find((c) => c.$or);
+  assert.ok(tenantOr.$or.some((c) => c.tenantId === 'NM2026'));
+  assert.ok(tenantOr.$or.some((c) => c.tenantId === 'TENANT001'));
+  assert.ok(tenantOr.$or.some((c) => c.tenantId === ''));
+});
+
 test('buildCustomerPhoneFilter rejects partial false positives', () => {
   const tail = '6465464646';
   const clause = buildCustomerPhoneFilter(tail);

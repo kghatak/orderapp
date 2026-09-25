@@ -1,4 +1,5 @@
 import express from 'express';
+import { portalJwtMiddleware } from '../middleware/portalJwtMiddleware.js';
 import {
   upsertOutletProducts,
   getOutletProductsByOutletId,
@@ -7,6 +8,8 @@ import {
 } from '../controllers/outletProductsController.js';
 
 const router = express.Router();
+
+router.use(portalJwtMiddleware);
 
 router.get('/', getOutletProductsByOutletId);
 router.post('/repair-missing', repairMissingOutletProducts);

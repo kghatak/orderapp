@@ -4,8 +4,11 @@ import {
   getOutletPaymentTransfers,
   cancelOutletPaymentTransfer,
 } from '../controllers/outletPaymentTransferController.js';
+import { tenantMiddleware } from '../../util/tenantMiddleware.js';
 
 const router = express.Router();
+
+router.use(tenantMiddleware);
 
 router.post('/', createOutletPaymentTransfer);
 router.get('/', getOutletPaymentTransfers);
