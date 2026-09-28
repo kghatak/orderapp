@@ -379,7 +379,7 @@ export const getPendingRequestsByOutlet = async (req, res) => {
 
     if (includeTransfers) {
       const extraLoads = [
-        listTransfersForOutlet(db, outletId, { tenantId: req.tenantId }).catch((transferError) => {
+        listTransfersForOutlet(db, outletId).catch((transferError) => {
           console.error('Fetch transfers for pending outlet failed:', transferError);
           return null;
         }),
@@ -391,7 +391,6 @@ export const getPendingRequestsByOutlet = async (req, res) => {
             .get()
             .then((snap) =>
               snap.docs
-                .filter((doc) => belongsToTenant(doc.data()?.tenantId, req.tenantId))
                 .map((doc) => {
                   const data = doc.data() || {};
                   return {
