@@ -84,6 +84,7 @@ export const signup = async (req, res) => {
     }
 
     // For StoreKeeper users, check if phone number exists in storeKeepers collection
+    let storeKeeperTenantId = '';
     if (userProfile === 'StoreKeeper') {
       const storeKeeperSnapshot = await db.collection('storeKeepers')
         .where('phoneNumber', '==', phoneNumber)
@@ -96,9 +97,10 @@ export const signup = async (req, res) => {
           message: 'Phone number not found in storeKeepers collection'
         });
       }
+      storeKeeperTenantId = storeKeeperSnapshot.docs[0].data().tenantId || '';
     }
 
-    const resolvedTenantId = canonicalizeTenantId(tenantId);
+    const resolvedTenantId = canonicalizeTenantId(tenantId || storeKeeperTenantId);
     const { globalCount } = await nextTenantCounter(db, 'userCounter', resolvedTenantId);
     const userId = `UID${globalCount.toString().padStart(4, '0')}`;
 
@@ -196,12 +198,24 @@ export const login = async (req, res) => {
       }
     }
 
+    // users.tenantId can be empty for StoreKeepers; the admin-created storeKeepers doc holds the tenant.
+    let userTenant = canonicalizeTenantId(userData.tenantId);
+    if (!userTenant && userData.userProfile === 'StoreKeeper') {
+      const storeKeeperSnapshot = await db.collection('storeKeepers')
+        .where('phoneNumber', '==', userData.phoneNumber)
+        .limit(1)
+        .get();
+      if (!storeKeeperSnapshot.empty) {
+        userTenant = canonicalizeTenantId(storeKeeperSnapshot.docs[0].data().tenantId);
+      }
+    }
+
     const responseData = {
       userId: userData.userId || userDoc.id,
       phoneNumber: userData.phoneNumber,
       userProfile: userData.userProfile,
       outletId: userData.outletId,
-      tenantId: userData.tenantId ?? '',
+      tenantId: userTenant || (userData.tenantId ?? ''),
       enableNotification: userData.enableNotification,
       fcmToken: userData.fcmToken,
       outlet: outletData ? {
@@ -216,7 +230,6 @@ export const login = async (req, res) => {
 
     // Milk JWT uses the user's refine-auth tenant from Firestore (not a body/hardcoded id).
     const milkEligibleProfiles = ['Admin', 'StoreKeeper'];
-    const userTenant = canonicalizeTenantId(userData.tenantId);
     if (
       milkEligibleProfiles.includes(userData.userProfile) &&
       userTenant &&
