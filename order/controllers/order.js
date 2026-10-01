@@ -201,6 +201,7 @@ export const createOrder = async (req, res) => {
             paymentId: '',
             openingBalance: 0,
             orderPendingAmount: orderTotalAmount,
+            tenantId: req.tenantId,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
