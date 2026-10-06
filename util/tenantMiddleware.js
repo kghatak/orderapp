@@ -4,22 +4,20 @@
 
 export const TENANTS = {
   NAANU_MILK: 'NM2026',
-  TEST: 'T12026',
 };
-
-export const ALLOWED_TENANT_IDS = Object.values(TENANTS);
 
 const TENANT_ALIASES = {
   NM2026: TENANTS.NAANU_MILK,
-  T12026: TENANTS.TEST,
   TENANT001: TENANTS.NAANU_MILK,
 };
 
-// Extra tenants set on users in Firestore (e.g. T22026) — same shape as T12026.
-const isCustomOrderTenantId = (id) => /^T\d{4,}$/i.test(id);
+// Any tenant set on users in Firestore (T12026, NM2027, ACME, NM-01). The id is used as a
+// Firestore counter field name and in Mongo filters, so only letters, digits, - and _.
+// TENANT00x milk ids are already stripped by canonicalizeTenantId.
+export const isAllowedOrderTenantId = (id) => /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
-export const isAllowedOrderTenantId = (id) =>
-  ALLOWED_TENANT_IDS.includes(id) || isCustomOrderTenantId(id);
+const INVALID_TENANT_MESSAGE =
+  'Invalid tenant ID. Use only letters, digits, - or _ (e.g. NM2026, T12026, NM2027).';
 
 function normalizeTenantId(value) {
   if (typeof value !== 'string') return '';
@@ -58,7 +56,7 @@ export function tenantMiddleware(req, res, next) {
   if (!isAllowedOrderTenantId(tenantId)) {
     return res.status(400).json({
       success: false,
-      message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
+      message: INVALID_TENANT_MESSAGE,
     });
   }
 
@@ -75,7 +73,7 @@ export function optionalTenantMiddleware(req, res, next) {
   if (!isAllowedOrderTenantId(tenantId)) {
     return res.status(400).json({
       success: false,
-      message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
+      message: INVALID_TENANT_MESSAGE,
     });
   }
   req.tenantId = tenantId;
