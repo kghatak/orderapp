@@ -52,7 +52,7 @@ function readTenantFromRequest(req) {
   );
 }
 
-export function tenantMiddleware(req, res, next) {
+export async function tenantMiddleware(req, res, next) {
   const tenantId = resolveRequestTenantId(readTenantFromRequest(req));
 
   if (!isAllowedOrderTenantId(tenantId)) {
@@ -60,6 +60,18 @@ export function tenantMiddleware(req, res, next) {
       success: false,
       message: `Invalid tenant ID. Allowed: ${ALLOWED_TENANT_IDS.join(', ')}`,
     });
+  }
+
+  try {
+    const { isTenantInactive } = await import('../super-admin/tenantStatus.js');
+    if (await isTenantInactive(tenantId)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tenant is inactive',
+      });
+    }
+  } catch (err) {
+    console.error('Tenant status check skipped:', err.message);
   }
 
   req.tenantId = tenantId;
