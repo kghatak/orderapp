@@ -1345,6 +1345,24 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
 
     console.log(`🧹 [Step 1] Deleted ${oldRecordsDeleted} old records`);
 
+    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
+    const { dateStr: targetDateStr, dayStartTimestamp, dayEndTimestamp } = getIstDayBoundaries(triggeredDate);
+    console.log(`📅 Target date (IST): ${targetDateStr}`);
+
+    // Save delivery/return for this date, refresh yesterday, and fill any missing day in the last week.
+    // Runs before the per-outlet balance work so a later timeout still leaves the product documents.
+    let productSnapshots = [];
+    try {
+      productSnapshots = await ensureDailyProductSnapshots(db, triggeredDate, req.tenantId);
+      const failedSnapshots = productSnapshots.filter((row) => row.error);
+      console.log(
+        `📦 Product snapshots — saved: ${productSnapshots.length - failedSnapshots.length}, failed: ${failedSnapshots.length}`,
+      );
+    } catch (snapshotError) {
+      console.error('❌ Product snapshot pass failed:', snapshotError.message);
+      productSnapshots = [{ error: snapshotError.message }];
+    }
+
     // ──────────────────────────────────────────────
     // Step 2 — Query all active outlets
     // ──────────────────────────────────────────────
@@ -1365,6 +1383,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
           successful: 0,
           failed: 0,
           oldRecordsDeleted,
+          productSnapshots,
         },
         executedAt: new Date().toISOString(),
       });
@@ -1388,14 +1407,6 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
     });
 
     console.log(`🏪 [Step 2] Found ${activeOutlets.length} active outlets`);
-
-    // ──────────────────────────────────────────────
-    // Compute date boundaries for the triggered date (in IST)
-    // ──────────────────────────────────────────────
-    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
-    const { dateStr: targetDateStr, dayStartTimestamp, dayEndTimestamp } = getIstDayBoundaries(triggeredDate);
-
-    console.log(`📅 Target date (IST): ${targetDateStr}`);
 
     // ──────────────────────────────────────────────
     // Step 3 & 4 — Create balance records & mark as success
@@ -1539,6 +1550,7 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
         failed,
         oldRecordsDeleted,
         pendingRecalc,
+        productSnapshots,
       },
       executedAt: new Date().toISOString(),
     });
@@ -1571,204 +1583,195 @@ export const calculateDailyOpeningClosingBalance = async (req, res) => {
 };
 
 /**
- * POST /api/balance/daily-product-delivery
- *
- * Aggregates all products delivered across all orders for the triggered date
- * and stores them in the DailyProductDelivery collection with the date as document ID.
+ * Nightly product snapshots.
+ * The 11:50 PM balance job also runs these, and fills any of the previous
+ * 7 IST dates whose DailyProduct* document was never written.
  */
-export const calculateDailyProductDelivery = async (req, res) => {
-  try {
-    const db = getFirestoreDB();
-    const { triggeredAt, timeZone, source } = req.body;
-    const executionStart = new Date();
+const DAILY_PRODUCT_SNAPSHOT_LOOKBACK_DAYS = 7;
 
-    console.log(`📦 [Daily Product Delivery] Started at ${executionStart.toISOString()}`);
-    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
+const DAILY_PRODUCT_KINDS = {
+  delivery: {
+    label: 'Daily Product Delivery',
+    sourceCollection: 'orders',
+    status: 'delivered',
+    sourceDateField: 'deliveredDate',
+    destCollection: 'DailyProductDelivery',
+    dateField: 'deliveredDate',
+    countField: 'orderCount',
+    totalCountKey: 'totalOrders',
+    failureTitle: '❌ Daily Product Delivery Failed',
+    failureBody: 'Daily product delivery calculation failed',
+  },
+  return: {
+    label: 'Daily Product Return',
+    sourceCollection: 'returns',
+    status: 'collected',
+    sourceDateField: 'collectedDate',
+    destCollection: 'DailyProductReturn',
+    dateField: 'returnDate',
+    countField: 'returnCount',
+    totalCountKey: 'totalReturns',
+    failureTitle: '❌ Daily Product Return Failed',
+    failureBody: 'Daily product return calculation failed',
+  },
+};
 
-    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
-    const targetYear = istDate.getUTCFullYear();
-    const targetMonth = istDate.getUTCMonth();
-    const targetDay = istDate.getUTCDate();
+async function recordDailyProductSnapshot(db, { dateStr, requestTenantId, kind }) {
+  const spec = DAILY_PRODUCT_KINDS[kind];
+  const { dayStartTimestamp, dayEndTimestamp } = getIstBoundariesForCalendarDate(dateStr);
+  const tenantOutletIds = await loadTenantOutletIdSet(db, requestTenantId);
+  const [outletsSnapshot, activitySnapshot] = await Promise.all([
+    db.collection('outlets').where('active', '==', true).get(),
+    db.collection(spec.sourceCollection)
+      .where('status', '==', spec.status)
+      .where(spec.sourceDateField, '>=', dayStartTimestamp)
+      .where(spec.sourceDateField, '<=', dayEndTimestamp)
+      .get(),
+  ]);
 
-    const dateStr = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+  const readOutlet = (dd) => ({
+    name: dd.name || dd.outletName || 'Unknown Outlet',
+    gstNo: dd.gstNo || dd.gst || dd.gstin || '',
+    billToPalace: dd.billToPalace || '',
+    state: dd.state || '',
+    address: dd.address || '',
+    pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
+    tenantId: dd.tenantId || '',
+  });
 
-    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
-    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
-    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
-    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
+  const outletMap = new Map();
+  outletsSnapshot.forEach((doc) => {
+    if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
+    outletMap.set(doc.id, readOutlet(doc.data()));
+  });
 
-    console.log(`📅 Target date (IST): ${dateStr}`);
+  console.log(`🏪 Found ${outletMap.size} active outlets`);
+  console.log(`📦 Found ${activitySnapshot.size} ${spec.status} ${spec.sourceCollection} for ${dateStr}`);
 
-    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
-    const [outletsSnapshot, ordersSnapshot] = await Promise.all([
-      db.collection('outlets').where('active', '==', true).get(),
-      db.collection('orders')
-        .where('status', '==', 'delivered')
-        .where('deliveredDate', '>=', dayStartTimestamp)
-        .where('deliveredDate', '<=', dayEndTimestamp)
-        .get(),
-    ]);
+  const outletDataMap = new Map();
+  const globalProductMap = new Map();
+  let totalActivity = 0;
 
-    const readOutlet = (dd) => ({
-      name: dd.name || dd.outletName || 'Unknown Outlet',
-      gstNo: dd.gstNo || dd.gst || dd.gstin || '',
-      billToPalace: dd.billToPalace || '',
-      state: dd.state || '',
-      address: dd.address || '',
-      pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
-      tenantId: dd.tenantId || '',
-    });
-
-    const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => {
-      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
-      outletMap.set(doc.id, readOutlet(doc.data()));
-    });
-
-    console.log(`🏪 Found ${outletMap.size} active outlets`);
-    console.log(`📦 Found ${ordersSnapshot.size} delivered orders for ${dateStr}`);
-
-    const outletDataMap = new Map();
-    const globalProductMap = new Map();
-    let totalOrders = 0;
-
-    ordersSnapshot.forEach((doc) => {
-      const data = doc.data();
-      if (!orderMatchesRequestTenant(data, req.tenantId, tenantOutletIds)) return;
-      totalOrders++;
-      const outletId = data.outletId || 'unknown';
-      const items = data.items || [];
-      if (!outletDataMap.has(outletId)) outletDataMap.set(outletId, { orderCount: 0, productMap: new Map() });
-      const outletEntry = outletDataMap.get(outletId);
-      outletEntry.orderCount++;
-
-      items.forEach((item) => {
-        const productId = item.productId || item.prodid || 'unknown';
-        const name = item.name || 'Unknown Product';
-        const quantity = parseFloat(item.quantity || 0);
-        const price = parseFloat(item.price || 0);
-        const itemSubtotal = price * quantity;
-        const discountPercentage = parseFloat(item.discountPercentage || 0);
-        const explicitDiscount = parseFloat(item.discountAmount || 0);
-        const discountAmount = explicitDiscount > 0
-          ? explicitDiscount
-          : (itemSubtotal * discountPercentage / 100);
-        const itemAmount = itemSubtotal - discountAmount;
-        const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
-        const gstWeighted = lineGst * quantity;
-
-        const accumulate = (map) => {
-          if (map.has(productId)) {
-            const ex = map.get(productId);
-            ex.totalQuantity += quantity;
-            ex.totalAmount += itemAmount;
-            ex.totalDiscount += discountAmount;
-            ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-          } else {
-            map.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount, gstWeighted });
-          }
-        };
-        accumulate(outletEntry.productMap);
-        accumulate(globalProductMap);
-      });
-    });
-
-    const missingIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
-    if (missingIds.length) {
-      const docs = await Promise.all(missingIds.map((id) => db.collection('outlets').doc(id).get()));
-      docs.forEach((doc, i) => outletMap.set(missingIds[i], readOutlet(doc.exists ? doc.data() : {})));
+  activitySnapshot.forEach((doc) => {
+    const data = doc.data();
+    if (kind === 'return' && data.archived) return;
+    if (!orderMatchesRequestTenant(data, requestTenantId, tenantOutletIds)) return;
+    totalActivity++;
+    const outletId = data.outletId || 'unknown';
+    const items = kind === 'return' ? (data.items || data.returnItems || []) : (data.items || []);
+    if (!outletDataMap.has(outletId)) {
+      outletDataMap.set(outletId, { [spec.countField]: 0, productMap: new Map() });
     }
+    const outletEntry = outletDataMap.get(outletId);
+    outletEntry[spec.countField]++;
 
-    const allProductIds = new Set([...globalProductMap.keys()]);
-    outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
-    allProductIds.delete('unknown');
-    const unitMap = new Map();
-    const gstCatalogMap = new Map();
-    if (allProductIds.size > 0) {
-      const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
-      [...allProductIds].forEach((id, i) => {
-        const d = pdocs[i].exists ? pdocs[i].data() : {};
-        unitMap.set(id, d.unit || '');
-        const catalogGst = parseFloat(d.gst ?? 0);
-        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
-      });
-    }
+    items.forEach((item) => {
+      const productId = item.productId || item.prodid || 'unknown';
+      const name = item.name || 'Unknown Product';
+      const quantity = parseFloat(item.quantity || 0);
+      const price = parseFloat(item.price || 0);
+      const itemSubtotal = price * quantity;
+      const discountPercentage = parseFloat(item.discountPercentage || 0);
+      const explicitDiscount = parseFloat(item.discountAmount || 0);
+      const discountAmount = explicitDiscount > 0
+        ? explicitDiscount
+        : (itemSubtotal * discountPercentage / 100);
+      const itemAmount = itemSubtotal - discountAmount;
+      const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
+      const gstWeighted = lineGst * quantity;
 
-    const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
-      const sub = p.totalAmount + (p.totalDiscount || 0);
-      const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
-      const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
-      return {
-        productId: p.productId,
-        name: p.name,
-        totalQuantity: p.totalQuantity,
-        unit: unitMap.get(p.productId) || '',
-        price: Math.round(avgPrice * 100) / 100,
-        discountPercentage: Math.round(discPct * 100) / 100,
-        totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
-        totalAmount: Math.round(p.totalAmount * 100) / 100,
-        gst: gstCatalogMap.get(p.productId) ?? 0,
+      const accumulate = (map) => {
+        if (map.has(productId)) {
+          const ex = map.get(productId);
+          ex.totalQuantity += quantity;
+          ex.totalAmount += itemAmount;
+          ex.totalDiscount += discountAmount;
+          ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
+        } else {
+          map.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount, gstWeighted });
+        }
       };
-    }).sort((a, b) => a.name.localeCompare(b.name));
+      accumulate(outletEntry.productMap);
+      accumulate(globalProductMap);
+    });
+  });
 
-    const computeTotals = (products) => {
-      const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
-      const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
-      const sub = totalAmount + totalDiscount;
-      return {
-        totalAmount: Math.round(totalAmount * 100) / 100,
-        totalDiscount: Math.round(totalDiscount * 100) / 100,
-        totalDiscountPercentage: Math.round(sub > 0 ? (totalDiscount / sub) * 100 : 0, 2),
-      };
+  const missingIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
+  if (missingIds.length) {
+    const docs = await Promise.all(missingIds.map((id) => db.collection('outlets').doc(id).get()));
+    docs.forEach((doc, i) => outletMap.set(missingIds[i], readOutlet(doc.exists ? doc.data() : {})));
+  }
+
+  const allProductIds = new Set([...globalProductMap.keys()]);
+  outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
+  allProductIds.delete('unknown');
+  const unitMap = new Map();
+  const gstCatalogMap = new Map();
+  if (allProductIds.size > 0) {
+    const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
+    [...allProductIds].forEach((id, i) => {
+      const d = pdocs[i].exists ? pdocs[i].data() : {};
+      unitMap.set(id, d.unit || '');
+      const catalogGst = parseFloat(d.gst ?? 0);
+      gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
+    });
+  }
+
+  const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
+    const sub = p.totalAmount + (p.totalDiscount || 0);
+    const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
+    const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
+    return {
+      productId: p.productId,
+      name: p.name,
+      totalQuantity: p.totalQuantity,
+      unit: unitMap.get(p.productId) || '',
+      price: Math.round(avgPrice * 100) / 100,
+      discountPercentage: Math.round(discPct * 100) / 100,
+      totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
+      totalAmount: Math.round(p.totalAmount * 100) / 100,
+      gst: gstCatalogMap.get(p.productId) ?? 0,
     };
+  }).sort((a, b) => a.name.localeCompare(b.name));
 
-    const globalProducts = buildProductList(globalProductMap);
-    const globalTotals = computeTotals(globalProducts);
-    const dateDocRef = db.collection('DailyProductDelivery').doc(dateStr);
-    const batchWrites = [];
-    const outletSummaries = [];
+  const computeTotals = (products) => {
+    const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
+    const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
+    const sub = totalAmount + totalDiscount;
+    return {
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      totalDiscount: Math.round(totalDiscount * 100) / 100,
+      totalDiscountPercentage: Math.round(sub > 0 ? (totalDiscount / sub) * 100 : 0, 2),
+    };
+  };
 
-    appendDailyProductTenantWrites({
-      batchWrites,
-      dateDocRef,
-      dateStr,
-      dateField: 'deliveredDate',
-      countField: 'orderCount',
-      totalCountKey: 'totalOrders',
-      outletDataMap,
-      outletMap,
-      requestTenantId: req.tenantId,
-      buildProductList,
-      computeTotals,
-    });
+  const globalProducts = buildProductList(globalProductMap);
+  const globalTotals = computeTotals(globalProducts);
+  const dateDocRef = db.collection(spec.destCollection).doc(dateStr);
+  const batchWrites = [];
+  const outletSummaries = [];
 
-    for (const [outletId, entry] of outletDataMap) {
-      const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
-      const products = buildProductList(entry.productMap);
-      const totals = computeTotals(products);
-      batchWrites.push({
-        ref: dateDocRef.collection('outlets').doc(outletId),
-        data: {
-          outletId,
-          outletName: info.name,
-          gstNo: info.gstNo || '',
-          billToPalace: info.billToPalace || '',
-          state: info.state || '',
-          address: info.address || '',
-          pincode: info.pincode || '',
-          date: dateStr,
-          products,
-          totalProducts: products.length,
-          totalOrders: entry.orderCount,
-          ...totals,
-          tenantId: storedBalanceTenantId(info.tenantId, req.tenantId),
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          status: 'success',
-        },
-      });
-      outletSummaries.push({
+  appendDailyProductTenantWrites({
+    batchWrites,
+    dateDocRef,
+    dateStr,
+    dateField: spec.dateField,
+    countField: spec.countField,
+    totalCountKey: spec.totalCountKey,
+    outletDataMap,
+    outletMap,
+    requestTenantId,
+    buildProductList,
+    computeTotals,
+  });
+
+  for (const [outletId, entry] of outletDataMap) {
+    const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
+    const products = buildProductList(entry.productMap);
+    const totals = computeTotals(products);
+    batchWrites.push({
+      ref: dateDocRef.collection('outlets').doc(outletId),
+      data: {
         outletId,
         outletName: info.name,
         gstNo: info.gstNo || '',
@@ -1776,47 +1779,143 @@ export const calculateDailyProductDelivery = async (req, res) => {
         state: info.state || '',
         address: info.address || '',
         pincode: info.pincode || '',
-        totalOrders: entry.orderCount,
+        date: dateStr,
+        products,
         totalProducts: products.length,
+        [spec.totalCountKey]: entry[spec.countField],
         ...totals,
-      });
-    }
+        tenantId: storedBalanceTenantId(info.tenantId, requestTenantId),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'success',
+      },
+    });
+    outletSummaries.push({
+      outletId,
+      outletName: info.name,
+      gstNo: info.gstNo || '',
+      billToPalace: info.billToPalace || '',
+      state: info.state || '',
+      address: info.address || '',
+      pincode: info.pincode || '',
+      [spec.totalCountKey]: entry[spec.countField],
+      totalProducts: products.length,
+      ...totals,
+    });
+  }
 
-    await commitBatchedDocumentSets(db, batchWrites);
-    console.log(`✅ Stored ${globalProducts.length} products from ${totalOrders} orders across ${outletDataMap.size} outlets for ${dateStr}`);
+  await commitBatchedDocumentSets(db, batchWrites);
+  console.log(`✅ Stored ${globalProducts.length} products from ${totalActivity} ${spec.sourceCollection} across ${outletDataMap.size} outlets for ${dateStr}`);
+
+  return {
+    date: dateStr,
+    [spec.totalCountKey]: totalActivity,
+    totalProducts: globalProducts.length,
+    totalOutlets: outletDataMap.size,
+    ...globalTotals,
+    outlets: outletSummaries,
+  };
+}
+
+/**
+ * Save today's snapshot and yesterday's snapshot on every run.
+ * Older days in the lookback window are saved only when their date document is missing.
+ */
+async function ensureDailyProductSnapshots(db, triggeredDate, requestTenantId) {
+  const { dateStr } = getIstDayBoundaries(triggeredDate);
+  const results = [];
+
+  for (let offset = 0; offset < DAILY_PRODUCT_SNAPSHOT_LOOKBACK_DAYS; offset++) {
+    const day = addDaysToDateStr(dateStr, -offset);
+    const alwaysRefresh = offset <= 1;
+
+    for (const kind of ['delivery', 'return']) {
+      const spec = DAILY_PRODUCT_KINDS[kind];
+      if (!alwaysRefresh) {
+        const existing = await db.collection(spec.destCollection).doc(day).get();
+        if (existing.exists) continue;
+        console.log(`📦 Backfilling missing ${spec.destCollection}/${day}`);
+      }
+
+      try {
+        const summary = await recordDailyProductSnapshot(db, {
+          dateStr: day,
+          requestTenantId,
+          kind,
+        });
+        results.push({
+          kind,
+          date: day,
+          refreshed: alwaysRefresh,
+          [spec.totalCountKey]: summary[spec.totalCountKey],
+          totalOutlets: summary.totalOutlets,
+          totalProducts: summary.totalProducts,
+        });
+      } catch (error) {
+        console.error(`❌ ${spec.label} failed for ${day}:`, error.message);
+        results.push({ kind, date: day, error: error.message });
+      }
+    }
+  }
+
+  return results;
+}
+
+async function notifyDailyProductFailure(title, failureBody, error) {
+  try {
+    const db = getFirestoreDB();
+    await db.collection('notifications').add({
+      userId: 'admin',
+      title,
+      body: `${failureBody}: ${error.message}`,
+      type: 'system',
+      isRead: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      error: error.message,
+      executedAt: new Date().toISOString(),
+    });
+  } catch (notifError) {
+    console.error('❌ Failed to create error notification:', notifError.message);
+  }
+}
+
+/**
+ * POST /api/balance/daily-product-delivery
+ *
+ * Aggregates all products delivered across all orders for the triggered date
+ * and stores them in the DailyProductDelivery collection with the date as document ID.
+ */
+export const calculateDailyProductDelivery = async (req, res) => {
+  const executionStart = new Date();
+  try {
+    const db = getFirestoreDB();
+    const { triggeredAt, timeZone, source } = req.body;
+
+    console.log(`📦 [Daily Product Delivery] Started at ${executionStart.toISOString()}`);
+    console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
+
+    const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
+    const { dateStr } = getIstDayBoundaries(triggeredDate);
+    console.log(`📅 Target date (IST): ${dateStr}`);
+
+    const summary = await recordDailyProductSnapshot(db, {
+      dateStr,
+      requestTenantId: req.tenantId,
+      kind: 'delivery',
+    });
 
     return res.status(200).json({
       success: true,
       message: `Daily product delivery recorded for ${dateStr}`,
-      summary: {
-        date: dateStr,
-        totalOrders,
-        totalProducts: globalProducts.length,
-        totalOutlets: outletDataMap.size,
-        ...globalTotals,
-        outlets: outletSummaries,
-      },
+      summary,
       executedAt: new Date().toISOString(),
     });
   } catch (error) {
     console.error('❌ [Daily Product Delivery] Fatal error:', error);
-
-    try {
-      const db = getFirestoreDB();
-      await db.collection('notifications').add({
-        userId: 'admin',
-        title: '❌ Daily Product Delivery Failed',
-        body: `Daily product delivery calculation failed: ${error.message}`,
-        type: 'system',
-        isRead: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        error: error.message,
-        executedAt: new Date().toISOString(),
-      });
-    } catch (notifError) {
-      console.error('❌ Failed to create error notification:', notifError.message);
-    }
-
+    await notifyDailyProductFailure(
+      DAILY_PRODUCT_KINDS.delivery.failureTitle,
+      DAILY_PRODUCT_KINDS.delivery.failureBody,
+      error,
+    );
     return res.status(500).json({
       success: false,
       error: error.message,
@@ -1824,7 +1923,6 @@ export const calculateDailyProductDelivery = async (req, res) => {
     });
   }
 };
-
 
 /**
  * POST /api/balance/daily-product-return
@@ -1834,244 +1932,37 @@ export const calculateDailyProductDelivery = async (req, res) => {
  * Uses the same IST day window and outlet/product aggregation shape as daily product delivery.
  */
 export const calculateDailyProductReturn = async (req, res) => {
+  const executionStart = new Date();
   try {
     const db = getFirestoreDB();
     const { triggeredAt, timeZone, source } = req.body;
-    const executionStart = new Date();
 
     console.log(`📦 [Daily Product Return] Started at ${executionStart.toISOString()}`);
     console.log(`   Triggered at: ${triggeredAt}, TimeZone: ${timeZone}, Source: ${source}`);
 
     const triggeredDate = new Date(triggeredAt || executionStart.toISOString());
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const istDate = new Date(triggeredDate.getTime() + IST_OFFSET_MS);
-    const targetYear = istDate.getUTCFullYear();
-    const targetMonth = istDate.getUTCMonth();
-    const targetDay = istDate.getUTCDate();
-
-    const dateStr = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
-
-    const startOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0, 0) - IST_OFFSET_MS);
-    const endOfDayUTC = new Date(Date.UTC(targetYear, targetMonth, targetDay, 23, 59, 59, 999) - IST_OFFSET_MS);
-    const dayStartTimestamp = admin.firestore.Timestamp.fromDate(startOfDayUTC);
-    const dayEndTimestamp = admin.firestore.Timestamp.fromDate(endOfDayUTC);
-
+    const { dateStr } = getIstDayBoundaries(triggeredDate);
     console.log(`📅 Target date (IST): ${dateStr}`);
 
-    const tenantOutletIds = await loadTenantOutletIdSet(db, req.tenantId);
-    const [outletsSnapshot, returnsSnapshot] = await Promise.all([
-      db.collection('outlets').where('active', '==', true).get(),
-      db.collection('returns')
-        .where('status', '==', 'collected')
-        .where('collectedDate', '>=', dayStartTimestamp)
-        .where('collectedDate', '<=', dayEndTimestamp)
-        .get(),
-    ]);
-
-    const readOutlet = (dd) => ({
-      name: dd.name || dd.outletName || 'Unknown Outlet',
-      gstNo: dd.gstNo || dd.gst || dd.gstin || '',
-      billToPalace: dd.billToPalace || '',
-      state: dd.state || '',
-      address: dd.address || '',
-      pincode: (dd.pincode != null && dd.pincode !== 0 && dd.pincode !== '') ? String(dd.pincode) : ((dd.pinCode != null && dd.pinCode !== 0 && dd.pinCode !== '') ? String(dd.pinCode) : ''),
-      tenantId: dd.tenantId || '',
-    });
-
-    const outletMap = new Map();
-    outletsSnapshot.forEach((doc) => {
-      if (tenantOutletIds && !tenantOutletIds.has(doc.id)) return;
-      outletMap.set(doc.id, readOutlet(doc.data()));
-    });
-
-    const outletDataMap = new Map();
-    const globalProductMap = new Map();
-    let totalReturns = 0;
-
-    returnsSnapshot.forEach((doc) => {
-      const data = doc.data();
-      if (data.archived) return;
-      if (!orderMatchesRequestTenant(data, req.tenantId, tenantOutletIds)) return;
-      totalReturns++;
-      const outletId = data.outletId || 'unknown';
-      const items = data.items || data.returnItems || [];
-      if (!outletDataMap.has(outletId)) outletDataMap.set(outletId, { returnCount: 0, productMap: new Map() });
-      const outletEntry = outletDataMap.get(outletId);
-      outletEntry.returnCount++;
-
-      items.forEach((item) => {
-        const productId = item.productId || item.prodid || 'unknown';
-        const name = item.name || 'Unknown Product';
-        const quantity = parseFloat(item.quantity || 0);
-        const price = parseFloat(item.price || 0);
-        const itemSubtotal = price * quantity;
-        const discountPercentage = parseFloat(item.discountPercentage || 0);
-        const explicitDiscount = parseFloat(item.discountAmount || 0);
-        const discountAmount = explicitDiscount > 0
-          ? explicitDiscount
-          : (itemSubtotal * discountPercentage / 100);
-        const itemAmount = itemSubtotal - discountAmount;
-        const lineGst = parseFloat(item.gst ?? item.GST ?? 0) || 0;
-        const gstWeighted = lineGst * quantity;
-
-        const accumulate = (map) => {
-          if (map.has(productId)) {
-            const ex = map.get(productId);
-            ex.totalQuantity += quantity;
-            ex.totalAmount += itemAmount;
-            ex.totalDiscount += discountAmount;
-            ex.gstWeighted = (ex.gstWeighted || 0) + gstWeighted;
-          } else {
-            map.set(productId, { productId, name, totalQuantity: quantity, totalAmount: itemAmount, totalDiscount: discountAmount, gstWeighted });
-          }
-        };
-        accumulate(outletEntry.productMap);
-        accumulate(globalProductMap);
-      });
-    });
-
-    const missingIds = [...outletDataMap.keys()].filter((id) => !outletMap.has(id));
-    if (missingIds.length) {
-      const docs = await Promise.all(missingIds.map((id) => db.collection('outlets').doc(id).get()));
-      docs.forEach((doc, i) => outletMap.set(missingIds[i], readOutlet(doc.exists ? doc.data() : {})));
-    }
-
-    const allProductIds = new Set([...globalProductMap.keys()]);
-    outletDataMap.forEach((e) => e.productMap.forEach((_, pid) => allProductIds.add(pid)));
-    allProductIds.delete('unknown');
-    const unitMap = new Map();
-    const gstCatalogMap = new Map();
-    if (allProductIds.size > 0) {
-      const pdocs = await Promise.all([...allProductIds].map((id) => db.collection('products').doc(id).get()));
-      [...allProductIds].forEach((id, i) => {
-        const d = pdocs[i].exists ? pdocs[i].data() : {};
-        unitMap.set(id, d.unit || '');
-        const catalogGst = parseFloat(d.gst ?? 0);
-        gstCatalogMap.set(id, Number.isFinite(catalogGst) ? catalogGst : 0);
-      });
-    }
-
-    const buildProductList = (pMap) => Array.from(pMap.values()).map((p) => {
-      const sub = p.totalAmount + (p.totalDiscount || 0);
-      const avgPrice = p.totalQuantity > 0 ? sub / p.totalQuantity : 0;
-      const discPct = sub > 0 ? ((p.totalDiscount || 0) / sub) * 100 : 0;
-      return {
-        productId: p.productId,
-        name: p.name,
-        totalQuantity: p.totalQuantity,
-        unit: unitMap.get(p.productId) || '',
-        price: Math.round(avgPrice * 100) / 100,
-        discountPercentage: Math.round(discPct * 100) / 100,
-        totalDiscount: Math.round((p.totalDiscount || 0) * 100) / 100,
-        totalAmount: Math.round(p.totalAmount * 100) / 100,
-        gst: gstCatalogMap.get(p.productId) ?? 0,
-      };
-    }).sort((a, b) => a.name.localeCompare(b.name));
-
-    const computeTotals = (products) => {
-      const totalAmount = products.reduce((s, p) => s + (p.totalAmount || 0), 0);
-      const totalDiscount = products.reduce((s, p) => s + (p.totalDiscount || 0), 0);
-      const sub = totalAmount + totalDiscount;
-      return {
-        totalAmount: Math.round(totalAmount * 100) / 100,
-        totalDiscount: Math.round(totalDiscount * 100) / 100,
-        totalDiscountPercentage: Math.round(sub > 0 ? (totalDiscount / sub) * 100 : 0, 2),
-      };
-    };
-
-    const globalProducts = buildProductList(globalProductMap);
-    const globalTotals = computeTotals(globalProducts);
-    const dateDocRef = db.collection('DailyProductReturn').doc(dateStr);
-    const batchWrites = [];
-    const outletSummaries = [];
-
-    appendDailyProductTenantWrites({
-      batchWrites,
-      dateDocRef,
+    const summary = await recordDailyProductSnapshot(db, {
       dateStr,
-      dateField: 'returnDate',
-      countField: 'returnCount',
-      totalCountKey: 'totalReturns',
-      outletDataMap,
-      outletMap,
       requestTenantId: req.tenantId,
-      buildProductList,
-      computeTotals,
+      kind: 'return',
     });
-
-    for (const [outletId, entry] of outletDataMap) {
-      const info = outletMap.get(outletId) || { name: 'Unknown Outlet', gstNo: '', billToPalace: '', state: '', address: '', pincode: '' };
-      const products = buildProductList(entry.productMap);
-      const totals = computeTotals(products);
-      batchWrites.push({
-        ref: dateDocRef.collection('outlets').doc(outletId),
-        data: {
-          outletId,
-          outletName: info.name,
-          gstNo: info.gstNo || '',
-          billToPalace: info.billToPalace || '',
-          state: info.state || '',
-          address: info.address || '',
-          pincode: info.pincode || '',
-          date: dateStr,
-          products,
-          totalProducts: products.length,
-          totalReturns: entry.returnCount,
-          ...totals,
-          tenantId: storedBalanceTenantId(info.tenantId, req.tenantId),
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          status: 'success',
-        },
-      });
-      outletSummaries.push({
-        outletId,
-        outletName: info.name,
-        gstNo: info.gstNo || '',
-        billToPalace: info.billToPalace || '',
-        state: info.state || '',
-        address: info.address || '',
-        pincode: info.pincode || '',
-        totalReturns: entry.returnCount,
-        totalProducts: products.length,
-        ...totals,
-      });
-    }
-
-    await commitBatchedDocumentSets(db, batchWrites);
-    console.log(`✅ Stored ${globalProducts.length} return products from ${totalReturns} returns across ${outletDataMap.size} outlets for ${dateStr}`);
 
     return res.status(200).json({
       success: true,
       message: `Daily product return recorded for ${dateStr}`,
-      summary: {
-        date: dateStr,
-        totalReturns,
-        totalProducts: globalProducts.length,
-        totalOutlets: outletDataMap.size,
-        ...globalTotals,
-        outlets: outletSummaries,
-      },
+      summary,
       executedAt: new Date().toISOString(),
     });
   } catch (error) {
     console.error('❌ [Daily Product Return] Fatal error:', error);
-
-    try {
-      const db = getFirestoreDB();
-      await db.collection('notifications').add({
-        userId: 'admin',
-        title: '❌ Daily Product Return Failed',
-        body: `Daily product return calculation failed: ${error.message}`,
-        type: 'system',
-        isRead: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        error: error.message,
-        executedAt: new Date().toISOString(),
-      });
-    } catch (notifError) {
-      console.error('❌ Failed to create error notification:', notifError.message);
-    }
-
+    await notifyDailyProductFailure(
+      DAILY_PRODUCT_KINDS.return.failureTitle,
+      DAILY_PRODUCT_KINDS.return.failureBody,
+      error,
+    );
     return res.status(500).json({
       success: false,
       error: error.message,
@@ -2079,7 +1970,6 @@ export const calculateDailyProductReturn = async (req, res) => {
     });
   }
 };
-
 
 /**
  * GET /api/balance/daily-product-delivery/xlsx
