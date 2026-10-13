@@ -2,6 +2,7 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { belongsToTenant, denyUnlessTenant, validateTenantId } from '../../util/tenantMiddleware.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
+import { deleteMirroredOrders } from '../services/orderMongoMirror.js';
 
 const ensureOutletTenant = async (db, req, res, outletId) => {
   const outletRef = db.collection('outlets').doc(outletId);
@@ -497,6 +498,9 @@ export const clearOutletData = async (req, res) => {
         });
 
         await batch.commit();
+        if (collectionName === 'orders') {
+          await deleteMirroredOrders(snapshot.docs.map((doc) => doc.id));
+        }
 
         if (snapshot.docs.length < batchSize) {
           break;
