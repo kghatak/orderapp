@@ -8,6 +8,7 @@ import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProduct
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
 import { belongsToTenant, validateTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
+import { deleteMirroredOrders, mirrorFirestoreOrder } from '../services/orderMongoMirror.js';
 
 const ensureOrderTenant = async (db, req, res, orderId) => {
   const orderRef = db.collection('orders').doc(orderId);
@@ -158,6 +159,8 @@ export const createOrder = async (req, res) => {
       throw new Error('Failed to retrieve newly created order');
     }
 
+    await mirrorFirestoreOrder(orderDoc.id, orderDoc.data());
+
     // Update outlet_payments collection to add order amount
     const orderTotalAmount = orderData['total amount'] || 0;
     if (orderTotalAmount > 0) {
@@ -201,6 +204,7 @@ export const createOrder = async (req, res) => {
             paymentId: '',
             openingBalance: 0,
             orderPendingAmount: orderTotalAmount,
+            tenantId: req.tenantId,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
@@ -318,6 +322,7 @@ export const patchOrder = async (req, res) => {
     }
     const currentStatus = orderDataBefore.status || 'pending';
     const orderTotalAmountBefore = orderDataBefore['total amount'] || 0;
+    let mirrorData = null;
 
     await db.runTransaction(async (transaction) => {
       const orderDoc = await transaction.get(orderRef);
@@ -388,6 +393,7 @@ export const patchOrder = async (req, res) => {
       }
 
       transaction.update(orderRef, updateData);
+      mirrorData = { ...orderData, ...updateData };
 
       // Send notification only if status was updated
       if (newStatus) {
@@ -449,12 +455,23 @@ export const patchOrder = async (req, res) => {
           mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
           mongoDeliverySyncStatus: 'synced'
         });
+        if (mirrorData) {
+          mirrorData = {
+            ...mirrorData,
+            mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
+            mongoDeliverySyncStatus: 'synced',
+          };
+        }
       } catch (mongoSyncError) {
         console.error(
           `Order ${orderId} delivered but failed to sync Products stock:`,
           mongoSyncError
         );
       }
+    }
+
+    if (mirrorData) {
+      await mirrorFirestoreOrder(orderId, mirrorData);
     }
 
     res.status(200).json({ 
@@ -498,6 +515,7 @@ export const putOrder = async (req, res) => {
 
     const orderRef = db.collection('orders').doc(orderId);
     await orderRef.set(orderData, { merge: true }); // Use set with merge to be safe
+    await mirrorFirestoreOrder(orderId, { ...existingOrder.data(), ...orderData });
     
     res.status(200).json({ message: 'Order updated successfully', id: orderId, ...orderData });
 
@@ -633,6 +651,7 @@ export const addItemsToOrder = async (req, res) => {
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
     const updatedOrderData = updatedOrderDoc.data();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderData);
     
     res.status(200).json({ 
       message: 'Items added to order successfully',
@@ -721,6 +740,7 @@ export const removeProductsFromOrder = async (req, res) => {
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
     const updatedOrderData = updatedOrderDoc.data();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderData);
     
     res.status(200).json({ 
       message: 'Products removed from order successfully',
@@ -917,6 +937,7 @@ export const updateOrderQuantities = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Order quantities updated successfully',
       id: updatedOrderDoc.id, 
@@ -1098,6 +1119,7 @@ export const addUtensilsToOrder = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Utensils added to order successfully',
       id: updatedOrderDoc.id, 
@@ -1248,6 +1270,7 @@ export const deliverOrder = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Order delivered successfully',
       id: updatedOrderDoc.id, 
@@ -1343,6 +1366,7 @@ export const autoDeliverOpenOrders = async (req, res) => {
       await Promise.all(
         chunk.map(async (doc) => {
           const data = doc.data() || {};
+          let deliverySynced = true;
           try {
             await addDeliveredOrderItemsToOutletProducts(
               data.outletId,
@@ -1358,7 +1382,35 @@ export const autoDeliverOpenOrders = async (req, res) => {
               `Auto-deliver: order ${doc.id} marked delivered but product stock sync failed:`,
               mongoSyncError.message,
             );
+            deliverySynced = false;
           }
+
+          const fromStatus = data.status || 'unknown';
+          const historyEntry = {
+            from: fromStatus,
+            to: 'delivered',
+            changedAt: deliveredTimestamp,
+          };
+          const updatedHistory = Array.isArray(data.statusHistory)
+            ? [...data.statusHistory, historyEntry]
+            : [historyEntry];
+          await mirrorFirestoreOrder(doc.id, {
+            ...data,
+            status: 'delivered',
+            deliveredDate: data.deliveredDate || deliveredTimestamp,
+            statusHistory: updatedHistory,
+            autoDelivered: true,
+            deliveredBy: 'auto-11pm',
+            autoDeliveredAt: deliveredTimestamp,
+            autoDeliveredFrom: fromStatus,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            ...(deliverySynced
+              ? {
+                  mongoDeliverySyncAt: admin.firestore.FieldValue.serverTimestamp(),
+                  mongoDeliverySyncStatus: 'synced',
+                }
+              : {}),
+          });
         }),
       );
     }
@@ -1506,6 +1558,7 @@ export const restoreUtensils = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Utensils restored successfully',
       id: updatedOrderDoc.id, 
@@ -1615,6 +1668,7 @@ export const updateOrderUtensilQuantity = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Utensil quantity updated successfully',
       id: updatedOrderDoc.id, 
@@ -1688,6 +1742,7 @@ export const removeUtensilFromOrder = async (req, res) => {
 
     // Fetch and return the updated order
     const updatedOrderDoc = await orderRef.get();
+    await mirrorFirestoreOrder(updatedOrderDoc.id, updatedOrderDoc.data());
     res.status(200).json({ 
       message: 'Utensil removed from order successfully',
       id: updatedOrderDoc.id, 
@@ -1990,6 +2045,7 @@ export const deleteOrdersByDate = async (req, res) => {
       // Commit the batch
       await batch.commit();
       deletedCount += currentBatch.length;
+      await deleteMirroredOrders(currentBatch.map((orderDoc) => orderDoc.id));
       console.log(`Processed batch: ${currentBatch.length} orders archived and deleted`);
     }
 
@@ -2065,7 +2121,8 @@ export const backfillDeliveredDate = async (req, res) => {
         ordersToUpdate.push({
           docRef: doc.ref,
           orderId: doc.id,
-          deliveredDate: deliveredTimestamp
+          deliveredDate: deliveredTimestamp,
+          orderData,
         });
       }
     });
@@ -2100,6 +2157,11 @@ export const backfillDeliveredDate = async (req, res) => {
       try {
         await batch.commit();
         updatedCount += currentBatch.length;
+        await Promise.all(
+          currentBatch.map(({ orderId, deliveredDate, orderData: existingOrder }) =>
+            mirrorFirestoreOrder(orderId, { ...existingOrder, deliveredDate })
+          )
+        );
         console.log(`Updated batch ${Math.floor(i / batchSize) + 1}: ${currentBatch.length} orders`);
       } catch (error) {
         console.error(`Error updating batch ${Math.floor(i / batchSize) + 1}:`, error);

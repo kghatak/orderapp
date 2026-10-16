@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { getPortalOutletUserStateModel } from '../models/PortalOutletUserState.js';
+import { canonicalizeTenantId, TENANTS } from '../../util/tenantMiddleware.js';
 
 const JWT_SECRET = process.env.OUTLET_PORTAL_JWT_SECRET || process.env.JWT_SECRET || 'outlet-portal-jwt-change-me';
 const JWT_EXPIRES = process.env.OUTLET_PORTAL_JWT_EXPIRES || process.env.JWT_EXPIRES || '7d';
@@ -8,7 +9,7 @@ const JWT_EXPIRES = process.env.OUTLET_PORTAL_JWT_EXPIRES || process.env.JWT_EXP
 /**
  * POST /outlet-portal/auth/login
  * Body: { phoneNumber, password, fcmToken? }
- * tenantId is read from Firestore users document and returned in the response / JWT.
+ * tenantId comes from the Firestore users document, else the linked outlet, else NM2026.
  */
 export const login = async (req, res) => {
   try {
@@ -53,16 +54,6 @@ export const login = async (req, res) => {
       });
     }
 
-    const userTenantId = userData.tenantId;
-    if (userTenantId === undefined || userTenantId === null || String(userTenantId).trim() === '') {
-      return res.status(403).json({
-        success: false,
-        message: 'User tenantId is not set. Add tenantId on this user in Firestore to use outlet portal.'
-      });
-    }
-
-    const tenantId = String(userTenantId).trim();
-
     const linkedOutletId = userData.outletId || '';
     if (!linkedOutletId) {
       return res.status(403).json({
@@ -86,6 +77,12 @@ export const login = async (req, res) => {
         message: 'Outlet is inactive'
       });
     }
+
+    // A users.tenantId that is already set is kept as-is: sale ID counters are keyed on the raw value.
+    const tenantId =
+      String(userData.tenantId ?? '').trim() ||
+      canonicalizeTenantId(outletData.tenantId) ||
+      TENANTS.NAANU_MILK;
 
     if (fcmToken) {
       await db.collection('users').doc(userDoc.id).update({
