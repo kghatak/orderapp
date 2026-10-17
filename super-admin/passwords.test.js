@@ -12,5 +12,7 @@ test('tenant codes match orderapp tenant ids', () => {
   assert.equal(normalizeTenantCode('nm2026'), 'NM2026');
   assert.equal(normalizeTenantCode('t22026'), 'T22026');
   assert.equal(normalizeTenantCode('TENANT001'), 'NM2026');
-  assert.equal(normalizeTenantCode('harbor'), '');
+  assert.equal(normalizeTenantCode('harbor'), 'harbor');
+  assert.equal(normalizeTenantCode('test1'), 'test1');
+  assert.equal(normalizeTenantCode('bad/code'), '');
 });

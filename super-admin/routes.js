@@ -5,6 +5,7 @@ import { login, logout, session, setPassword } from './authController.js';
 import {
   dashboard,
   getAdmins,
+  getTenant,
   getTenants,
   getUsers,
   onboardWhatsapp,
@@ -32,6 +33,7 @@ router.get('/dashboard', asyncHandler(dashboard));
 router.get('/permissions', asyncHandler(permissions));
 router.get('/tenants/options', asyncHandler(tenantOptions));
 router.get('/tenants', asyncHandler(getTenants));
+router.get('/tenants/:id', asyncHandler(getTenant));
 router.post('/tenants', asyncHandler(postTenant));
 router.patch('/tenants/:id', asyncHandler(patchTenant));
 router.patch('/tenants/:id/status', asyncHandler(patchTenantStatus));

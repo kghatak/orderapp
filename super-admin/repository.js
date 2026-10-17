@@ -1,4 +1,5 @@
 import { getFirestoreDB } from '../util/firebase.js';
+import { FEATURE_KEYS } from './features.js';
 import { nextTenantCounter } from '../util/tenantCounter.js';
 import { canonicalizeTenantId, TENANTS } from '../util/tenantMiddleware.js';
 import { clearTenantStatusCache } from './tenantStatus.js';
@@ -250,6 +251,7 @@ export function publicTenant(tenant, outletCount = 0) {
     status: tenant.status || 'active',
     outletCount,
     whatsappStatus: tenant.whatsappStatus || 'not_started',
+    features: Array.isArray(tenant.features) ? tenant.features : [...FEATURE_KEYS],
     createdAt: tenant.createdAt || null,
     updatedAt: tenant.updatedAt || null,
   };

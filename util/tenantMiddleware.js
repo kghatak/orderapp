@@ -11,13 +11,19 @@ const TENANT_ALIASES = {
   TENANT001: TENANTS.NAANU_MILK,
 };
 
-// Any tenant set on users in Firestore (T12026, NM2027, ACME, NM-01). The id is used as a
-// Firestore counter field name and in Mongo filters, so only letters, digits, - and _.
+// The id is stored as a Firestore counter field name, so it cannot contain . * ~ / [ ].
 // TENANT00x milk ids are already stripped by canonicalizeTenantId.
-export const isAllowedOrderTenantId = (id) => /^[A-Za-z0-9_-]{1,64}$/.test(id);
+const TENANT_CODE_FORBIDDEN = /[.*~/[\]\u0000-\u001F\u007F]/
+
+export const isAllowedOrderTenantId = (id) => {
+  if (typeof id !== 'string' || id.length < 1 || id.length > 64) return false;
+  if (TENANT_CODE_FORBIDDEN.test(id)) return false;
+  if (/^__.*__$/.test(id)) return false;
+  return true;
+};
 
 const INVALID_TENANT_MESSAGE =
-  'Invalid tenant ID. Use only letters, digits, - or _ (e.g. NM2026, T12026, NM2027).';
+  'Enter a tenant code up to 64 characters. Avoid . * ~ / [ ].';
 
 function normalizeTenantId(value) {
   if (typeof value !== 'string') return '';

@@ -42,6 +42,8 @@ import { handleWhatsAppInbound } from './milk/controllers/whatsappInboundControl
 import whatsappReplyRoutes from './milk/routes/whatsappReplyRoutes.js';
 import superAdminRoutes from './super-admin/routes.js';
 import { bootstrapSuperAdmin } from './super-admin/bootstrap.js';
+import { tenantMiddleware } from './util/tenantMiddleware.js';
+import { featuresForTenantCode } from './super-admin/tenantFeatures.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -93,6 +95,16 @@ await initializeFirestore();
 await bootstrapSuperAdmin();
 await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module will fail on use
 await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
+
+app.get('/tenant-features', tenantMiddleware, async (req, res) => {
+  try {
+    const features = await featuresForTenantCode(req.tenantId);
+    res.json({ success: true, data: { features } });
+  } catch (err) {
+    console.error('Tenant features lookup failed:', err.message);
+    res.status(500).json({ success: false, message: 'Could not load tenant features.' });
+  }
+});
 
 // Route bindings
 app.use('/order(s)?', orderRoutes);

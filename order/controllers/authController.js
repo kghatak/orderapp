@@ -4,6 +4,7 @@ import { NannuUser } from '../models/NannuUser.js';
 import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthController.js';
 import { isMongoConnected } from '../../config/db.js';
 import { canonicalizeTenantId, isAllowedOrderTenantId } from '../../util/tenantMiddleware.js';
+import { featuresForTenantCode } from '../../super-admin/tenantFeatures.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Signup API
@@ -349,6 +350,12 @@ export const login = async (req, res) => {
       createdAt: userData.createdAt,
       updatedAt: userData.updatedAt
     };
+
+    try {
+      responseData.features = await featuresForTenantCode(userTenant);
+    } catch (featureErr) {
+      console.error('Login: tenant features lookup failed:', featureErr.message);
+    }
 
     // Milk JWT uses the user's refine-auth tenant from Firestore (not a body/hardcoded id).
     const milkEligibleProfiles = ['Admin', 'StoreKeeper'];

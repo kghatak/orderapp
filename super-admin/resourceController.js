@@ -28,6 +28,7 @@ import {
   assertName,
   assertPhone,
   assertRole,
+  assertFeatures,
   assertStatus,
   assertTenantCode,
 } from './validate.js';
@@ -94,6 +95,13 @@ export async function tenantOptions(_req, res) {
   );
 }
 
+export async function getTenant(req, res) {
+  const tenant = await findTenantById(req.params.id);
+  if (!tenant) throw new HttpError(404, 'Tenant not found.');
+  const counts = await outletCounts();
+  sendData(res, withOutletCount(tenant, counts));
+}
+
 export async function postTenant(req, res) {
   const code = assertTenantCode(req.body?.code);
   if (await findTenantByCode(code)) {
@@ -121,13 +129,16 @@ export async function patchTenant(req, res) {
   if (code !== existing.code && (await findTenantByCode(code))) {
     throw new HttpError(409, 'A tenant with this code already exists.');
   }
-  const tenant = await updateTenant(existing.id, {
+  const features = assertFeatures(req.body?.features);
+  const patch = {
     code,
     name: assertName(req.body?.name, 'Name'),
     business: assertName(req.body?.business, 'Business'),
     email: assertEmail(req.body?.email),
     phone: assertPhone(req.body?.phone),
-  });
+  };
+  if (features !== undefined) patch.features = features;
+  const tenant = await updateTenant(existing.id, patch);
   await addActivity(`${tenant.name} was updated`, 'tenant');
   const counts = await outletCounts();
   sendData(res, withOutletCount(tenant, counts), 'Tenant updated');
