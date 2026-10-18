@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { getFirestoreDB } from '../../util/firebase.js';
 import { getPortalOutletUserStateModel } from '../models/PortalOutletUserState.js';
 import { canonicalizeTenantId, TENANTS } from '../../util/tenantMiddleware.js';
+import { featuresForTenantCode } from '../../super-admin/tenantFeatures.js';
 
 const JWT_SECRET = process.env.OUTLET_PORTAL_JWT_SECRET || process.env.JWT_SECRET || 'outlet-portal-jwt-change-me';
 const JWT_EXPIRES = process.env.OUTLET_PORTAL_JWT_EXPIRES || process.env.JWT_EXPIRES || '7d';
@@ -143,7 +144,11 @@ export const login = async (req, res) => {
           address: outletData.address || '',
           primaryPhoneNumber: outletData.primaryPhoneNumber || outletData.phoneNumber || '',
           gstNo: outletData.gstNo || outletData.gstNumber || outletData.gst || outletData.gstin || ''
-        }
+        },
+        features: await featuresForTenantCode(tenantId).catch((featureErr) => {
+          console.error('Portal login: tenant features lookup failed:', featureErr.message);
+          return undefined;
+        })
       }
     });
   } catch (err) {
