@@ -46,7 +46,7 @@ export const createNannuUser = async (req, res) => {
       fcmToken: fcmToken || ''
     });
     
-    await db.collection('users').doc(userId).set({ ...user });
+    await db.collection('users').doc(userId).create({ ...user });
     
     res.status(201).json({
       success: true,

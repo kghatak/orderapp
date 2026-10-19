@@ -212,7 +212,7 @@ export const signup = async (req, res) => {
       fcmToken: fcmToken || ''
     });
 
-    await db.collection('users').doc(userId).set({
+    await db.collection('users').doc(userId).create({
       ...user,
       ...(userProfile === 'OutletStorekeeper'
         ? { name: storekeeperName, outletName: storekeeperOutletName }

@@ -68,7 +68,7 @@ async function ensureOrderAdmin(tenant) {
     enableNotification: true,
     fcmToken: '',
   });
-  await db.collection('users').doc(userId).set({ ...user, createdBy: 'super-admin' });
+  await db.collection('users').doc(userId).create({ ...user, createdBy: 'super-admin' });
   await ensureTenantAdmin(tenant, userId, phone);
   return { userId };
 }
