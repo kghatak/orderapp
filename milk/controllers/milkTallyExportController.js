@@ -67,13 +67,12 @@ const formatMetricForNarration = (value) => {
   return String(value).trim();
 };
 
-const buildLineNarration = (procurement, supplierName, lineMetrics = null) => {
-  const shiftLabel = procurement.shift === 'evening' ? 'Evening' : 'Morning';
-  let text = `Milk purchase from ${supplierName || 'supplier'} - ${shiftLabel} shift`;
+const buildLineNarration = (supplierName, lineMetrics = null) => {
+  let text = `Milk purchase from ${supplierName || 'supplier'}`;
 
-  const fat = lineMetrics?.fat ?? procurement.fat;
-  const snf = lineMetrics?.snf ?? procurement.snf;
-  const fatMeterReading = lineMetrics?.fatMeterReading ?? procurement.fatMeterReading;
+  const fat = lineMetrics?.fat;
+  const snf = lineMetrics?.snf;
+  const fatMeterReading = lineMetrics?.fatMeterReading;
 
   const fatLabel = formatMetricForNarration(fat);
   if (fatLabel !== '') {
@@ -127,6 +126,92 @@ const getExportLines = (procurement) => {
     snf: procurement.snf,
     fatMeterReading: procurement.fatMeterReading,
   }];
+};
+
+const localDateKey = (dateValue) => {
+  const d = new Date(dateValue);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const emptyMilkBucket = () => ({
+  quantity: 0,
+  amount: 0,
+  fatWeighted: 0,
+  snfWeighted: 0,
+  meterWeighted: 0,
+  weightQty: 0,
+});
+
+const addExportLineToBucket = (bucket, line) => {
+  const quantity = Number(line.quantity) || 0;
+  bucket.quantity += quantity;
+  bucket.amount += Number(line.amount) || 0;
+  if (quantity <= 0) return;
+  bucket.fatWeighted += (Number(line.fat) || 0) * quantity;
+  bucket.snfWeighted += (Number(line.snf) || 0) * quantity;
+  bucket.meterWeighted += (Number(line.fatMeterReading) || 0) * quantity;
+  bucket.weightQty += quantity;
+};
+
+const averageMetric = (weighted, quantity) => {
+  if (!(quantity > 0)) return '';
+  return Math.round(((weighted / quantity) + Number.EPSILON) * 100) / 100;
+};
+
+const supplierRecord = (procurement) => (
+  procurement.supplierId && typeof procurement.supplierId === 'object'
+    ? procurement.supplierId
+    : {}
+);
+
+/**
+ * One voucher per supplier per calendar day.
+ * Cow and buffalo quantities are summed. Fat, SNF, and meter are quantity-weighted averages.
+ */
+const groupProcurementsForTally = (procurements) => {
+  const groups = new Map();
+
+  for (const procurement of procurements) {
+    const supplier = supplierRecord(procurement);
+    const supplierId = supplier._id
+      ? String(supplier._id)
+      : String(procurement.supplierId || 'unknown');
+    const day = localDateKey(procurement.date);
+    const key = `${day}|${supplierId}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        date: procurement.date,
+        supplier,
+        cow: emptyMilkBucket(),
+        buffalo: emptyMilkBucket(),
+      });
+    }
+
+    const group = groups.get(key);
+    for (const line of getExportLines(procurement)) {
+      const bucket = line.itemName === 'Buffalo Milk' ? group.buffalo : group.cow;
+      addExportLineToBucket(bucket, line);
+    }
+  }
+
+  return [...groups.values()];
+};
+
+const bucketToExportLine = (itemName, bucket) => {
+  const quantity = bucket.quantity;
+  if (!(quantity > 0)) return null;
+  const amount = roundMoney2(bucket.amount);
+  return {
+    itemName,
+    quantity,
+    amount,
+    rate: roundMoney2(amount / quantity),
+    fat: averageMetric(bucket.fatWeighted, bucket.weightQty),
+    snf: averageMetric(bucket.snfWeighted, bucket.weightQty),
+    fatMeterReading: averageMetric(bucket.meterWeighted, bucket.weightQty),
+  };
 };
 
 /** Same GST / rounding logic as daily product delivery export. */
@@ -273,10 +358,8 @@ const buildMilkTallyExportRows = async (req) => {
   const rows = [];
   let voucherOffset = 0;
 
-  for (const procurement of procurements) {
-    const supplier = procurement.supplierId && typeof procurement.supplierId === 'object'
-      ? procurement.supplierId
-      : {};
+  for (const group of groupProcurementsForTally(procurements)) {
+    const supplier = group.supplier;
     const gstNo = supplier.gstNumber ? String(supplier.gstNumber).trim() : '';
     const registrationType = gstNo ? 'Regular' : 'Unregistered/Consumer';
     const registrationNumber = gstNo || '';
@@ -288,9 +371,12 @@ const buildMilkTallyExportRows = async (req) => {
     const supplierName = supplier.name || '';
     const voucherNumber = startVoucherNumber + voucherOffset;
     voucherOffset += 1;
-    const voucherDate = formatVoucherDate(procurement.date);
+    const voucherDate = formatVoucherDate(group.date);
 
-    const lines = getExportLines(procurement);
+    const lines = [
+      bucketToExportLine('Cow Milk', group.cow),
+      bucketToExportLine('Buffalo Milk', group.buffalo),
+    ].filter(Boolean);
     let isFirstRowOfGroup = true;
 
     for (const line of lines) {
@@ -309,7 +395,7 @@ const buildMilkTallyExportRows = async (req) => {
         : (isFirstRowOfGroup ? pinCodeRaw : '');
       const rowRegistrationType = isFirstRowOfGroup ? registrationType : '';
       const rowRegistrationNumber = isFirstRowOfGroup ? registrationNumber : '';
-      const rowNarration = buildLineNarration(procurement, supplierName, {
+      const rowNarration = buildLineNarration(supplierName, {
         fat: line.fat,
         snf: line.snf,
         fatMeterReading: line.fatMeterReading,
