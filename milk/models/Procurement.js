@@ -15,6 +15,7 @@ const procurementSchema = new mongoose.Schema({
   supplierId: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier', required: true },
   date: { type: Date, required: true },
   shift: { type: String, enum: ['morning', 'evening'], required: true },
+  patch: { type: Number, min: 1 },
   milkType: { type: String, enum: ['cow', 'buffalo', 'mixed'], default: 'cow' },
   quantity: { type: Number, required: true }, // Kg
   fat: { type: Number, default: 0 },

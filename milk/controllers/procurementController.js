@@ -4,6 +4,30 @@ import { sendWhatsAppTemplate } from '../../util/whatsapp.js';
 import { withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const FAT_METER_MIN_READING = 28;
+
+const round2 = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+};
+
+const roundProcurementFigures = (doc) => {
+  if (!doc || typeof doc !== 'object') return doc;
+  if (doc.fat != null) doc.fat = round2(doc.fat);
+  if (doc.snf != null) doc.snf = round2(doc.snf);
+  if (doc.amount != null) doc.amount = round2(doc.amount);
+  if (doc.ratePerFat != null) doc.ratePerFat = round2(doc.ratePerFat);
+  if (Array.isArray(doc.lines)) {
+    doc.lines = doc.lines.map((line) => ({
+      ...line,
+      fat: line?.fat != null ? round2(line.fat) : line?.fat,
+      snf: line?.snf != null ? round2(line.snf) : line?.snf,
+      amount: line?.amount != null ? round2(line.amount) : line?.amount,
+      ratePerFat: line?.ratePerFat != null ? round2(line.ratePerFat) : line?.ratePerFat,
+    }));
+  }
+  return doc;
+};
 const MILK_TYPES = ['cow', 'buffalo', 'mixed'];
 
 const MILK_TYPE_LABELS = {
@@ -15,6 +39,34 @@ const MILK_TYPE_LABELS = {
 const SHIFT_LABELS = {
   morning: 'Morning',
   evening: 'Evening'
+};
+
+const parsePatchNumber = (value) => {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+};
+
+const utcDayBounds = (dateValue) => {
+  const d = new Date(dateValue);
+  if (Number.isNaN(d.getTime())) return null;
+  const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start, end };
+};
+
+const findPatchShiftConflict = async ({ tenantId, supplierId, date, shift, patch, excludeId }) => {
+  const bounds = utcDayBounds(date);
+  if (!bounds) return null;
+  const filter = withMongoTenant({
+    supplierId,
+    shift,
+    patch,
+    date: { $gte: bounds.start, $lt: bounds.end },
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+  }, tenantId);
+  return Procurement.findOne(filter).select('_id').lean();
 };
 
 const buildMilkEntryWhatsAppParams = (procurement, supplier, line = null) => {
@@ -105,7 +157,7 @@ const computeProcurementAmount = (quantity, fat, ratePerFat, fatMeterReading, op
   const deductionPerKg = fatMeterDeductionPerKg(fatMeterReading, options);
   const deduction = deductionPerKg * qty;
   const amount = Math.max(0, gross - deduction);
-  return { gross, deduction, amount };
+  return { gross: round2(gross), deduction: round2(deduction), amount: round2(amount) };
 };
 
 const isMixedPayload = (body) =>
@@ -162,25 +214,25 @@ const computeLine = (supplier, line) => {
   return {
     milkType: line.milkType,
     quantity: line.quantity,
-    fat: line.fat,
-    snf: line.snf || 0,
+    fat: round2(line.fat),
+    snf: round2(line.snf || 0),
     fatMeterReading: line.fatMeterReading ?? 0,
-    ratePerFat,
-    amount
+    ratePerFat: round2(ratePerFat),
+    amount: round2(amount)
   };
 };
 
 const computeMixedProcurement = (supplier, inputLines) => {
   const lines = inputLines.map((line) => computeLine(supplier, line));
   const quantity = lines.reduce((sum, line) => sum + line.quantity, 0);
-  const amount = lines.reduce((sum, line) => sum + line.amount, 0);
+  const amount = round2(lines.reduce((sum, line) => sum + line.amount, 0));
   const fatWeight = lines.reduce((sum, line) => sum + line.quantity * line.fat, 0);
   const snfWeight = lines.reduce((sum, line) => sum + line.quantity * (line.snf || 0), 0);
-  const fat = quantity > 0 ? fatWeight / quantity : 0;
-  const snf = quantity > 0 ? snfWeight / quantity : 0;
+  const fat = quantity > 0 ? round2(fatWeight / quantity) : 0;
+  const snf = quantity > 0 ? round2(snfWeight / quantity) : 0;
   const rateWeight = lines.reduce((sum, line) => sum + line.quantity * line.fat, 0);
   const ratePerFat = rateWeight > 0
-    ? lines.reduce((sum, line) => sum + line.quantity * line.fat * line.ratePerFat, 0) / rateWeight
+    ? round2(lines.reduce((sum, line) => sum + line.quantity * line.fat * line.ratePerFat, 0) / rateWeight)
     : 0;
 
   return { lines, quantity, fat, snf, amount, ratePerFat, fatMeterReading: 0 };
@@ -238,7 +290,7 @@ export const listProcurements = async (req, res) => {
 
     res.json({
       success: true,
-      data: procurements,
+      data: procurements.map(roundProcurementFigures),
       pagination: { page: parseInt(page), limit: parseInt(limit), total }
     });
   } catch (err) {
@@ -267,7 +319,7 @@ export const getProcurement = async (req, res) => {
       }
     }
 
-    res.json({ success: true, data: procurement });
+    res.json({ success: true, data: roundProcurementFigures(procurement) });
   } catch (err) {
     console.error('Get procurement error:', err);
     res.status(500).json({ success: false, message: 'Failed to get procurement' });
@@ -278,7 +330,7 @@ export const createProcurement = async (req, res) => {
   try {
     const { tenantId, user } = req;
     const body = req.body;
-    const { supplierId, date, shift, milkType, quantity, fat, snf, fatMeterReading, remarks } = body;
+    const { supplierId, date, shift, milkType, quantity, fat, snf, fatMeterReading, remarks, patch } = body;
 
     if (!supplierId || !date || !shift) {
       return res.status(400).json({
@@ -291,6 +343,28 @@ export const createProcurement = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "shift must be 'morning' or 'evening'"
+      });
+    }
+
+    const patchNumber = parsePatchNumber(patch);
+    if (!patchNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'patch must be a whole number starting at 1'
+      });
+    }
+
+    const patchTaken = await findPatchShiftConflict({
+      tenantId,
+      supplierId,
+      date,
+      shift,
+      patch: patchNumber,
+    });
+    if (patchTaken) {
+      return res.status(409).json({
+        success: false,
+        message: `Patch ${patchNumber} already has a ${shift} entry for this supplier on this date`
       });
     }
 
@@ -327,6 +401,7 @@ export const createProcurement = async (req, res) => {
         supplierId,
         date: new Date(date),
         shift,
+        patch: patchNumber,
         milkType: 'mixed',
         ...computed,
         recordedBy: user._id,
@@ -354,12 +429,13 @@ export const createProcurement = async (req, res) => {
         supplierId,
         date: new Date(date),
         shift,
+        patch: patchNumber,
         milkType: procurementMilkType,
         quantity: quantity || 0,
-        fat: fat || 0,
-        snf: snf || 0,
+        fat: round2(fat || 0),
+        snf: round2(snf || 0),
         fatMeterReading: fatMeterReading || 0,
-        ratePerFat: baseRate,
+        ratePerFat: round2(baseRate),
         amount,
         recordedBy: user._id,
         remarks: remarks || ''
@@ -396,7 +472,7 @@ export const updateProcurement = async (req, res) => {
     const { tenantId } = req;
     const { id } = req.params;
     const body = req.body;
-    const { shift, milkType, quantity, fat, snf, fatMeterReading, ratePerFat, remarks } = body;
+    const { shift, milkType, quantity, fat, snf, fatMeterReading, ratePerFat, remarks, patch } = body;
 
     const procurement = await Procurement.findOne(withMongoTenant({ _id: id }, tenantId));
     if (!procurement) {
@@ -417,8 +493,34 @@ export const updateProcurement = async (req, res) => {
           message: "shift must be 'morning' or 'evening'"
         });
       }
-      procurement.shift = shift;
     }
+
+    const nextShift = shift !== undefined ? shift : procurement.shift;
+    const nextPatch = patch !== undefined ? parsePatchNumber(patch) : procurement.patch;
+    if (patch !== undefined && !nextPatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'patch must be a whole number starting at 1'
+      });
+    }
+    if (nextPatch) {
+      const patchTaken = await findPatchShiftConflict({
+        tenantId,
+        supplierId: procurement.supplierId,
+        date: procurement.date,
+        shift: nextShift,
+        patch: nextPatch,
+        excludeId: procurement._id,
+      });
+      if (patchTaken) {
+        return res.status(409).json({
+          success: false,
+          message: `Patch ${nextPatch} already has a ${nextShift} entry for this supplier on this date`
+        });
+      }
+      procurement.patch = nextPatch;
+    }
+    if (shift !== undefined) procurement.shift = nextShift;
     if (milkType !== undefined) {
       if (!MILK_TYPES.includes(milkType)) {
         return res.status(400).json({
@@ -456,19 +558,19 @@ export const updateProcurement = async (req, res) => {
       procurement.fatMeterReading = computed.fatMeterReading;
     } else {
       if (quantity != null) procurement.quantity = quantity;
-      if (fat != null) procurement.fat = fat;
-      if (snf != null) procurement.snf = snf;
+      if (fat != null) procurement.fat = round2(fat);
+      if (snf != null) procurement.snf = round2(snf);
       if (fatMeterReading != null) procurement.fatMeterReading = fatMeterReading;
       procurement.lines = undefined;
 
       if (ratePerFat != null) {
-        procurement.ratePerFat = ratePerFat;
+        procurement.ratePerFat = round2(ratePerFat);
       } else if (supplier) {
         const rateError = validateSupplierRate(supplier, procurement.milkType);
         if (rateError) {
           return res.status(400).json({ success: false, message: rateError });
         }
-        procurement.ratePerFat = resolveSupplierRatePerFat(supplier, procurement.milkType);
+        procurement.ratePerFat = round2(resolveSupplierRatePerFat(supplier, procurement.milkType));
       }
       const { amount } = computeProcurementAmount(
         procurement.quantity,
