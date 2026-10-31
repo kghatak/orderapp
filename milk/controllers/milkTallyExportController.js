@@ -62,37 +62,42 @@ const formatVoucherDate = (dateValue) => {
 const itemLabel = (milkType) =>
   milkType === 'buffalo' ? 'Buffalo Milk' : 'Cow Milk';
 
-const formatMetricForNarration = (value) => {
-  if (value == null || value === '') return '';
-  return String(value).trim();
+const formatNarrationNumber = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  return String(Math.round((n + Number.EPSILON) * 100) / 100);
 };
 
-const buildLineNarration = (supplierName, lineMetrics = null) => {
-  let text = `Milk purchase from ${supplierName || 'supplier'}`;
+const emptyShiftSlot = () => ({
+  quantity: 0,
+  fatWeighted: 0,
+  meterWeighted: 0,
+  weightQty: 0,
+});
 
-  const fat = lineMetrics?.fat;
-  const snf = lineMetrics?.snf;
-  const fatMeterReading = lineMetrics?.fatMeterReading;
-
-  const fatLabel = formatMetricForNarration(fat);
-  if (fatLabel !== '') {
-    text += ` Fat =${fatLabel}`;
+const formatShiftNarration = (label, slot) => {
+  if (!slot || !(Number(slot.quantity) > 0)) return '';
+  const qty = formatNarrationNumber(slot.quantity);
+  let text = `${label} QTY ${qty}`;
+  if (slot.weightQty > 0) {
+    text += ` Fat =${formatNarrationNumber(slot.fatWeighted / slot.weightQty)}`;
+    text += ` Metar ${formatNarrationNumber(slot.meterWeighted / slot.weightQty)}`;
   }
-
-  const snfLabel = formatMetricForNarration(snf);
-  if (snfLabel !== '' && snfLabel !== '0') {
-    text += ` SNF ${snfLabel}`;
-  }
-
-  const meterLabel = formatMetricForNarration(fatMeterReading);
-  if (meterLabel !== '') {
-    text += ` Metar ${meterLabel}`;
-  }
-
   return text;
 };
 
+/** MS = morning shift, ES = evening shift. Both stay on one narration line. */
+const buildLineNarration = (supplierName, bucket) => {
+  const shifts = [
+    formatShiftNarration('MS', bucket?.morning),
+    formatShiftNarration('ES', bucket?.evening),
+  ].filter(Boolean);
+  const suffix = shifts.length ? ` - ${shifts.join('  ')}` : '';
+  return `Milk purchase from ${supplierName || 'supplier'}${suffix}`;
+};
+
 const getExportLines = (procurement) => {
+  const shift = procurement.shift === 'evening' ? 'evening' : 'morning';
   if (
     procurement.milkType === 'mixed'
     && Array.isArray(procurement.lines)
@@ -107,10 +112,9 @@ const getExportLines = (procurement) => {
           itemName: itemLabel(line.milkType),
           quantity,
           amount,
-          rate: quantity > 0 ? roundMoney2(amount / quantity) : 0,
           fat: line.fat,
-          snf: line.snf,
           fatMeterReading: line.fatMeterReading,
+          shift,
         };
       });
   }
@@ -121,10 +125,9 @@ const getExportLines = (procurement) => {
     itemName: itemLabel(procurement.milkType),
     quantity,
     amount,
-    rate: quantity > 0 ? roundMoney2(amount / quantity) : 0,
     fat: procurement.fat,
-    snf: procurement.snf,
     fatMeterReading: procurement.fatMeterReading,
+    shift,
   }];
 };
 
@@ -137,26 +140,25 @@ const localDateKey = (dateValue) => {
 const emptyMilkBucket = () => ({
   quantity: 0,
   amount: 0,
-  fatWeighted: 0,
-  snfWeighted: 0,
-  meterWeighted: 0,
-  weightQty: 0,
+  morning: emptyShiftSlot(),
+  evening: emptyShiftSlot(),
 });
+
+const addShiftToSlot = (slot, line, quantity) => {
+  if (!slot || quantity <= 0) return;
+  slot.quantity += quantity;
+  slot.fatWeighted += (Number(line.fat) || 0) * quantity;
+  slot.meterWeighted += (Number(line.fatMeterReading) || 0) * quantity;
+  slot.weightQty += quantity;
+};
 
 const addExportLineToBucket = (bucket, line) => {
   const quantity = Number(line.quantity) || 0;
   bucket.quantity += quantity;
   bucket.amount += Number(line.amount) || 0;
   if (quantity <= 0) return;
-  bucket.fatWeighted += (Number(line.fat) || 0) * quantity;
-  bucket.snfWeighted += (Number(line.snf) || 0) * quantity;
-  bucket.meterWeighted += (Number(line.fatMeterReading) || 0) * quantity;
-  bucket.weightQty += quantity;
-};
-
-const averageMetric = (weighted, quantity) => {
-  if (!(quantity > 0)) return '';
-  return Math.round(((weighted / quantity) + Number.EPSILON) * 100) / 100;
+  const slot = line.shift === 'evening' ? bucket.evening : bucket.morning;
+  addShiftToSlot(slot, line, quantity);
 };
 
 const supplierRecord = (procurement) => (
@@ -166,19 +168,26 @@ const supplierRecord = (procurement) => (
 );
 
 /**
- * One voucher per supplier per calendar day.
- * Cow and buffalo quantities are summed. Fat, SNF, and meter are quantity-weighted averages.
+ * One voucher per supplier name, calendar day, and patch.
+ * Morning and evening on the same patch are combined into one voucher.
+ * Cow and buffalo stay on separate item rows. Narration keeps each shift’s quantity, fat, and meter.
  */
 const groupProcurementsForTally = (procurements) => {
   const groups = new Map();
 
   for (const procurement of procurements) {
     const supplier = supplierRecord(procurement);
+    const supplierNameKey = String(supplier.name || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
     const supplierId = supplier._id
       ? String(supplier._id)
       : String(procurement.supplierId || 'unknown');
     const day = localDateKey(procurement.date);
-    const key = `${day}|${supplierId}`;
+    const patchNum = Number(procurement.patch);
+    const patchKey = Number.isInteger(patchNum) && patchNum > 0 ? String(patchNum) : 'legacy';
+    const key = `${day}|${supplierNameKey || supplierId}|${patchKey}`;
 
     if (!groups.has(key)) {
       groups.set(key, {
@@ -208,9 +217,6 @@ const bucketToExportLine = (itemName, bucket) => {
     quantity,
     amount,
     rate: roundMoney2(amount / quantity),
-    fat: averageMetric(bucket.fatWeighted, bucket.weightQty),
-    snf: averageMetric(bucket.snfWeighted, bucket.weightQty),
-    fatMeterReading: averageMetric(bucket.meterWeighted, bucket.weightQty),
   };
 };
 
@@ -373,13 +379,15 @@ const buildMilkTallyExportRows = async (req) => {
     voucherOffset += 1;
     const voucherDate = formatVoucherDate(group.date);
 
-    const lines = [
-      bucketToExportLine('Cow Milk', group.cow),
-      bucketToExportLine('Buffalo Milk', group.buffalo),
-    ].filter(Boolean);
+    const lineSources = [
+      { itemName: 'Cow Milk', bucket: group.cow },
+      { itemName: 'Buffalo Milk', bucket: group.buffalo },
+    ];
     let isFirstRowOfGroup = true;
 
-    for (const line of lines) {
+    for (const source of lineSources) {
+      const line = bucketToExportLine(source.itemName, source.bucket);
+      if (!line) continue;
       const tax = computeVoucherTaxLine(
         line.rate,
         0,
@@ -395,11 +403,7 @@ const buildMilkTallyExportRows = async (req) => {
         : (isFirstRowOfGroup ? pinCodeRaw : '');
       const rowRegistrationType = isFirstRowOfGroup ? registrationType : '';
       const rowRegistrationNumber = isFirstRowOfGroup ? registrationNumber : '';
-      const rowNarration = buildLineNarration(supplierName, {
-        fat: line.fat,
-        snf: line.snf,
-        fatMeterReading: line.fatMeterReading,
-      });
+      const rowNarration = buildLineNarration(supplierName, source.bucket);
       isFirstRowOfGroup = false;
 
       rows.push([
