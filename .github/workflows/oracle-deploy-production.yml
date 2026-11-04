@@ -1,0 +1,45 @@
+
+name: Deploy Nannu Milk Production
+
+on:
+  push:
+    branches:
+      - development
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nannu-milk-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Oracle VM
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy latest development code
+        run: |
+          set -e
+
+          cd /home/ubuntu/orderapp
+
+          echo "Fetching latest code..."
+          git fetch origin development
+          git checkout development
+          git pull --ff-only origin development
+
+          echo "Installing dependencies..."
+          npm ci --omit=dev
+
+          echo "Restarting production backend..."
+          FIREBASE_ENV=production pm2 restart nannu-milk-api --update-env
+
+          pm2 save
+
+          echo "Checking API..."
+          curl -fsS http://127.0.0.1:5020/
+
+          echo "Deployment successful!"
