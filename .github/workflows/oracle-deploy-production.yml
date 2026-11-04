@@ -16,30 +16,36 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Oracle VM
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - name: Deploy latest development code
-        run: |
-          set -e
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
 
-          cd /home/ubuntu/orderapp
+            cd /home/ubuntu/orderapp
 
-          echo "Fetching latest code..."
-          git fetch origin development
-          git checkout development
-          git pull --ff-only origin development
+            echo "Fetching latest code..."
+            git fetch origin development
+            git checkout development
+            git pull --ff-only origin development
 
-          echo "Installing dependencies..."
-          npm ci --omit=dev
+            echo "Installing dependencies..."
+            npm ci --omit=dev
 
-          echo "Restarting production backend..."
-          FIREBASE_ENV=production pm2 restart nannu-milk-api --update-env
+            echo "Restarting production backend..."
+            FIREBASE_ENV=production pm2 restart nannu-milk-api --update-env
 
-          pm2 save
+            pm2 save
 
-          echo "Checking API..."
-          curl -fsS http://127.0.0.1:5020/
+            echo "Checking API..."
+            curl -fsS http://127.0.0.1:5020/
 
-          echo "Deployment successful!"
+            echo "Deployment successful!"
