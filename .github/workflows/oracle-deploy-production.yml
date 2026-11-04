@@ -45,7 +45,20 @@ jobs:
 
             pm2 save
 
-            echo "Checking API..."
-            curl -fsS http://127.0.0.1:5020/
+            echo "Waiting for API to start..."
 
-            echo "Deployment successful!"
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:5020/; then
+                echo ""
+                echo "API is healthy!"
+                exit 0
+              fi
+
+              echo "Waiting for API... attempt $i/15"
+              sleep 2
+            done
+
+            echo "API health check failed!"
+            pm2 status
+            pm2 logs nannu-milk-api --lines 50 --nostream
+            exit 1
