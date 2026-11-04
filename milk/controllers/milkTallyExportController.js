@@ -168,26 +168,23 @@ const supplierRecord = (procurement) => (
 );
 
 /**
- * One voucher per supplier name, calendar day, and patch.
- * Morning and evening on the same patch are combined into one voucher.
- * Cow and buffalo stay on separate item rows. Narration keeps each shift’s quantity, fat, and meter.
+ * One voucher per supplier id, calendar day, patch, and milk type.
+ * Morning and evening on the same patch are combined.
+ * Cow milk and buffalo milk get separate voucher numbers.
+ * Narration keeps each shift’s quantity, fat, and meter.
  */
 const groupProcurementsForTally = (procurements) => {
   const groups = new Map();
 
   for (const procurement of procurements) {
     const supplier = supplierRecord(procurement);
-    const supplierNameKey = String(supplier.name || '')
-      .trim()
-      .replace(/\s+/g, ' ')
-      .toLowerCase();
     const supplierId = supplier._id
       ? String(supplier._id)
       : String(procurement.supplierId || 'unknown');
     const day = localDateKey(procurement.date);
     const patchNum = Number(procurement.patch);
     const patchKey = Number.isInteger(patchNum) && patchNum > 0 ? String(patchNum) : 'legacy';
-    const key = `${day}|${supplierNameKey || supplierId}|${patchKey}`;
+    const key = `${day}|${supplierId}|${patchKey}`;
 
     if (!groups.has(key)) {
       groups.set(key, {
@@ -375,19 +372,21 @@ const buildMilkTallyExportRows = async (req) => {
       ? String(supplier.pinCode).trim()
       : '';
     const supplierName = supplier.name || '';
-    const voucherNumber = startVoucherNumber + voucherOffset;
-    voucherOffset += 1;
     const voucherDate = formatVoucherDate(group.date);
+    const rowPinCode = pinCodeRaw !== '' && /^\d+$/.test(pinCodeRaw)
+      ? Number(pinCodeRaw)
+      : pinCodeRaw;
 
     const lineSources = [
       { itemName: 'Cow Milk', bucket: group.cow },
       { itemName: 'Buffalo Milk', bucket: group.buffalo },
     ];
-    let isFirstRowOfGroup = true;
 
     for (const source of lineSources) {
       const line = bucketToExportLine(source.itemName, source.bucket);
       if (!line) continue;
+      const voucherNumber = startVoucherNumber + voucherOffset;
+      voucherOffset += 1;
       const tax = computeVoucherTaxLine(
         line.rate,
         0,
@@ -396,25 +395,17 @@ const buildMilkTallyExportRows = async (req) => {
         interState,
       );
       const perUnitTaxable = tax.taxableValueAfterDiscountPerUnit;
-
-      const rowAddress = isFirstRowOfGroup ? address : '';
-      const rowPinCode = isFirstRowOfGroup && pinCodeRaw !== '' && /^\d+$/.test(pinCodeRaw)
-        ? Number(pinCodeRaw)
-        : (isFirstRowOfGroup ? pinCodeRaw : '');
-      const rowRegistrationType = isFirstRowOfGroup ? registrationType : '';
-      const rowRegistrationNumber = isFirstRowOfGroup ? registrationNumber : '';
       const rowNarration = buildLineNarration(supplierName, source.bucket);
-      isFirstRowOfGroup = false;
 
       rows.push([
         voucherDate,
         voucherNumber,
         supplierName,
-        rowAddress,
+        address,
         state,
         rowPinCode,
-        rowRegistrationType,
-        rowRegistrationNumber,
+        registrationType,
+        registrationNumber,
         '',
         line.itemName,
         roundMoney2(line.quantity),
