@@ -446,7 +446,7 @@ const serializeSale = (doc) => {
 /**
  * GET /sales
  * Query:
- *   limit (default 10, max 100), skip (default 0)
+ *   limit (default 10, max 500), skip (default 0)
  *   paymentMode — Cash | Card | UPI | Due | Split
  *   search — unified filter: saleId (# ok), customer.name, or customer.phone (OR)
  *   saleId — explicit sale id partial match
@@ -468,16 +468,9 @@ export const listSales = async (req, res) => {
     }
 
     const searchRaw = req.query.search ?? req.query.q;
-    const hasSearchFilter = !!(
-      String(searchRaw ?? '').trim() ||
-      String(req.query.saleId ?? '').trim() ||
-      String(req.query.customerName ?? '').trim() ||
-      String(req.query.customerPhone ?? '').trim()
-    );
-    const maxLimit = hasSearchFilter ? 2000 : 100;
     const limit = Math.min(
       Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1),
-      maxLimit
+      500
     );
     const skip = Math.max(parseInt(String(req.query.skip ?? '0'), 10) || 0, 0);
 
