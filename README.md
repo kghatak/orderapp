@@ -28,7 +28,7 @@ This app was created as an independent fork from JBJApp. You can now:
 - Deploy separately
 - Customize as needed without affecting JBJApp
 
-## Next Steps
+## Next Steps.
 
 1. **Set up remote repository** (optional):
    ```bash
