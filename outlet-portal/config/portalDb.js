@@ -50,3 +50,15 @@ export const getPortalConnection = () => {
   }
   return portalConn;
 };
+
+/** Connected database name only. The URI stays on the server. */
+export const describePortalMongo = () => {
+  const env = resolveDataEnv();
+  const { uri, dbName } = resolvePortalMongo(env);
+  return {
+    env,
+    name: dbName,
+    configured: Boolean(uri),
+    connected: isOutletPortalMongoConnected(),
+  };
+};

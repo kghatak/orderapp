@@ -20,6 +20,7 @@ import nannuUserRoutes from './order/routes/nannuUserRoutes.js';
 import authRoutes from './order/routes/authRoutes.js';
 import { initializeFirestore } from './util/firebase.js';
 import { connectMongoDB, isMongoConnected } from './config/db.js';
+import { startRequestTelemetry } from './telemetry/requestLog.js';
 import { connectOutletPortalMongo, isOutletPortalMongoConnected } from './outlet-portal/config/portalDb.js';
 import portalAuthRoutes from './outlet-portal/routes/portalAuthRoutes.js';
 import salesRoutes from './outlet-portal/routes/salesRoutes.js';
@@ -94,6 +95,7 @@ initQueueProcessor();
 await initializeFirestore();
 await bootstrapSuperAdmin();
 await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module will fail on use
+startRequestTelemetry();
 await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
 
 app.get('/tenant-features', tenantMiddleware, async (req, res) => {

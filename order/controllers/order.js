@@ -6,7 +6,8 @@ import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
-import { belongsToTenant, validateTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { belongsToTenant, validateTenantId, denyUnlessTenant, canonicalizeTenantId } from '../../util/tenantMiddleware.js';
+import { isMissingIndexError, readPage, warnMissingIndex } from '../../util/tenantPage.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
 import { deleteMirroredOrders, mirrorFirestoreOrder } from '../services/orderMongoMirror.js';
 
@@ -773,6 +774,41 @@ export const getAllOrders = async (req, res) => {
     _start = parseInt(_start);
     _end = parseInt(_end);
     const limit = Math.max(0, _end - _start);
+    const pageSize = limit || 10;
+    const tenantId = canonicalizeTenantId(req.tenantId);
+
+    if (tenantId && Number.isFinite(_start) && _start >= 0 && Number.isFinite(_end) && pageSize <= 200) {
+      try {
+        let indexed = db.collection('orders').where('tenantId', '==', tenantId);
+        if (outletId) indexed = indexed.where('outletId', '==', outletId);
+        if (from) {
+          const fromDate = new Date(from);
+          if (!isNaN(fromDate.getTime())) {
+            indexed = indexed.where('Created at', '>=', admin.firestore.Timestamp.fromDate(fromDate));
+          }
+        }
+        if (to) {
+          const toDate = new Date(to);
+          if (!isNaN(toDate.getTime())) {
+            indexed = indexed.where('Created at', '<=', admin.firestore.Timestamp.fromDate(toDate));
+          }
+        }
+        const page = await readPage(indexed, {
+          orderField: 'Created at',
+          direction: 'desc',
+          start: _start,
+          limit: pageSize,
+        });
+        const orders = page.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        res.set('X-Total-Count', page.total.toString());
+        res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+        res.status(200).json(orders);
+        return;
+      } catch (error) {
+        if (!isMissingIndexError(error)) throw error;
+        warnMissingIndex('Order list', error);
+      }
+    }
 
     let baseQuery = db.collection('orders');
 

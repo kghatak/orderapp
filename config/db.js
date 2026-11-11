@@ -15,6 +15,28 @@ export const resolveDataEnv = () => {
 
 export const isMongoConnected = () => mongoose.connection.readyState === 1;
 
+const databaseNameFromUri = (uri, fallback) => {
+  if (!uri) return fallback;
+  const normalized = uri.replace(/^mongodb(?:\+srv)?:\/\//, 'http://');
+  try {
+    const name = decodeURIComponent(new URL(normalized).pathname.replace(/^\//, '').split('/')[0] || '');
+    return name || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+/** Connected database name only. The URI stays on the server. */
+export const describeMilkMongo = () => {
+  const env = resolveDataEnv();
+  const uri = resolveMilkMongoUri(env);
+  return {
+    env,
+    name: databaseNameFromUri(uri, 'orderapp'),
+    connected: isMongoConnected(),
+  };
+};
+
 const resolveMilkMongoUri = (env) => {
   if (env === 'test') {
     return (
