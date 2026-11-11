@@ -20,6 +20,8 @@ import {
   postTenant,
   tenantOptions,
 } from './resourceController.js';
+import { getCollections, getDatabases, getDocuments } from './databaseController.js';
+import { getTelemetry } from './telemetryController.js';
 
 const router = express.Router();
 
@@ -29,6 +31,10 @@ router.post('/auth/logout', requireSuperAdmin, asyncHandler(logout));
 router.get('/auth/session', requireSuperAdmin, asyncHandler(session));
 
 router.use(requireSuperAdmin);
+router.get('/telemetry', asyncHandler(getTelemetry));
+router.get('/databases', asyncHandler(getDatabases));
+router.get('/databases/collections', asyncHandler(getCollections));
+router.get('/databases/documents', asyncHandler(getDocuments));
 router.get('/dashboard', asyncHandler(dashboard));
 router.get('/permissions', asyncHandler(permissions));
 router.get('/tenants/options', asyncHandler(tenantOptions));

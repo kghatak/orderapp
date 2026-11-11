@@ -2,7 +2,8 @@ import { getFirestoreDB } from '../../util/firebase.js';
 import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import { subtractCollectedReturnItemsFromOutletProducts } from '../../util/outletProductsStock.js';
 import { ReturnOrder, ReturnOrderStatus } from '../models/returnOrder.js';
-import { belongsToTenant, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { belongsToTenant, canonicalizeTenantId, denyUnlessTenant } from '../../util/tenantMiddleware.js';
+import { isMissingIndexError, readPage, warnMissingIndex } from '../../util/tenantPage.js';
 import admin from 'firebase-admin';
 
 // Generate Return ID in format RET-00000001
@@ -67,8 +68,43 @@ export const getAllReturns = async (req, res) => {
     const end = parseInt(_end, 10);
     const sortField = _sort || 'createdAt';
     const order = _order === 'asc' ? 'asc' : 'desc';
+    const pageSize = Math.max(0, end - start) || 10;
+    const indexedSorts = new Set(['createdAt', 'returnId']);
+    const tenantId = canonicalizeTenantId(req.tenantId);
 
-    // Fetch all returns (we'll filter and sort in memory to avoid index issues)
+    if (
+      tenantId &&
+      indexedSorts.has(sortField) &&
+      Number.isFinite(start) &&
+      start >= 0 &&
+      Number.isFinite(end) &&
+      pageSize <= 200
+    ) {
+      try {
+        let indexed = db.collection('returns').where('tenantId', '==', tenantId);
+        if (outletId) indexed = indexed.where('outletId', '==', outletId);
+        const page = await readPage(indexed, {
+          orderField: sortField,
+          direction: order,
+          start,
+          limit: pageSize,
+        });
+        const returns = page.docs
+          .map((doc) => ({ id: doc.id, ...doc.data() }))
+          .filter((returnOrder) => !returnOrder.archived);
+        if (returns.length === page.docs.length) {
+          res.setHeader('X-Total-Count', page.total);
+          res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count');
+          res.status(200).json(returns);
+          return;
+        }
+      } catch (error) {
+        if (!isMissingIndexError(error)) throw error;
+        warnMissingIndex('Return list', error);
+      }
+    }
+
+    // Fetch all returns when the indexed page cannot be used yet.
     const snapshot = await db.collection('returns').get();
 
     // Process returns data

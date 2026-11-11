@@ -10,10 +10,12 @@ import {
   updateReturnItems,
 } from '../controllers/returnsController.js';
 import { tenantMiddleware } from '../../util/tenantMiddleware.js';
+import { recordGetRequests } from '../../telemetry/requestLog.js';
 
 const router = express.Router();
 
 router.use(tenantMiddleware);
+router.use(recordGetRequests('returns'));
 router.post('/', createReturn);
 router.get('/', getAllReturns);
 router.get('/report', getReturnsReport);
