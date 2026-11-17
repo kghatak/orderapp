@@ -5,6 +5,7 @@ import { getMilkTokenForOrderAdmin } from '../../milk/controllers/milkAuthContro
 import { isMongoConnected } from '../../config/db.js';
 import { canonicalizeTenantId, isAllowedOrderTenantId } from '../../util/tenantMiddleware.js';
 import { featuresForTenantCode } from '../../super-admin/tenantFeatures.js';
+import { brandForTenantCode } from '../../super-admin/tenantBrand.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
 
 // Signup API
@@ -355,6 +356,12 @@ export const login = async (req, res) => {
       responseData.features = await featuresForTenantCode(userTenant);
     } catch (featureErr) {
       console.error('Login: tenant features lookup failed:', featureErr.message);
+    }
+
+    try {
+      responseData.brand = await brandForTenantCode(userTenant);
+    } catch (brandErr) {
+      console.error('Login: tenant brand lookup failed:', brandErr.message);
     }
 
     // Milk JWT uses the user's refine-auth tenant from Firestore (not a body/hardcoded id).
