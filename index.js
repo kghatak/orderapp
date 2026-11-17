@@ -45,6 +45,7 @@ import superAdminRoutes from './super-admin/routes.js';
 import { bootstrapSuperAdmin } from './super-admin/bootstrap.js';
 import { tenantMiddleware } from './util/tenantMiddleware.js';
 import { featuresForTenantCode } from './super-admin/tenantFeatures.js';
+import { brandForTenantCode } from './super-admin/tenantBrand.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -105,6 +106,16 @@ app.get('/tenant-features', tenantMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Tenant features lookup failed:', err.message);
     res.status(500).json({ success: false, message: 'Could not load tenant features.' });
+  }
+});
+
+app.get('/tenant-brand', tenantMiddleware, async (req, res) => {
+  try {
+    const brand = await brandForTenantCode(req.tenantId);
+    res.json({ success: true, data: brand });
+  } catch (err) {
+    console.error('Tenant brand lookup failed:', err.message);
+    res.status(500).json({ success: false, message: 'Could not load tenant brand.' });
   }
 });
 
