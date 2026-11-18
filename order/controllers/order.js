@@ -6,6 +6,7 @@ import { getIstReportRangeTimestamps } from '../../util/istDateBoundaries.js';
 import {getQueueProcessor} from '../../pushnotifications/notificationqueueprovider.js';
 import { addDeliveredOrderItemsToOutletProducts } from '../../util/outletProductsStock.js';
 import { getOrderLedgerAmount } from '../../util/orderLedgerAmount.js';
+import { resolveOrderLineDiscount } from '../../util/orderLineDiscount.js';
 import { belongsToTenant, validateTenantId, denyUnlessTenant, canonicalizeTenantId } from '../../util/tenantMiddleware.js';
 import { isMissingIndexError, readPage, warnMissingIndex } from '../../util/tenantPage.js';
 import { nextTenantCounter } from '../../util/tenantCounter.js';
@@ -85,9 +86,14 @@ const buildOrderData = async (req, res) => {
     const product = productDoc.data();
     const quantity = itemData.quantity || 0;
     const price = product.price || 0;
-    const discountPercentage = itemData.discountPercentage || 0;
+    const { discountPercentage, discountAmount } = resolveOrderLineDiscount({
+      requestedPercentage: itemData.discountPercentage,
+      icon: product.icon,
+      outletDiscounts: outlet.discounts,
+      price,
+      quantity,
+    });
     const itemSubtotal = price * quantity;
-    const discountAmount = itemSubtotal * (discountPercentage / 100);
 
     processedItems.push({
       productId: productDoc.id,
@@ -574,6 +580,11 @@ export const addItemsToOrder = async (req, res) => {
 
       const orderData = orderDoc.data();
       const currentItems = orderData.items || [];
+      const outletRef = orderData.outletId
+        ? db.collection('outlets').doc(orderData.outletId)
+        : null;
+      const outletDoc = outletRef ? await transaction.get(outletRef) : null;
+      const outletDiscounts = outletDoc?.exists ? outletDoc.data().discounts : null;
       
       // Create a map of current items for easy lookup
       const currentItemsMap = new Map();
@@ -586,7 +597,7 @@ export const addItemsToOrder = async (req, res) => {
       let additionalTotalAmount = 0;
 
       for (const itemData of items) {
-        const { productId, quantity, price, name, icon, description, gst, discountAmount, discountPercentage, prodid, hsn_sac_code, type } = itemData;
+        const { productId, quantity, price, name, icon, description, gst, discountPercentage, prodid, hsn_sac_code, type } = itemData;
         
         // Validate required fields
         if (!productId || !quantity || !price || !name) {
@@ -610,6 +621,14 @@ export const addItemsToOrder = async (req, res) => {
           ? parsedPayloadGst
           : (productGstMap.get(productId) ?? 0);
 
+        const lineDiscount = resolveOrderLineDiscount({
+          requestedPercentage: discountPercentage,
+          icon,
+          outletDiscounts,
+          price,
+          quantity,
+        });
+
         const newItem = {
           productId: productId,
           prodid: prodid || productId,
@@ -619,8 +638,8 @@ export const addItemsToOrder = async (req, res) => {
           quantity: parseFloat(quantity), // Changed from parseInt to parseFloat to support decimal quantities
           icon: icon || '',
           gst: resolvedGst,
-          discountPercentage: parseFloat(discountPercentage) || 0,
-          discountAmount: parseFloat(discountAmount) || 0,
+          discountPercentage: lineDiscount.discountPercentage,
+          discountAmount: lineDiscount.discountAmount,
           hsn_sac_code: hsn_sac_code || '',
         };
 
