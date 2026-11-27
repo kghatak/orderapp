@@ -42,8 +42,12 @@ export function phoneMatchVariants(phone) {
  * @param {Record<string, string|number>|string[]} bodyParams
  * @param {{ urlButtonSuffix?: string }} [options]
  */
-function templateBodyValue(value) {
-  return String(value ?? '').replace(/[\r\n]+/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+function templateBodyValue(value, options = {}) {
+  const text = String(value ?? '').replace(/\r\n/g, '\n');
+  if (options.preserveNewlines) {
+    return text.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').trim();
+  }
+  return text.replace(/[\n]+/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 function buildComponents(bodyParams, options = {}) {
@@ -51,13 +55,13 @@ function buildComponents(bodyParams, options = {}) {
 
   if (Array.isArray(bodyParams)) {
     bodyParams.forEach((value, i) => {
-      components[`body_${i + 1}`] = { type: 'text', value: templateBodyValue(value) };
+      components[`body_${i + 1}`] = { type: 'text', value: templateBodyValue(value, options) };
     });
   } else {
     for (const [paramName, value] of Object.entries(bodyParams)) {
       components[`body_${paramName}`] = {
         type: 'text',
-        value: templateBodyValue(value),
+        value: templateBodyValue(value, options),
         parameter_name: paramName,
       };
     }

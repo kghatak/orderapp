@@ -1,6 +1,6 @@
 import { isEventOrderMongoConnected } from '../config/eventOrderDb.js';
 import { getEventOrderModel } from '../models/EventOrder.js';
-import { computeReminder } from '../eventOrderMath.js';
+import { computeReminder, orderReminderDate, reminderSettingsFor } from '../eventOrderMath.js';
 import { customerReplyAction, eventOrderStaffPhones, statusForCustomerReply } from './messages.js';
 import { sendStaffForCustomerReply } from './sendEventOrderWhatsApp.js';
 
@@ -21,12 +21,13 @@ function pushAudit(order, detail) {
 
 function reminderAfterReply(order, status, now) {
   const reminder = computeReminder({
-    eventDate: order.event?.date,
+    eventDate: orderReminderDate(order),
     orderStatus: status,
     previous: typeof order.whatsappReminder?.toObject === 'function'
       ? order.whatsappReminder.toObject()
       : order.whatsappReminder,
     now,
+    settings: reminderSettingsFor(order.reminderTime),
   });
   if (reminder.status !== 'sent') reminder.recipient = eventOrderStaffPhones().join(', ');
   return reminder;
