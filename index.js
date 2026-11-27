@@ -46,6 +46,9 @@ import { bootstrapSuperAdmin } from './super-admin/bootstrap.js';
 import { tenantMiddleware } from './util/tenantMiddleware.js';
 import { featuresForTenantCode } from './super-admin/tenantFeatures.js';
 import { brandForTenantCode } from './super-admin/tenantBrand.js';
+import eventOrderRoutes from './event-orders/routes/eventOrderRoutes.js';
+import { connectEventOrderMongo, isEventOrderMongoConnected } from './event-orders/config/eventOrderDb.js';
+import { startEventOrderReminderCron } from './event-orders/jobs/eventOrderReminderCron.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -98,6 +101,8 @@ await bootstrapSuperAdmin();
 await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module will fail on use
 startRequestTelemetry();
 await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
+await connectEventOrderMongo(); // Separate database for event orders (default name event_orders)
+startEventOrderReminderCron();
 
 app.get('/tenant-features', tenantMiddleware, async (req, res) => {
   try {
@@ -118,6 +123,18 @@ app.get('/tenant-brand', tenantMiddleware, async (req, res) => {
     res.status(500).json({ success: false, message: 'Could not load tenant brand.' });
   }
 });
+
+// Event orders stay in their own MongoDB database, separate from milk and regular orders.
+app.use('/event-orders', (req, res, next) => {
+  if (!isEventOrderMongoConnected()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Event orders unavailable. Event order MongoDB is not connected.',
+    });
+  }
+  next();
+});
+app.use('/event-orders', eventOrderRoutes);
 
 // Route bindings
 app.use('/order(s)?', orderRoutes);

@@ -3,6 +3,11 @@ import { getFirestore } from 'firebase-admin/firestore';
 import mongoose from 'mongoose';
 import { describeMilkMongo, isMongoConnected, resolveDataEnv } from '../config/db.js';
 import { describePortalMongo, getPortalConnection, isOutletPortalMongoConnected } from '../outlet-portal/config/portalDb.js';
+import {
+  describeEventOrderMongo,
+  getEventOrderConnection,
+  isEventOrderMongoConnected,
+} from '../event-orders/config/eventOrderDb.js';
 import { canonicalizeTenantId, isAllowedOrderTenantId } from '../util/tenantMiddleware.js';
 import { HttpError, sendData } from './http.js';
 
@@ -159,6 +164,7 @@ async function catalog() {
 
   const milk = describeMilkMongo();
   const portal = describePortalMongo();
+  const events = describeEventOrderMongo();
   const sources = [
     {
       key: 'milk',
@@ -173,6 +179,13 @@ async function catalog() {
       env: portal.env,
       description: portal,
       conn: isOutletPortalMongoConnected() ? getPortalConnection() : null,
+    },
+    {
+      key: 'event-orders',
+      role: 'Event orders',
+      env: events.env,
+      description: events,
+      conn: isEventOrderMongoConnected() ? getEventOrderConnection() : null,
     },
   ];
 
@@ -238,7 +251,11 @@ async function openDatabase(database) {
 
   const source = database.id.split(':')[1];
   const name = database.id.split(':').slice(2).join(':');
-  const conn = source === 'portal' ? getPortalConnection() : mongoose.connection;
+  const conn = source === 'portal'
+    ? getPortalConnection()
+    : source === 'event-orders'
+      ? getEventOrderConnection()
+      : mongoose.connection;
   if (!conn || conn.readyState !== 1) throw new HttpError(503, 'Database is not connected.');
   const known = await mongoDatabaseNames(conn);
   if (!known.includes(name)) throw new HttpError(404, 'Database not found.');
