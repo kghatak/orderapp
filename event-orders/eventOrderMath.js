@@ -465,7 +465,6 @@ export function describeOrderChanges(before, after) {
     nextEvent.guestCount == null ? '' : nextEvent.guestCount,
   );
   pushTextChange(lines, 'Delivery', previousEvent.deliveryType, nextEvent.deliveryType);
-  pushTextChange(lines, 'Outlet', previous.outletName, next.outletName);
   lines.push(...describeItemChanges(previous.items, next.items));
   pushMoneyChange(lines, 'Discount', previous.discount, next.discount);
   pushMoneyChange(lines, 'Additional charges', previous.additionalCharges, next.additionalCharges);

@@ -1,6 +1,8 @@
 import { getFirestoreDB } from '../../util/firebase.js';
 import { belongsToTenant, withMongoTenant } from '../../util/tenantMiddleware.js';
 import { getEventOrderModel, nextEventOrderId } from '../models/EventOrder.js';
+import { eventOrderStaffPhones } from '../whatsapp/messages.js';
+import { sendCustomerOrderCreated } from '../whatsapp/sendEventOrderWhatsApp.js';
 import {
   EVENT_STATUSES,
   EVENT_TYPES,
@@ -73,20 +75,6 @@ function categoryLabel(category) {
   return '';
 }
 
-async function loadOutlet(tenantId, outletId) {
-  const id = cleanText(outletId, 128);
-  if (!id) return { id: '', name: '' };
-  const doc = await getFirestoreDB().collection('outlets').doc(id).get();
-  if (!doc.exists || !belongsToTenant(doc.data()?.tenantId, tenantId)) {
-    throw new EventOrderError(400, 'Outlet not found.');
-  }
-  const data = doc.data() || {};
-  return {
-    id: doc.id,
-    name: cleanText(data.name || data.title || 'Outlet', 160) || 'Outlet',
-  };
-}
-
 async function loadProduct(tenantId, productId) {
   let doc;
   try {
@@ -136,14 +124,14 @@ async function resolveItems(tenantId, rawItems) {
   return normalizeItems(resolved);
 }
 
-function reminderFor(order, { eventDate, status, phone, now }) {
+function reminderFor(order, { eventDate, status, now }) {
   const reminder = computeReminder({
     eventDate,
     orderStatus: status,
     previous: plain(order?.whatsappReminder),
     now,
   });
-  if (reminder.status !== 'sent') reminder.recipient = phone;
+  if (reminder.status !== 'sent') reminder.recipient = eventOrderStaffPhones().join(', ');
   return reminder;
 }
 
@@ -181,7 +169,6 @@ function listFilter(tenantId, query) {
   if (query.status) {
     extra.status = assertEnum(query.status, EVENT_STATUSES, 'Order status is invalid.');
   }
-  if (query.outletId) extra.outletId = cleanText(query.outletId, 128);
   if (query.eventType) {
     extra['event.type'] = assertEnum(query.eventType, EVENT_TYPES, 'Event type is invalid.');
   }
@@ -300,7 +287,6 @@ export const createEventOrder = async (req, res) => {
     const customer = normalizeCustomer(body.customer);
     const event = normalizeEvent(body.event);
     assertEventDateNotPast(event.date);
-    const outlet = await loadOutlet(req.tenantId, body.outletId);
     const items = await resolveItems(req.tenantId, body.items);
     const status = assertEnum(body.status || 'Enquiry', EVENT_STATUSES, 'Order status is invalid.');
     const actor = actorFrom(req);
@@ -323,14 +309,11 @@ export const createEventOrder = async (req, res) => {
     const whatsappReminder = reminderFor(null, {
       eventDate: event.date,
       status,
-      phone: customer.phone,
       now,
     });
     const doc = await getEventOrderModel().create({
       tenantId: req.tenantId,
       orderId,
-      outletId: outlet.id,
-      outletName: outlet.name,
       customer,
       event,
       items,
@@ -350,6 +333,19 @@ export const createEventOrder = async (req, res) => {
       createdBy: actor,
       updatedBy: actor,
     });
+    const notice = await sendCustomerOrderCreated(doc);
+    doc.whatsappCustomer = notice;
+    doc.audit.push({
+      action: 'whatsapp',
+      at: new Date(),
+      userId: actor.userId,
+      name: actor.name,
+      detail: notice.status === 'sent'
+        ? `WhatsApp order details sent to ${customer.phone}.`
+        : `WhatsApp order details were not sent. ${notice.errorMessage || ''}`.trim(),
+    });
+    doc.markModified('whatsappCustomer');
+    await doc.save();
     res.status(201).json({ success: true, data: present(doc) });
   } catch (err) {
     sendError(res, err);
@@ -368,24 +364,16 @@ export const updateEventOrder = async (req, res) => {
       paymentNotes: order.paymentNotes || '',
       discount: order.pricing?.discount || 0,
       additionalCharges: order.pricing?.additionalCharges || 0,
-      outletName: order.outletName || '',
     };
     const customer = normalizeCustomer(body.customer);
     const event = normalizeEvent(body.event);
     if (event.date !== order.event?.date) assertEventDateNotPast(event.date);
-    const outlet = body.outletId === undefined
-      ? null
-      : await loadOutlet(req.tenantId, body.outletId);
     const items = await resolveItems(req.tenantId, body.items);
     const status = assertEnum(body.status || order.status, EVENT_STATUSES, 'Order status is invalid.');
     const actor = actorFrom(req);
     const now = new Date();
     const previousStatus = order.status;
 
-    if (outlet) {
-      order.outletId = outlet.id;
-      order.outletName = outlet.name;
-    }
     order.customer = customer;
     order.event = event;
     order.items = items;
@@ -405,7 +393,6 @@ export const updateEventOrder = async (req, res) => {
     order.whatsappReminder = reminderFor(order, {
       eventDate: event.date,
       status,
-      phone: customer.phone,
       now,
     });
     order.markModified('whatsappReminder');
@@ -418,7 +405,6 @@ export const updateEventOrder = async (req, res) => {
       paymentNotes,
       discount: order.pricing?.discount || 0,
       additionalCharges: order.pricing?.additionalCharges || 0,
-      outletName: order.outletName || '',
     });
     if (previousStatus !== status) {
       order.audit.push({
@@ -463,7 +449,6 @@ export const updateEventOrderStatus = async (req, res) => {
     order.whatsappReminder = reminderFor(order, {
       eventDate: order.event.date,
       status,
-      phone: order.customer.phone,
       now,
     });
     order.markModified('whatsappReminder');

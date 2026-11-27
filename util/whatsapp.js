@@ -42,18 +42,22 @@ export function phoneMatchVariants(phone) {
  * @param {Record<string, string|number>|string[]} bodyParams
  * @param {{ urlButtonSuffix?: string }} [options]
  */
+function templateBodyValue(value) {
+  return String(value ?? '').replace(/[\r\n]+/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
 function buildComponents(bodyParams, options = {}) {
   const components = {};
 
   if (Array.isArray(bodyParams)) {
     bodyParams.forEach((value, i) => {
-      components[`body_${i + 1}`] = { type: 'text', value: String(value) };
+      components[`body_${i + 1}`] = { type: 'text', value: templateBodyValue(value) };
     });
   } else {
     for (const [paramName, value] of Object.entries(bodyParams)) {
       components[`body_${paramName}`] = {
         type: 'text',
-        value: String(value),
+        value: templateBodyValue(value),
         parameter_name: paramName,
       };
     }

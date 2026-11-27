@@ -202,7 +202,6 @@ test('an edit lists the fields and items that changed', () => {
     additionalCharges: 0,
     notes: '',
     paymentNotes: '',
-    outletName: '',
   };
   assert.deepEqual(describeOrderChanges(before, before), []);
   const lines = describeOrderChanges(before, {

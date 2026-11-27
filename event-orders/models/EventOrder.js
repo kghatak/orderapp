@@ -42,6 +42,15 @@ const reminderHistorySchema = new mongoose.Schema({
   attemptedAt: { type: Date, default: null },
 }, { _id: false });
 
+const customerNoticeSchema = new mongoose.Schema({
+  status: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+  sentAt: { type: Date, default: null },
+  errorMessage: { type: String, default: '' },
+  reply: { type: String, default: '' },
+  repliedAt: { type: Date, default: null },
+  replyMessageId: { type: String, default: '' },
+}, { _id: false });
+
 const reminderSchema = new mongoose.Schema({
   scheduledAt: { type: Date, default: null },
   status: { type: String, enum: REMINDER_STATUSES, default: 'not_applicable' },
@@ -63,8 +72,6 @@ const auditSchema = new mongoose.Schema({
 const eventOrderSchema = new mongoose.Schema({
   tenantId: { type: String, required: true, index: true },
   orderId: { type: String, required: true },
-  outletId: { type: String, default: '' },
-  outletName: { type: String, default: '' },
   customer: {
     name: { type: String, required: true },
     phone: { type: String, required: true },
@@ -94,6 +101,7 @@ const eventOrderSchema = new mongoose.Schema({
   status: { type: String, enum: EVENT_STATUSES, required: true, default: 'Enquiry' },
   notes: { type: String, default: '' },
   whatsappReminder: { type: reminderSchema, default: () => ({}) },
+  whatsappCustomer: { type: customerNoticeSchema, default: () => ({}) },
   audit: { type: [auditSchema], default: [] },
   createdBy: { type: actorSchema, required: true },
   updatedBy: { type: actorSchema, required: true },
@@ -101,8 +109,9 @@ const eventOrderSchema = new mongoose.Schema({
 
 eventOrderSchema.index({ tenantId: 1, orderId: 1 }, { unique: true });
 eventOrderSchema.index({ tenantId: 1, 'event.date': 1, status: 1 });
-eventOrderSchema.index({ tenantId: 1, outletId: 1 });
 eventOrderSchema.index({ tenantId: 1, 'customer.phone': 1 });
+eventOrderSchema.index({ 'customer.phone': 1, createdAt: -1 });
+eventOrderSchema.index({ status: 1, 'whatsappReminder.status': 1, 'whatsappReminder.scheduledAt': 1 });
 
 const counterSchema = new mongoose.Schema({
   tenantId: { type: String, required: true, unique: true },

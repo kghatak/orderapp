@@ -1,6 +1,7 @@
 import { Supplier } from '../models/Supplier.js';
 import { SupplierWhatsAppReply } from '../models/SupplierWhatsAppReply.js';
 import { phoneMatchVariants } from '../../util/whatsapp.js';
+import { handleEventOrderCustomerReply } from '../../event-orders/whatsapp/customerReply.js';
 import { mongoTenantFilter, withMongoTenant } from '../../util/tenantMiddleware.js';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -163,6 +164,14 @@ const processInboundPayload = async (payload) => {
   const message = extractText(payload);
   const contentType = extractContentType(payload);
   const messageUuid = extractUuid(payload);
+
+  if (message) {
+    try {
+      await handleEventOrderCustomerReply({ phone, message, messageUuid });
+    } catch (err) {
+      console.error('Event order WhatsApp reply failed:', err);
+    }
+  }
 
   const suppliers = await findSuppliersByPhone(phone);
   if (!suppliers.length) {

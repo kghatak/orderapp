@@ -48,6 +48,7 @@ import { featuresForTenantCode } from './super-admin/tenantFeatures.js';
 import { brandForTenantCode } from './super-admin/tenantBrand.js';
 import eventOrderRoutes from './event-orders/routes/eventOrderRoutes.js';
 import { connectEventOrderMongo, isEventOrderMongoConnected } from './event-orders/config/eventOrderDb.js';
+import { startEventOrderReminderCron } from './event-orders/jobs/eventOrderReminderCron.js';
 
 // --- Gemini Setup ---
 //import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
@@ -101,6 +102,7 @@ await connectMongoDB(); // Skips gracefully if MongoDB unavailable; Milk module 
 startRequestTelemetry();
 await connectOutletPortalMongo(); // Separate DB connection for outlet portal (OUTLET_PORTAL_MONGODB_URI)
 await connectEventOrderMongo(); // Separate database for event orders (default name event_orders)
+startEventOrderReminderCron();
 
 app.get('/tenant-features', tenantMiddleware, async (req, res) => {
   try {
