@@ -1,6 +1,6 @@
 /** Plain-text pieces for the event-order WhatsApp templates. */
 
-export const DEFAULT_STAFF_PHONES = ['6363124639', '9591321921', '9876543210'];
+export const DEFAULT_STAFF_PHONES = ['6363124639', '9255919666', '8570839171', '7678887476', '8307084996', '9812712739', '9717225445', '9653530327'];
 
 const TEMPLATE_DEFAULTS = {
   EVENT_ORDER_WA_TEMPLATE_CREATED: 'event_order_created_v2',
