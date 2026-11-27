@@ -8,17 +8,6 @@ export class EventOrderError extends Error {
   }
 }
 
-export const EVENT_TYPES = [
-  'Wedding',
-  'Birthday',
-  'Anniversary',
-  'Engagement',
-  'Griha Pravesh',
-  'Festival',
-  'Party',
-  'Other',
-];
-
 export const EVENT_STATUSES = [
   'Enquiry',
   'Confirmed',
@@ -33,7 +22,7 @@ export const EVENT_STATUSES = [
 export const REMINDER_ACTIVE_STATUSES = ['Confirmed', 'Preparing', 'Ready'];
 
 export const PAYMENT_MODES = ['Cash', 'UPI', 'Bank Transfer', 'Other'];
-export const DELIVERY_TYPES = ['Delivery', 'Self Pickup'];
+export const ITEM_TIME_SLOTS = ['Morning', 'Afternoon', 'Evening'];
 export const REMINDER_STATUSES = [
   'scheduled',
   'passed',
@@ -88,17 +77,74 @@ export function istCalendarDate(date = new Date()) {
 export function reminderSettings() {
   const daysRaw = Number(process.env.EVENT_ORDER_REMINDER_DAYS);
   const days = Number.isInteger(daysRaw) && daysRaw >= 0 && daysRaw <= 30 ? daysRaw : 3;
-  const timeRaw = String(process.env.EVENT_ORDER_REMINDER_TIME || '10:00').trim();
-  const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(timeRaw) ? timeRaw : '10:00';
+  const timeRaw = String(process.env.EVENT_ORDER_REMINDER_TIME || '04:00').trim();
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(timeRaw) ? timeRaw : '04:00';
   return { days, time };
 }
 
-/** UTC instant for `time` on the IST calendar day `days` before eventDate (YYYY-MM-DD). */
-export function reminderInstant(eventDate, settings = reminderSettings()) {
-  const [year, month, day] = String(eventDate).split('-').map(Number);
-  const [hour, minute] = String(settings.time).split(':').map(Number);
-  const utcClock = Date.UTC(year, month - 1, day - settings.days, hour, minute, 0, 0);
+/** Clock stored on an order. A blank value keeps the default reminder time. */
+export function normalizeReminderTime(value) {
+  const time = String(value ?? '').trim();
+  if (!time) return reminderSettings().time;
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+    throw new EventOrderError(400, 'Reminder time is invalid.');
+  }
+  return time;
+}
+
+export function reminderSettingsFor(time) {
+  const clock = String(time || '').trim();
+  const settings = reminderSettings();
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(clock)) return { ...settings, time: clock };
+  return settings;
+}
+
+export function formatClockLabel(value) {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value || '').trim());
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${match[2]} ${suffix}`;
+}
+
+/** UTC instant for `time` on an IST calendar day (YYYY-MM-DD). */
+export function clockOnDay(calendarDate, time) {
+  const [year, month, day] = String(calendarDate).split('-').map(Number);
+  const [hour, minute] = String(time).split(':').map(Number);
+  const utcClock = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
   return new Date(utcClock - IST_OFFSET_MS);
+}
+
+/** UTC instant for the first reminder: `days` before eventDate at the reminder time. */
+export function reminderInstant(eventDate, settings = reminderSettings()) {
+  return clockOnDay(addCalendarDays(eventDate, -settings.days), settings.time);
+}
+
+/** The last `days` calendar dates before the event, earliest first. The event day itself is not included. */
+export function reminderCalendarDays(eventDate, dayCount) {
+  const count = Number.isInteger(dayCount) && dayCount > 0 ? dayCount : 0;
+  const days = [];
+  for (let offset = count; offset >= 1; offset -= 1) {
+    days.push(addCalendarDays(eventDate, -offset));
+  }
+  return days;
+}
+
+function recordedDates(values) {
+  return (Array.isArray(values) ? values : []).filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')));
+}
+
+function coveredReminderDays(previous) {
+  const dates = new Set([
+    ...recordedDates(previous?.sentDates),
+    ...recordedDates(previous?.attemptedDates),
+  ]);
+  if (!dates.size && previous?.sentAt) dates.add(istCalendarDate(new Date(previous.sentAt)));
+  for (const entry of previous?.history || []) {
+    if (entry?.status === 'sent' && entry.sentAt) dates.add(istCalendarDate(new Date(entry.sentAt)));
+  }
+  return dates;
 }
 
 export function computeReminder({
@@ -109,25 +155,17 @@ export function computeReminder({
   settings = reminderSettings(),
 }) {
   const history = Array.isArray(previous?.history) ? previous.history : [];
-  if (previous?.status === 'sent') {
-    return {
-      scheduledAt: previous.scheduledAt || null,
-      status: 'sent',
-      recipient: previous.recipient || '',
-      sentAt: previous.sentAt || null,
-      providerMessageId: previous.providerMessageId || '',
-      errorMessage: previous.errorMessage || '',
-      history,
-    };
-  }
-
+  const sentDates = recordedDates(previous?.sentDates);
+  const attemptedDates = recordedDates(previous?.attemptedDates);
   const base = {
     scheduledAt: null,
-    recipient: '',
-    sentAt: null,
-    providerMessageId: '',
+    recipient: previous?.recipient || '',
+    sentAt: previous?.sentAt || null,
+    providerMessageId: previous?.providerMessageId || '',
     errorMessage: '',
     history,
+    sentDates,
+    attemptedDates,
   };
 
   if (orderStatus === 'Cancelled') {
@@ -142,17 +180,30 @@ export function computeReminder({
     return { ...base, status: 'not_applicable' };
   }
 
-  const scheduledAt = reminderInstant(eventDate, settings);
-  const reminderDay = istCalendarDate(scheduledAt);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate || ''))) {
+    return { ...base, status: 'not_applicable' };
+  }
+
   const today = istCalendarDate(now);
-  const passed = reminderDay < today;
+  const covered = coveredReminderDays(previous);
+  const remaining = reminderCalendarDays(eventDate, settings.days).filter((day) => !covered.has(day) && day >= today);
+  if (!remaining.length) {
+    const finished = covered.size > 0 || previous?.status === 'sent';
+    return {
+      ...base,
+      scheduledAt: previous?.scheduledAt || null,
+      sentDates: finished ? reminderCalendarDays(eventDate, settings.days) : sentDates,
+      status: finished ? 'sent' : 'passed',
+      errorMessage: finished
+        ? ''
+        : 'The reminder dates have passed, so an automatic reminder will not be sent.',
+    };
+  }
+
   return {
     ...base,
-    scheduledAt,
-    status: passed ? 'passed' : 'scheduled',
-    errorMessage: passed
-      ? 'The reminder date has passed, so an automatic reminder will not be sent.'
-      : '',
+    scheduledAt: clockOnDay(remaining[0], settings.time),
+    status: 'scheduled',
   };
 }
 
@@ -208,7 +259,7 @@ export function assertEnum(value, allowed, message) {
 export function assertEventDate(value) {
   const date = String(value || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new EventOrderError(400, 'Event date is required.');
+    throw new EventOrderError(400, 'Date is required.');
   }
   const [year, month, day] = date.split('-').map(Number);
   const utc = new Date(Date.UTC(year, month - 1, day));
@@ -217,26 +268,17 @@ export function assertEventDate(value) {
     || utc.getUTCMonth() !== month - 1
     || utc.getUTCDate() !== day
   ) {
-    throw new EventOrderError(400, 'Event date is invalid.');
+    throw new EventOrderError(400, 'Date is invalid.');
   }
   return date;
 }
 
-/** A new event date must be today or later on the Asia/Kolkata calendar. */
+/** A new item date must be today or later on the Asia/Kolkata calendar. */
 export function assertEventDateNotPast(date, now = new Date()) {
   if (date < istCalendarDate(now)) {
-    throw new EventOrderError(400, 'Event date cannot be in the past.');
+    throw new EventOrderError(400, 'Date cannot be in the past.');
   }
   return date;
-}
-
-export function assertEventTime(value) {
-  const time = String(value || '').trim();
-  if (!time) return '';
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
-    throw new EventOrderError(400, 'Event time must be HH:MM.');
-  }
-  return time;
 }
 
 export function normalizePhone(value, required, label) {
@@ -249,6 +291,16 @@ export function normalizePhone(value, required, label) {
   return phone;
 }
 
+export const CUSTOMER_LANGUAGES = ['en', 'hi'];
+
+export function normalizeCustomerLanguage(value) {
+  const language = String(value || 'en').trim().toLowerCase();
+  if (!CUSTOMER_LANGUAGES.includes(language)) {
+    throw new EventOrderError(400, 'Customer language must be English or Hindi.');
+  }
+  return language;
+}
+
 export function normalizeCustomer(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const name = cleanText(source.name ?? source.customerName, 120);
@@ -258,47 +310,35 @@ export function normalizeCustomer(raw) {
   if (alternatePhone && alternatePhone === phone) {
     throw new EventOrderError(400, 'Alternate number must be different from the mobile number.');
   }
+  const referredBy = cleanText(source.referredBy, 120);
+  if (!referredBy) throw new EventOrderError(400, 'Referred by is required.');
   return {
     name,
     phone,
     alternatePhone,
     address: cleanText(source.address, 500),
+    referredBy,
+    language: normalizeCustomerLanguage(source.language),
   };
 }
 
-export function normalizeEvent(raw) {
-  const source = raw && typeof raw === 'object' ? raw : {};
-  const guestRaw = source.guestCount;
-  let guestCount = null;
-  if (guestRaw !== undefined && guestRaw !== null && guestRaw !== '') {
-    const guest = Number(guestRaw);
-    if (!Number.isInteger(guest) || guest < 0 || guest > 100000) {
-      throw new EventOrderError(400, 'Guest count must be a whole number.');
-    }
-    guestCount = guest;
-  }
-  return {
-    type: assertEnum(source.type ?? source.eventType, EVENT_TYPES, 'Choose an event type.'),
-    name: cleanText(source.name ?? source.eventName, 120),
-    date: assertEventDate(source.date ?? source.eventDate),
-    time: assertEventTime(source.time ?? source.eventTime),
-    venue: cleanText(source.venue, 300),
-    guestCount,
-    deliveryType: assertEnum(
-      source.deliveryType || 'Delivery',
-      DELIVERY_TYPES,
-      'Choose delivery or self pickup.',
-    ),
-  };
+/** Earliest item date. The staff reminder is scheduled from this date. */
+export function orderReminderDate(order) {
+  const dates = (order?.items || [])
+    .map((item) => String(item?.date || '').trim())
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+    .sort();
+  return dates[0] || '';
 }
 
-export function normalizeItems(rawItems) {
+export function normalizeItems(rawItems, { previousItems = [], now = new Date() } = {}) {
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
     throw new EventOrderError(400, 'Add at least one item.');
   }
   if (rawItems.length > 200) {
     throw new EventOrderError(400, 'An event order can have at most 200 items.');
   }
+  const used = new Set();
   return rawItems.map((raw, index) => {
     const label = `Item ${index + 1}`;
     const name = cleanText(raw?.name, 200);
@@ -315,6 +355,26 @@ export function normalizeItems(rawItems) {
       throw new EventOrderError(400, `${label} rate cannot be negative.`);
     }
     const productId = cleanText(raw?.productId, 128);
+    let date = '';
+    try {
+      date = assertEventDate(raw?.date);
+    } catch (err) {
+      if (err instanceof EventOrderError) {
+        throw new EventOrderError(400, raw?.date ? `${label} date is invalid.` : `${label} needs a date.`);
+      }
+      throw err;
+    }
+    const previousIndex = previousItems.findIndex(
+      (item, itemIndex) => !used.has(itemIndex) && sameAuditItem(item, { productId, name }),
+    );
+    const previousDate = previousIndex >= 0 ? String(previousItems[previousIndex]?.date || '') : '';
+    if (previousIndex >= 0) used.add(previousIndex);
+    if (date !== previousDate) assertEventDateNotPast(date, now);
+    const timeSlot = assertEnum(
+      cleanText(raw?.timeSlot, 20),
+      ITEM_TIME_SLOTS,
+      `${label} time must be Morning, Afternoon, or Evening.`,
+    );
     return {
       productId,
       name,
@@ -323,6 +383,8 @@ export function normalizeItems(rawItems) {
       unit,
       rate,
       amount: roundMoney(quantity * rate),
+      date,
+      timeSlot,
       custom: !productId,
     };
   });
@@ -390,6 +452,10 @@ function itemOffer(item) {
   return `${auditQty(item?.quantity)} ${cleanText(item?.unit, 40)} at ${auditMoney(item?.rate)}`.trim();
 }
 
+function itemWhen(item) {
+  return [cleanText(item?.date, 10), cleanText(item?.timeSlot, 20)].filter(Boolean).join(' ');
+}
+
 function sameAuditItem(left, right) {
   const leftId = cleanText(left?.productId, 128);
   const rightId = cleanText(right?.productId, 128);
@@ -414,9 +480,12 @@ function describeItemChanges(beforeItems, afterItems) {
     const nextName = cleanText(next?.name, 200);
     const prevOffer = itemOffer(prev);
     const nextOffer = itemOffer(next);
-    if (prevName === nextName && prevOffer === nextOffer) return;
+    const prevWhen = itemWhen(prev);
+    const nextWhen = itemWhen(next);
+    if (prevName === nextName && prevOffer === nextOffer && prevWhen === nextWhen) return;
     const nextLabel = prevName === nextName ? nextOffer : `${nextName}, ${nextOffer}`;
-    lines.push(`${prevName}: ${prevOffer} → ${nextLabel}.`);
+    const when = prevWhen === nextWhen ? '' : ` (${prevWhen || 'no date'} → ${nextWhen || 'no date'})`;
+    lines.push(`${prevName}: ${prevOffer} → ${nextLabel}.${when ? when : ''}`);
   });
   before.forEach((item, index) => {
     if (!used.has(index)) lines.push(`Removed ${cleanText(item?.name, 200)}, ${itemOffer(item)}.`);
@@ -446,29 +515,28 @@ export function describeOrderChanges(before, after) {
   const next = after && typeof after === 'object' ? after : {};
   const previousCustomer = previous.customer || {};
   const nextCustomer = next.customer || {};
-  const previousEvent = previous.event || {};
-  const nextEvent = next.event || {};
   const lines = [];
   pushTextChange(lines, 'Customer', previousCustomer.name, nextCustomer.name);
   pushTextChange(lines, 'Mobile', previousCustomer.phone, nextCustomer.phone);
   pushTextChange(lines, 'Alternate number', previousCustomer.alternatePhone, nextCustomer.alternatePhone);
   pushTextChange(lines, 'Address', previousCustomer.address, nextCustomer.address);
-  pushTextChange(lines, 'Event type', previousEvent.type, nextEvent.type);
-  pushTextChange(lines, 'Event name', previousEvent.name, nextEvent.name);
-  pushTextChange(lines, 'Event date', previousEvent.date, nextEvent.date);
-  pushTextChange(lines, 'Event time', previousEvent.time, nextEvent.time);
-  pushTextChange(lines, 'Venue', previousEvent.venue, nextEvent.venue);
+  pushTextChange(lines, 'Referred by', previousCustomer.referredBy, nextCustomer.referredBy);
+  const languageName = (value) => (value === 'hi' ? 'Hindi' : 'English');
   pushTextChange(
     lines,
-    'Guests',
-    previousEvent.guestCount == null ? '' : previousEvent.guestCount,
-    nextEvent.guestCount == null ? '' : nextEvent.guestCount,
+    'WhatsApp language',
+    languageName(previousCustomer.language || 'en'),
+    languageName(nextCustomer.language || 'en'),
   );
-  pushTextChange(lines, 'Delivery', previousEvent.deliveryType, nextEvent.deliveryType);
   lines.push(...describeItemChanges(previous.items, next.items));
   pushMoneyChange(lines, 'Discount', previous.discount, next.discount);
   pushMoneyChange(lines, 'Additional charges', previous.additionalCharges, next.additionalCharges);
   pushTextChange(lines, 'Internal notes', previous.notes, next.notes);
+  const previousClock = formatClockLabel(previous.reminderTime || reminderSettings().time);
+  const nextClock = formatClockLabel(next.reminderTime || reminderSettings().time);
+  if (previousClock && nextClock && previousClock !== nextClock) {
+    lines.push(`Reminder time changed from ${previousClock} to ${nextClock}.`);
+  }
   pushTextChange(lines, 'Payment notes', previous.paymentNotes, next.paymentNotes);
   return lines.slice(0, 30);
 }

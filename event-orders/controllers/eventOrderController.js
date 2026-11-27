@@ -5,21 +5,21 @@ import { eventOrderStaffPhones } from '../whatsapp/messages.js';
 import { sendCustomerOrderCreated } from '../whatsapp/sendEventOrderWhatsApp.js';
 import {
   EVENT_STATUSES,
-  EVENT_TYPES,
   EventOrderError,
   assertEnum,
   assertEventDate,
-  assertEventDateNotPast,
   buildPayment,
   cleanText,
   computePricing,
   computeReminder,
+  orderReminderDate,
   initialPayments,
   addCalendarDays,
   istCalendarDate,
   describeOrderChanges,
   normalizeCustomer,
-  normalizeEvent,
+  normalizeReminderTime,
+  reminderSettingsFor,
   normalizeItems,
 } from '../eventOrderMath.js';
 
@@ -98,7 +98,7 @@ async function loadProduct(tenantId, productId) {
   };
 }
 
-async function resolveItems(tenantId, rawItems) {
+async function resolveItems(tenantId, rawItems, options) {
   if (!Array.isArray(rawItems)) {
     throw new EventOrderError(400, 'Add at least one item.');
   }
@@ -121,15 +121,16 @@ async function resolveItems(tenantId, rawItems) {
       rate: rateMissing ? product.price : raw.rate,
     });
   }
-  return normalizeItems(resolved);
+  return normalizeItems(resolved, options);
 }
 
-function reminderFor(order, { eventDate, status, now }) {
+function reminderFor(order, { eventDate, status, now, reminderTime }) {
   const reminder = computeReminder({
     eventDate,
     orderStatus: status,
     previous: plain(order?.whatsappReminder),
     now,
+    settings: reminderSettingsFor(reminderTime ?? order?.reminderTime),
   });
   if (reminder.status !== 'sent') reminder.recipient = eventOrderStaffPhones().join(', ');
   return reminder;
@@ -169,16 +170,13 @@ function listFilter(tenantId, query) {
   if (query.status) {
     extra.status = assertEnum(query.status, EVENT_STATUSES, 'Order status is invalid.');
   }
-  if (query.eventType) {
-    extra['event.type'] = assertEnum(query.eventType, EVENT_TYPES, 'Event type is invalid.');
-  }
-
   const today = istCalendarDate();
+  const clauses = [];
   if (query.scope === 'today') {
-    extra['event.date'] = today;
+    clauses.push({ 'items.date': today });
     if (!query.status) extra.status = { $ne: 'Cancelled' };
   } else if (query.scope === 'next7') {
-    extra['event.date'] = { $gte: today, $lte: addCalendarDays(today, 6) };
+    clauses.push({ 'items.date': { $gte: today, $lte: addCalendarDays(today, 6) } });
     if (!query.status) extra.status = { $nin: ['Cancelled', 'Completed'] };
   } else if (query.scope === 'pending') {
     if (!query.status) extra.status = { $nin: ['Cancelled', 'Completed'] };
@@ -186,19 +184,24 @@ function listFilter(tenantId, query) {
     const range = {};
     if (query.eventDateFrom) range.$gte = assertEventDate(query.eventDateFrom);
     if (query.eventDateTo) range.$lte = assertEventDate(query.eventDateTo);
-    extra['event.date'] = range;
+    clauses.push({ 'items.date': range });
   }
 
   const q = cleanText(query.q, 80);
   if (q) {
     const regex = new RegExp(escapeRegex(q), 'i');
-    extra.$or = [
-      { orderId: regex },
-      { 'customer.name': regex },
-      { 'customer.phone': regex },
-      { 'customer.alternatePhone': regex },
-    ];
+    clauses.push({
+      $or: [
+        { orderId: regex },
+        { 'customer.name': regex },
+        { 'customer.phone': regex },
+        { 'customer.alternatePhone': regex },
+        { 'customer.referredBy': regex },
+      ],
+    });
   }
+  if (clauses.length === 1) Object.assign(extra, clauses[0]);
+  else if (clauses.length > 1) extra.$and = clauses;
   return withMongoTenant(extra, tenantId);
 }
 
@@ -220,10 +223,13 @@ export const getEventOrderSummary = async (req, res) => {
       count({}),
       count({ status: { $nin: ['Cancelled', 'Completed'] } }),
       count({
-        'event.date': { $gte: today, $lte: next7End },
+        'items.date': { $gte: today, $lte: next7End },
         status: { $nin: ['Cancelled', 'Completed'] },
       }),
-      count({ 'event.date': today, status: { $ne: 'Cancelled' } }),
+      count({
+        'items.date': today,
+        status: { $ne: 'Cancelled' },
+      }),
       count({ status: 'Enquiry' }),
       count({ status: 'Preparing' }),
       count({ status: 'Completed' }),
@@ -254,7 +260,7 @@ export const listEventOrders = async (req, res) => {
     const filter = listFilter(req.tenantId, req.query);
     const [rows, total] = await Promise.all([
       getEventOrderModel().find(filter)
-        .sort({ 'event.date': 1, createdAt: -1 })
+        .sort({ 'items.date': 1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
@@ -285,8 +291,6 @@ export const createEventOrder = async (req, res) => {
   try {
     const body = req.body || {};
     const customer = normalizeCustomer(body.customer);
-    const event = normalizeEvent(body.event);
-    assertEventDateNotPast(event.date);
     const items = await resolveItems(req.tenantId, body.items);
     const status = assertEnum(body.status || 'Enquiry', EVENT_STATUSES, 'Order status is invalid.');
     const actor = actorFrom(req);
@@ -306,22 +310,24 @@ export const createEventOrder = async (req, res) => {
       payments,
     });
     const orderId = await nextEventOrderId(req.tenantId);
+    const reminderTime = normalizeReminderTime(body.reminderTime);
     const whatsappReminder = reminderFor(null, {
-      eventDate: event.date,
+      eventDate: orderReminderDate({ items }),
       status,
       now,
+      reminderTime,
     });
     const doc = await getEventOrderModel().create({
       tenantId: req.tenantId,
       orderId,
       customer,
-      event,
       items,
       pricing,
       payments,
       paymentNotes: cleanText(body.paymentNotes, 500),
       status,
       notes: cleanText(body.notes, 2000),
+      reminderTime,
       whatsappReminder,
       audit: [{
         action: 'created',
@@ -358,32 +364,32 @@ export const updateEventOrder = async (req, res) => {
     const order = await findOrder(req.tenantId, req.params.id);
     const before = {
       customer: plain(order.customer) || {},
-      event: plain(order.event) || {},
       items: (order.items || []).map((item) => plain(item)),
       notes: order.notes || '',
       paymentNotes: order.paymentNotes || '',
+      reminderTime: order.reminderTime || '',
       discount: order.pricing?.discount || 0,
       additionalCharges: order.pricing?.additionalCharges || 0,
     };
     const customer = normalizeCustomer(body.customer);
-    const event = normalizeEvent(body.event);
-    if (event.date !== order.event?.date) assertEventDateNotPast(event.date);
-    const items = await resolveItems(req.tenantId, body.items);
+    const items = await resolveItems(req.tenantId, body.items, {
+      previousItems: (order.items || []).map((item) => plain(item)),
+    });
     const status = assertEnum(body.status || order.status, EVENT_STATUSES, 'Order status is invalid.');
     const actor = actorFrom(req);
     const now = new Date();
     const previousStatus = order.status;
 
     order.customer = customer;
-    order.event = event;
     order.items = items;
     order.status = status;
     const notes = cleanText(body.notes, 2000);
     const paymentNotes = cleanText(body.paymentNotes, 500);
+    const reminderTime = normalizeReminderTime(body.reminderTime);
     order.notes = notes;
     order.paymentNotes = paymentNotes;
+    order.reminderTime = reminderTime;
     order.markModified('customer');
-    order.markModified('event');
     order.markModified('items');
     applyPricing(order, {
       discount: body.discount,
@@ -391,20 +397,21 @@ export const updateEventOrder = async (req, res) => {
       additionalCharges: body.additionalCharges,
     });
     order.whatsappReminder = reminderFor(order, {
-      eventDate: event.date,
+      eventDate: orderReminderDate({ items }),
       status,
       now,
+      reminderTime,
     });
     order.markModified('whatsappReminder');
     order.updatedBy = actor;
     const changes = describeOrderChanges(before, {
       customer,
-      event,
       items,
       notes,
       paymentNotes,
       discount: order.pricing?.discount || 0,
       additionalCharges: order.pricing?.additionalCharges || 0,
+      reminderTime,
     });
     if (previousStatus !== status) {
       order.audit.push({
@@ -447,7 +454,7 @@ export const updateEventOrderStatus = async (req, res) => {
     const previousStatus = order.status;
     order.status = status;
     order.whatsappReminder = reminderFor(order, {
-      eventDate: order.event.date,
+      eventDate: orderReminderDate(order),
       status,
       now,
     });

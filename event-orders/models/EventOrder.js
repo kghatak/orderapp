@@ -1,9 +1,7 @@
 import mongoose from 'mongoose';
 import { getEventOrderConnection } from '../config/eventOrderDb.js';
 import {
-  DELIVERY_TYPES,
   EVENT_STATUSES,
-  EVENT_TYPES,
   PAYMENT_MODES,
   REMINDER_STATUSES,
 } from '../eventOrderMath.js';
@@ -21,6 +19,8 @@ const itemSchema = new mongoose.Schema({
   unit: { type: String, required: true },
   rate: { type: Number, required: true },
   amount: { type: Number, required: true },
+  date: { type: String, default: '' },
+  timeSlot: { type: String, default: '' },
   custom: { type: Boolean, default: false },
 }, { _id: false });
 
@@ -58,6 +58,8 @@ const reminderSchema = new mongoose.Schema({
   sentAt: { type: Date, default: null },
   providerMessageId: { type: String, default: '' },
   errorMessage: { type: String, default: '' },
+  sentDates: { type: [String], default: [] },
+  attemptedDates: { type: [String], default: [] },
   history: { type: [reminderHistorySchema], default: [] },
 }, { _id: false });
 
@@ -77,15 +79,8 @@ const eventOrderSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     alternatePhone: { type: String, default: '' },
     address: { type: String, default: '' },
-  },
-  event: {
-    type: { type: String, enum: EVENT_TYPES, required: true },
-    name: { type: String, default: '' },
-    date: { type: String, required: true },
-    time: { type: String, default: '' },
-    venue: { type: String, default: '' },
-    guestCount: { type: Number, default: null },
-    deliveryType: { type: String, enum: DELIVERY_TYPES, required: true },
+    referredBy: { type: String, default: '' },
+    language: { type: String, default: 'en' },
   },
   items: { type: [itemSchema], required: true },
   pricing: {
@@ -100,6 +95,7 @@ const eventOrderSchema = new mongoose.Schema({
   paymentNotes: { type: String, default: '' },
   status: { type: String, enum: EVENT_STATUSES, required: true, default: 'Enquiry' },
   notes: { type: String, default: '' },
+  reminderTime: { type: String, default: '04:00' },
   whatsappReminder: { type: reminderSchema, default: () => ({}) },
   whatsappCustomer: { type: customerNoticeSchema, default: () => ({}) },
   audit: { type: [auditSchema], default: [] },
@@ -108,7 +104,7 @@ const eventOrderSchema = new mongoose.Schema({
 }, { timestamps: true, collection: 'eventOrders' });
 
 eventOrderSchema.index({ tenantId: 1, orderId: 1 }, { unique: true });
-eventOrderSchema.index({ tenantId: 1, 'event.date': 1, status: 1 });
+eventOrderSchema.index({ tenantId: 1, 'items.date': 1, status: 1 });
 eventOrderSchema.index({ tenantId: 1, 'customer.phone': 1 });
 eventOrderSchema.index({ 'customer.phone': 1, createdAt: -1 });
 eventOrderSchema.index({ status: 1, 'whatsappReminder.status': 1, 'whatsappReminder.scheduledAt': 1 });

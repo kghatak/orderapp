@@ -13,6 +13,7 @@ import {
   normalizeCustomer,
   normalizeItems,
   normalizePhone,
+  normalizeReminderTime,
   reminderInstant,
   roundMoney,
 } from './eventOrderMath.js';
@@ -24,6 +25,23 @@ test('reminder for 25 Dec 2026 is 22 Dec 2026 at 10:00 IST', () => {
   const instant = reminderInstant('2026-12-25', settings);
   assert.equal(instant.toISOString(), '2026-12-22T04:30:00.000Z');
   assert.equal(istCalendarDate(instant), '2026-12-22');
+});
+
+test('a chosen reminder time is used on each of the last 3 days', () => {
+  assert.equal(normalizeReminderTime('15:30'), '15:30');
+  assert.equal(normalizeReminderTime(''), '04:00');
+  assert.throws(
+    () => normalizeReminderTime('25:00'),
+    (err) => err instanceof EventOrderError && /Reminder time/.test(err.message),
+  );
+  const afternoon = computeReminder({
+    eventDate: '2026-12-25',
+    orderStatus: 'Confirmed',
+    now: new Date('2026-12-01T00:00:00.000Z'),
+    settings: { days: 3, time: '15:30' },
+  });
+  assert.equal(afternoon.status, 'scheduled');
+  assert.equal(afternoon.scheduledAt.toISOString(), '2026-12-22T10:00:00.000Z');
 });
 
 test('reminder rolls into the previous month', () => {
@@ -41,7 +59,7 @@ test('IST calendar date follows Asia/Kolkata, including midnight', () => {
   assert.equal(istCalendarDate(new Date('2026-12-21T18:29:00.000Z')), '2026-12-21');
 });
 
-test('confirmed order schedules one reminder and a missed date is marked passed', () => {
+test('confirmed order is reminded on each of the last 3 days', () => {
   const future = computeReminder({
     eventDate: '2026-12-25',
     orderStatus: 'Confirmed',
@@ -58,14 +76,35 @@ test('confirmed order schedules one reminder and a missed date is marked passed'
     settings,
   });
   assert.equal(sameDayAfterTen.status, 'scheduled');
+  assert.equal(sameDayAfterTen.scheduledAt.toISOString(), '2026-12-22T04:30:00.000Z');
 
-  const missed = computeReminder({
+  const secondDay = computeReminder({
+    eventDate: '2026-12-25',
+    orderStatus: 'Confirmed',
+    previous: { ...sameDayAfterTen, sentDates: ['2026-12-22'], sentAt: sameDayAfterTen.scheduledAt },
+    now: new Date('2026-12-22T12:00:00.000Z'),
+    settings,
+  });
+  assert.equal(secondDay.status, 'scheduled');
+  assert.equal(secondDay.scheduledAt.toISOString(), '2026-12-23T04:30:00.000Z');
+
+  const missedFirstDay = computeReminder({
     eventDate: '2026-12-25',
     orderStatus: 'Confirmed',
     now: new Date('2026-12-23T04:30:00.000Z'),
     settings,
   });
-  assert.equal(missed.status, 'passed');
+  assert.equal(missedFirstDay.status, 'scheduled');
+  assert.equal(missedFirstDay.scheduledAt.toISOString(), '2026-12-23T04:30:00.000Z');
+
+  const finished = computeReminder({
+    eventDate: '2026-12-25',
+    orderStatus: 'Confirmed',
+    previous: { sentDates: ['2026-12-22', '2026-12-23', '2026-12-24'], status: 'sent' },
+    now: new Date('2026-12-24T12:00:00.000Z'),
+    settings,
+  });
+  assert.equal(finished.status, 'sent');
 });
 
 test('cancelled and enquiry orders are not scheduled, and a sent reminder is kept', () => {
@@ -95,13 +134,13 @@ test('cancelled and enquiry orders are not scheduled, and a sent reminder is kep
       recipient: '9876543210',
       sentAt,
       providerMessageId: 'msg-1',
+      sentDates: ['2026-12-25', '2026-12-26', '2026-12-27'],
       history: [{ status: 'sent' }],
     },
     now: new Date('2026-12-24T00:00:00.000Z'),
     settings,
   });
-  assert.equal(kept.status, 'sent');
-  assert.equal(kept.scheduledAt, sentAt);
+  assert.equal(kept.status, 'cancelled');
   assert.equal(kept.providerMessageId, 'msg-1');
 });
 
@@ -125,8 +164,8 @@ test('changing the event date recalculates a reminder that has not been sent', (
 
 test('pricing uses server amounts, not a client total', () => {
   const items = normalizeItems([
-    { name: 'Kaju katli', category: 'Sweets', quantity: 2, unit: 'Kg', rate: 800, productId: 'P1' },
-    { name: 'Extra plates', category: 'Other', quantity: 10, unit: 'Plates', rate: 20 },
+    { name: 'Kaju katli', category: 'Sweets', quantity: 2, unit: 'Kg', rate: 800, productId: 'P1', date: '2026-12-01', timeSlot: 'Morning' },
+    { name: 'Extra plates', category: 'Other', quantity: 10, unit: 'Plates', rate: 20, date: '2026-12-01', timeSlot: 'Evening' },
   ]);
   assert.equal(items[0].amount, 1600);
   assert.equal(items[1].custom, true);
@@ -143,14 +182,43 @@ test('pricing uses server amounts, not a client total', () => {
   assert.equal(roundMoney(10.1 * 2), 20.2);
 });
 
+test('referred by is required and each item needs a time of day', () => {
+  assert.throws(
+    () => normalizeCustomer({ name: 'Asha', phone: '9876543210' }),
+    (err) => err instanceof EventOrderError && /Referred by/.test(err.message),
+  );
+  assert.equal(
+    normalizeCustomer({ name: 'Asha', phone: '9876543210', referredBy: 'Ramesh' }).referredBy,
+    'Ramesh',
+  );
+  assert.equal(
+    normalizeCustomer({ name: 'Asha', phone: '9876543210', referredBy: 'Ramesh', language: 'hi' }).language,
+    'hi',
+  );
+  assert.equal(
+    normalizeCustomer({ name: 'Asha', phone: '9876543210', referredBy: 'Ramesh' }).language,
+    'en',
+  );
+  const items = normalizeItems([
+    { name: 'Ladoo', quantity: 1, unit: 'Kg', rate: 10, date: '2026-12-01', timeSlot: 'Morning' },
+  ], { now: new Date('2026-11-01T00:00:00.000Z') });
+  assert.equal(items[0].timeSlot, 'Morning');
+  assert.throws(
+    () => normalizeItems([
+      { name: 'Ladoo', quantity: 1, unit: 'Kg', rate: 10, date: '2026-12-01', timeSlot: 'Night' },
+    ], { now: new Date('2026-11-01T00:00:00.000Z') }),
+    (err) => err instanceof EventOrderError && /Morning/.test(err.message),
+  );
+});
+
 test('an item does not need a category', () => {
   const items = normalizeItems([
-    { name: 'Extra plates', quantity: 1, unit: 'Pieces', rate: 10 },
+    { name: 'Extra plates', quantity: 1, unit: 'Pieces', rate: 10, date: '2026-12-01', timeSlot: 'Afternoon' },
   ]);
   assert.equal(items[0].category, '');
   assert.equal(items[0].amount, 10);
   const productUnit = normalizeItems([
-    { name: 'Besan barfi', quantity: 1, unit: 'Pkt', rate: 520 },
+    { name: 'Besan barfi', quantity: 1, unit: 'Pkt', rate: 520, date: '2026-12-01', timeSlot: 'Morning' },
   ]);
   assert.equal(productUnit[0].unit, 'Pkt');
 });
@@ -196,7 +264,6 @@ test('phone numbers accept a leading 91 and reject short numbers', () => {
 test('an edit lists the fields and items that changed', () => {
   const before = {
     customer: { name: 'Test', phone: '9654454444', alternatePhone: '', address: '' },
-    event: { type: 'Birthday', name: '', date: '2026-11-26', time: '15:15', venue: '', guestCount: null, deliveryType: 'Delivery' },
     items: [{ productId: 'P1', name: 'Chena Toast', quantity: 1, unit: 'KGS', rate: 540 }],
     discount: 0,
     additionalCharges: 0,
@@ -207,7 +274,6 @@ test('an edit lists the fields and items that changed', () => {
   const lines = describeOrderChanges(before, {
     ...before,
     customer: { ...before.customer, name: 'Ravi' },
-    event: { ...before.event, guestCount: 40 },
     items: [
       { productId: 'P1', name: 'Chena Toast', quantity: 2, unit: 'KGS', rate: 540 },
       { productId: 'P2', name: 'Besan Barfi', quantity: 1, unit: 'Kg', rate: 520 },
@@ -216,7 +282,6 @@ test('an edit lists the fields and items that changed', () => {
   });
   assert.deepEqual(lines, [
     'Customer: Test → Ravi.',
-    'Guests set to 40.',
     'Chena Toast: 1 KGS at ₹540.00 → 2 KGS at ₹540.00.',
     'Added Besan Barfi, 1 Kg at ₹520.00.',
     'Discount: ₹0.00 → ₹50.00.',

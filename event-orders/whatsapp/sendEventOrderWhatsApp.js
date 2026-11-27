@@ -6,11 +6,11 @@ import {
   staffReminderMessage,
 } from './messages.js';
 
-async function deliver(phones, template, params) {
+async function deliver(phones, template, params, language = 'en') {
   try {
     const result = phones.length === 1
-      ? await sendWhatsAppTemplate(phones[0], template, params)
-      : await sendWhatsAppTemplateBulk(phones, template, params);
+      ? await sendWhatsAppTemplate(phones[0], template, params, language, { preserveNewlines: true })
+      : await sendWhatsAppTemplateBulk(phones, template, params, language, { preserveNewlines: true });
     if (!result?.ok) {
       return { ok: false, error: result?.error || 'WhatsApp was not sent.' };
     }
@@ -25,7 +25,7 @@ export async function sendCustomerOrderCreated(order) {
   if (!message.phone) {
     return { status: 'failed', sentAt: null, errorMessage: 'The order has no customer mobile number.' };
   }
-  const result = await deliver([message.phone], message.template, message.params);
+  const result = await deliver([message.phone], message.template, message.params, message.language);
   return {
     status: result.ok ? 'sent' : 'failed',
     sentAt: result.ok ? new Date() : null,

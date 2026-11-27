@@ -3,11 +3,12 @@
 export const DEFAULT_STAFF_PHONES = ['6363124639', '9255919666', '8570839171', '7678887476', '8307084996', '9812712739', '9717225445', '9653530327'];
 
 const TEMPLATE_DEFAULTS = {
-  EVENT_ORDER_WA_TEMPLATE_CREATED: 'event_order_created_v2',
-  EVENT_ORDER_WA_TEMPLATE_STAFF_CONFIRMED: 'event_order_staff_confirmed_v2',
-  EVENT_ORDER_WA_TEMPLATE_STAFF_CANCELLED: 'event_order_staff_cancelled_v2',
-  EVENT_ORDER_WA_TEMPLATE_STAFF_EDIT: 'event_order_staff_edit_v2',
-  EVENT_ORDER_WA_TEMPLATE_STAFF_REMINDER: 'event_order_staff_reminder_v2',
+  EVENT_ORDER_WA_TEMPLATE_CREATED: 'event_order_created_v3',
+  EVENT_ORDER_WA_TEMPLATE_CREATED_HI: 'event_order_created_hi_v3',
+  EVENT_ORDER_WA_TEMPLATE_STAFF_CONFIRMED: 'event_order_staff_confirmed_v3',
+  EVENT_ORDER_WA_TEMPLATE_STAFF_CANCELLED: 'event_order_staff_cancelled_v3',
+  EVENT_ORDER_WA_TEMPLATE_STAFF_EDIT: 'event_order_staff_edit_v3',
+  EVENT_ORDER_WA_TEMPLATE_STAFF_REMINDER: 'event_order_staff_reminder_v3',
 };
 
 export function eventOrderStaffPhones() {
@@ -25,11 +26,15 @@ export function eventOrderTemplate(envName) {
   return String(process.env[envName] || fallback).trim();
 }
 
+const CONFIRM_REPLIES = new Set(['confirm', 'confirmed', 'पुष्टि करें']);
+const CANCEL_REPLIES = new Set(['cancel', 'cancelled', 'रद्द करें']);
+const EDIT_REPLIES = new Set(['edit', 'बदलें']);
+
 export function customerReplyAction(text) {
-  const value = String(text || '').trim().toLowerCase();
-  if (value === 'confirm' || value === 'confirmed') return 'confirm';
-  if (value === 'cancel' || value === 'cancelled') return 'cancel';
-  if (value === 'edit') return 'edit';
+  const value = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (CONFIRM_REPLIES.has(value)) return 'confirm';
+  if (CANCEL_REPLIES.has(value)) return 'cancel';
+  if (EDIT_REPLIES.has(value)) return 'edit';
   return '';
 }
 
@@ -55,27 +60,31 @@ function formatInr(value) {
   }).format(amount);
 }
 
-function formatEventDateLabel(value) {
+const SLOT_LABELS = {
+  hi: { Morning: 'सुबह', Afternoon: 'दोपहर', Evening: 'शाम' },
+};
+
+function customerLanguage(order) {
+  return order?.customer?.language === 'hi' ? 'hi' : 'en';
+}
+
+function slotLabel(slot, language) {
+  const text = String(slot || '').trim();
+  return SLOT_LABELS[language]?.[text] || text;
+}
+
+function formatEventDateLabel(value, language = 'en') {
   if (!value) return '—';
   const [year, month, day] = String(value).split('-').map(Number);
   if (!year || !month || !day) return String(value);
   const noonUtc = new Date(Date.UTC(year, month - 1, day, 6, 30, 0));
-  return noonUtc.toLocaleDateString('en-IN', {
+  return noonUtc.toLocaleDateString(language === 'hi' ? 'hi-IN' : 'en-IN', {
     timeZone: 'Asia/Kolkata',
     weekday: 'short',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
   });
-}
-
-function formatEventTimeLabel(value) {
-  if (!value) return '—';
-  const [hour, minute] = String(value).split(':').map(Number);
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return String(value);
-  const suffix = hour >= 12 ? 'PM' : 'AM';
-  const hour12 = hour % 12 || 12;
-  return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`;
 }
 
 function formatQty(value) {
@@ -90,67 +99,72 @@ function clip(value, max = 900) {
   return `${text.slice(0, max - 1)}…`;
 }
 
-function eventSummary(order) {
-  const type = blank(order?.event?.type);
-  const name = String(order?.event?.name || '').trim();
-  if (!name || type === '—') return type === '—' ? name || '—' : type;
-  return `${type} — ${name}`;
+function clipLines(value, max = 900) {
+  const text = String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
 }
 
-function itemsText(order) {
+function itemsText(order, language = 'en') {
   const lines = (order?.items || []).map((item) => {
     const name = blank(item?.name);
     const qty = `${formatQty(item?.quantity)} ${blank(item?.unit)}`.trim();
-    return `${name} — ${qty} — ${formatInr(item?.amount)}`;
+    const when = [formatEventDateLabel(item?.date, language), slotLabel(item?.timeSlot, language)]
+      .filter((part) => part && part !== '—')
+      .join(', ');
+    const booking = when
+      ? (language === 'hi' ? `${name} को ${when}` : `${name} on ${when}`)
+      : name;
+    return `${booking} — ${qty} — ${formatInr(item?.amount)}`;
   });
-  return clip(lines.length ? lines.join('\n') : '—');
+  const empty = language === 'hi' ? 'कोई आइटम नहीं' : 'No items';
+  return clipLines(lines.length ? lines.join('\n') : empty);
 }
 
-function sharedFields(order) {
+function sharedFields(order, language = 'en') {
   return {
     customer_name: blank(order?.customer?.name),
     phone: blank(order?.customer?.phone),
     order_id: blank(order?.orderId),
-    event_summary: eventSummary(order),
-    event_date: formatEventDateLabel(order?.event?.date),
-    event_time: formatEventTimeLabel(order?.event?.time),
-    venue: blank(order?.event?.venue),
-    delivery: blank(order?.event?.deliveryType),
     address: clip(blank(order?.customer?.address), 300),
-    items: itemsText(order),
+    items: itemsText(order, language),
     total: formatInr(order?.pricing?.totalAmount),
     advance: formatInr(order?.pricing?.advanceAmount),
     balance: formatInr(order?.pricing?.balanceAmount),
+    language,
   };
 }
 
-function eventDetailsText(fields) {
-  const when = [fields.event_date, fields.event_time].filter((part) => part && part !== '—').join(' at ');
-  const summary = fields.event_summary && fields.event_summary !== '—' ? fields.event_summary : 'Event';
-  return when ? `${summary} on ${when}` : summary;
-}
-
-function placeText(fields, { includeAddress = true } = {}) {
-  const parts = [`Venue: ${fields.venue}`, `Delivery type: ${fields.delivery}`];
-  if (includeAddress) parts.push(`Address: ${fields.address}`);
-  return parts.join('. ');
+function placeText(fields) {
+  if (fields.address && fields.address !== '—') return fields.address;
+  return fields.language === 'hi' ? 'नहीं दिया गया' : 'Not provided';
 }
 
 function paymentText(fields) {
+  if (fields.language === 'hi') {
+    return `कुल - ${fields.total}. अग्रिम - ${fields.advance}. बाकी - ${fields.balance}`;
+  }
   return `Total - ${fields.total}. Advance - ${fields.advance}. Balance - ${fields.balance}`;
 }
 
 export function customerOrderMessage(order) {
-  const fields = sharedFields(order);
+  const language = customerLanguage(order);
+  const fields = sharedFields(order, language);
   return {
-    template: eventOrderTemplate('EVENT_ORDER_WA_TEMPLATE_CREATED'),
+    template: eventOrderTemplate(language === 'hi'
+      ? 'EVENT_ORDER_WA_TEMPLATE_CREATED_HI'
+      : 'EVENT_ORDER_WA_TEMPLATE_CREATED'),
+    language,
     phone: order?.customer?.phone,
     params: {
       customer_name: fields.customer_name,
       order_id: fields.order_id,
-      event_details: eventDetailsText(fields),
-      place: placeText(fields),
       items: fields.items,
+      place: placeText(fields),
       payment: paymentText(fields),
     },
   };
@@ -164,9 +178,8 @@ export function staffConfirmedMessage(order) {
       customer_name: fields.customer_name,
       phone: fields.phone,
       order_id: fields.order_id,
-      event_details: eventDetailsText(fields),
-      place: placeText(fields, { includeAddress: false }),
       items: fields.items,
+      place: placeText(fields),
       payment: paymentText(fields),
     },
   };
@@ -180,7 +193,6 @@ export function staffCancelledMessage(order) {
       customer_name: fields.customer_name,
       phone: fields.phone,
       order_id: fields.order_id,
-      event_details: eventDetailsText(fields),
       items: fields.items,
       payment: paymentText(fields),
     },
@@ -195,9 +207,8 @@ export function staffEditMessage(order) {
       customer_name: fields.customer_name,
       phone: fields.phone,
       order_id: fields.order_id,
-      event_details: eventDetailsText(fields),
-      place: placeText(fields, { includeAddress: false }),
       items: fields.items,
+      place: placeText(fields),
       payment: paymentText(fields),
     },
   };
@@ -211,9 +222,8 @@ export function staffReminderMessage(order) {
       customer_name: fields.customer_name,
       phone: fields.phone,
       order_id: fields.order_id,
-      event_details: eventDetailsText(fields),
-      place: placeText(fields, { includeAddress: false }),
       items: fields.items,
+      place: placeText(fields),
       balance: fields.balance,
     },
   };
